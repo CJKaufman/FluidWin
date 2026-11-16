@@ -4318,6 +4318,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };
+    gImpostazioni.elencoNascoste = [] { return gDockOk ? gDock.elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{}; };
+    gImpostazioni.mostraNascosta = [](const std::wstring& c) { if (gDockOk) gDock.mostraAppNascosta(c); };
     affianca::registro() = [](const char* s) { logf("%s", s); };   // (prima di applicaImpostazioni, che spegne lo Snap)
     gAffRiquadro.scelto = [](HWND h, const RECT& z, HMONITOR) { logf("affianca %p: casella dal riquadro dei layout", h); affiancaInRett(h, false, z, "riquadro dei layout"); };
     applicaImpostazioni();

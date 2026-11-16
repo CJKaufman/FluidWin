@@ -332,6 +332,7 @@ public:
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
+        caricaNascoste();
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -689,6 +690,31 @@ public:
     // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
     void numeriNotificheNuovi(const std::unordered_map<std::wstring, int>& c) { if (c != numeriNotifiche) { numeriNotifiche = c; dirty = true; } }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
+    std::vector<std::pair<std::wstring, std::wstring>> elencoNascoste() const {
+        std::vector<std::pair<std::wstring, std::wstring>> r;
+        r.reserve(appNascoste.size());
+        for (const auto& x : appNascoste) r.emplace_back(x.chiave, x.nome);
+        return r;
+    }
+    void nascondiApp(const std::wstring& exe, const std::wstring& aumid, const std::wstring& nome) {
+        const std::wstring c = chiaveNascosta(exe, aumid);
+        if (c == L"exe:") return;
+        for (const auto& x : appNascoste) if (x.chiave == c) return;
+        appNascoste.push_back({c, nome.empty() ? c : nome});
+        salvaNascoste();
+        appDaAggiornare = true; dirty = true;
+        aggiornaApp();
+    }
+    void mostraAppNascosta(const std::wstring& chiave) {
+        if (chiave.empty()) appNascoste.clear();
+        else appNascoste.erase(std::remove_if(appNascoste.begin(), appNascoste.end(),
+                                              [&](const AppNascosta& x) { return x.chiave == chiave; }),
+                               appNascoste.end());
+        salvaNascoste();
+        appDaAggiornare = true; dirty = true;
+        aggiornaApp();
+    }
+
 private:
     static Motore*& gIstanza() { static Motore* m = nullptr; return m; }
 
@@ -719,6 +745,51 @@ private:
     size_t primaNonFissata = 0;      // indice della prima app aperta ma non aggiunta alla barra (separatore)
     size_t primaFine = 0;            // indice della prima voce di fondo (pila, cestino, centro di controllo): altro separatore
     std::vector<std::wstring> ordineAperte;   // le app aperte restano nel posto in cui sono comparse la prima volta
+    struct AppNascosta { std::wstring chiave, nome; };
+    std::vector<AppNascosta> appNascoste;
+
+    static std::wstring chiaveNascosta(const std::wstring& exe, const std::wstring& aumid) {
+        if (!aumid.empty()) return L"aumid:" + minuscolo(aumid);
+        return L"exe:" + minuscolo(exe);
+    }
+    bool eNascosta(const std::wstring& exe, const std::wstring& aumid) const {
+        const std::wstring c = chiaveNascosta(exe, aumid);
+        const std::wstring ce = !exe.empty() ? L"exe:" + minuscolo(exe) : std::wstring();
+        for (const auto& x : appNascoste)
+            if (x.chiave == c || (!ce.empty() && x.chiave == ce)) return true;
+        return false;
+    }
+    void caricaNascoste() {
+        appNascoste.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < sizeof(wchar_t)) return;
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, 0);
+        DWORD sz = n;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &sz) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); *p; p += wcslen(p) + 1) {
+            const std::wstring s(p);
+            const size_t t = s.find(L'\t');
+            if (t == std::wstring::npos || t == 0) continue;
+            const std::wstring k = s.substr(0, t), nm = s.substr(t + 1);
+            if (k.empty() || nm.empty()) continue;
+            appNascoste.push_back({k, nm});
+        }
+    }
+    void salvaNascoste() const {
+        if (appNascoste.empty()) {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste");
+            return;
+        }
+        std::vector<wchar_t> b;
+        for (const auto& x : appNascoste) {
+            const std::wstring s = x.chiave + L"\t" + x.nome;
+            b.insert(b.end(), s.begin(), s.end());
+            b.push_back(L'\0');
+        }
+        b.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", REG_MULTI_SZ,
+                        b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
+    }
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
     bool mouseDentro = false, mouseSulDock = false; float mouseX = 0, mouseY = 0;
@@ -1076,6 +1147,7 @@ private:
             for (auto& v : nuove) {
                 if ((!id.empty() && !v.aumid.empty() && id == v.aumid) || stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
             }
+            if (!trovata && eNascosta(exe, id)) continue;
             if (!trovata) {
                 Voce v; v.exe = exe; v.aumid = id;
                 auto nm = nomiExe.find(exe);   // il nome leggibile si legge dal file una volta sola
@@ -2494,10 +2566,31 @@ private:
         const bool suApp = i >= 0 && i < (int)voci.size() && voci[i].avvio != AVVIO_LAUNCHER && voci[i].avvio != AVVIO_CONTROLLO;
         if (!suApp) {
             if (i >= 0 && i < (int)voci.size() && voci[i].uscente) return;
+            std::vector<menu::Voce> voci = {menu::titolo(L"FluidWin")};
+            HMENU sub = nullptr;
+            if (!appNascoste.empty()) {
+                sub = CreatePopupMenu();
+                for (size_t k = 0; k < appNascoste.size(); k++) {
+                    std::wstring et;
+                    for (wchar_t c : appNascoste[k].nome) { if (c == L'&') et += L"&&"; et += c; }
+                    AppendMenuW(sub, MF_STRING, 1000 + (UINT)k, et.c_str());
+                }
+                if (appNascoste.size() > 1) {
+                    AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(sub, MF_STRING, 999, testi::t(L"Mostra tutte", L"Show all"));
+                }
+                menu::Voce vn = menu::voce(testi::t(L"App nascoste", L"Hidden apps"), 0);
+                vn.sotto = sub;
+                voci.push_back(vn);
+                voci.push_back(menu::separatore());
+            }
+            voci.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
             SetForegroundWindow(icone);
-            const int s = (int)menu::mostra({menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1)},
-                                            {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            const int s = (int)menu::mostra(voci, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            if (sub) DestroyMenu(sub);
             if (s == 1 && impostazioni) impostazioni(nullptr);
+            else if (s == 999) mostraAppNascosta(L"");
+            else if (s >= 1000 && s - 1000 < (int)appNascoste.size()) mostraAppNascosta(appNascoste[s - 1000].chiave);
             return;
         }
         if (voci[i].uscente) return;
@@ -2541,7 +2634,11 @@ private:
         if (!store || exeVero) voci.push_back(menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), 3));
         if (exeVero) voci.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 4));
         if (collegamento) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Rimuovi dal dock", L"Remove from dock"), 5)); }
-        else if (!v.fissata) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6)); }
+        else if (!v.fissata) {
+            voci.push_back(menu::separatore());
+            voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6));
+            voci.push_back(menu::voce(testi::t(L"Nascondi dal dock", L"Hide from dock"), 7));
+        }
         if (!v.finestre.empty()) {
             voci.push_back(menu::separatore());
             voci.push_back(menu::voce(v.finestre.size() > 1 ? testi::t(L"Chiudi tutte le finestre", L"Close all windows") : testi::t(L"Chiudi", L"Close"), 2));
@@ -2569,6 +2666,7 @@ private:
         else if (s == 4) ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + v.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         else if (s == 5) { DeleteFileW(v.avvio.c_str()); appDaAggiornare = true; dirty = true; }   // come "Rimuovi dalla barra"
         else if (s == 6) aggiungiAlDock(v.nome, exeVero ? v.exe : L"", v.aumid, v.avvio);
+        else if (s == 7) nascondiApp(v.exe, v.aumid, v.nome);
         else if (s >= 100 && s - 100 < (int)elenco.size() && IsWindow(elenco[s - 100])) portaDavanti(elenco[s - 100]);
     }
 
