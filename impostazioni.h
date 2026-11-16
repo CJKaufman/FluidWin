@@ -35,6 +35,9 @@ struct Valori {
     int dockDistanza = 6;         // distanza fra le icone del dock, px a 100% (DISTANZA_MIN..DISTANZA_MAX)
     DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
+    bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
+    bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
+    bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
     std::wstring cursore;         // pacchetto di cursori di FluidWin in uso ("" = quelli di Windows; vedi cursori.h)
 };
@@ -118,6 +121,9 @@ inline void carica() {
     v.dockDistanza = std::clamp((int)leggiDword(L"DockDistanza", 6), DISTANZA_MIN, DISTANZA_MAX);
     v.dockColore = leggiDword(L"DockColore", 0) & (COLORE_SCELTO | 0xFFFFFF);
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
+    v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
+    v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
+    v.affianca = leggiDword(L"Affiancamento", 1);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
     v.cursore = leggiTesto(L"Cursore");
@@ -137,7 +143,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -158,32 +164,43 @@ public:
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
     // e alla chiusura ci rientra, e il centro ricompare. Un clic fuori (un'altra app prende il primo piano) le chiude
     // del tutto: il vetro torna nell'icona del centro, come il pannello. Senza (scorciatoia, menu): compaiono al centro
-    void apri(const RECT* da = nullptr) {
+    // Da dove crescono: 'da' (il pannello del centro di controllo, vedi sopra); senza, dal punto del mouse ('dalMouse':
+    // menu del dock e dell'icona nell'area di notifica, dove si e' appena cliccato) o dal centro dello schermo (ricerca).
+    // Prima crescevano solo dal centro di controllo: dagli altri menu comparivano e basta (segnalato da chi li apriva dal
+    // menu dell'icona, la via spiegata nel README)
+    void apri(const RECT* da = nullptr, bool dalMouse = false) {
         if (!v.fin && !v.crea(L"FluidWin.Impostazioni", vetro::procedura<Finestra>, this, true, 2, true, false)) return;
         if (aperta) {   // gia' aperta: viene davanti (se stava rientrando nel centro, torna a crescere)
-            if (morph < 0) { giraMorph(1); vetro::battito(v.fin, 1); }
+            if (morph < 0) { if (daPunto) fuori = false; giraMorph(1); vetro::battito(v.fin, 1); }
             SetForegroundWindow(v.fin); return;
         }
         v.aggiornaTema();
         RECT a = vetro::areaPrincipale(true);
-        if (da) {
+        POINT mouse{}; dalMouse = dalMouse && !da && GetCursorPos(&mouse);
+        if (da || dalMouse) {   // sullo schermo da cui si aprono
             MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-            if (GetMonitorInfoW(MonitorFromRect(da, MONITOR_DEFAULTTONEAREST), &mi)) a = mi.rcWork;
+            const HMONITOR m = da ? MonitorFromRect(da, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint(mouse, MONITOR_DEFAULTTONEAREST);
+            if (GetMonitorInfoW(m, &mi)) a = mi.rcWork;
         }
         v.dpi = vetro::dpiMonitor(MonitorFromPoint({a.left, a.top}, MONITOR_DEFAULTTOPRIMARY));
         const float d = v.dpi;
         // misura fissa; su schermi piccoli quanto ci sta (le sezioni sono corte, entrano comunque)
         const int w = (int)std::lround(std::min(LARGO * d, (float)(a.right - a.left) - 40 * d));
         const int h = (int)std::lround(std::min(ALTO * d, (float)(a.bottom - a.top) - 40 * d));
-        daCentro = da != nullptr; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+        daCentro = da != nullptr; daPunto = !daCentro; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
         const int x = (a.left + a.right - w) / 2, y = (a.top + a.bottom - h) / 2;   // al centro, come sempre
-        if (daCentro) {
-            rDa = *da; rA = {x, y, x + w, y + h};
-            morph = 1; mx = 0; tM = vetro::ms();
-            v.posiziona(rDa.left, rDa.top, rDa.right - rDa.left, rDa.bottom - rDa.top, HWND_TOP, SWP_SHOWWINDOW);
-            if (dockSu) dockSu(true);
-            if (registro) { char b[120]; snprintf(b, 120, "impostazioni: crescono dal centro di controllo (%ld,%ld-%ld,%ld -> %d,%d %dx%d)", rDa.left, rDa.top, rDa.right, rDa.bottom, x, y, w, h); registro(b); }
-        } else v.posiziona(x, y, w, h, HWND_TOP, SWP_SHOWWINDOW);
+        rA = {x, y, x + w, y + h};
+        if (daCentro) rDa = *da;
+        else {   // un vetro piccolo (un decimo) attorno al mouse o al centro dello schermo, dentro lo schermo
+            const int pw = std::max(1, w / 10), ph = std::max(1, h / 10);
+            const POINT c = dalMouse ? mouse : POINT{(rA.left + rA.right) / 2, (rA.top + rA.bottom) / 2};
+            const int px = std::clamp((int)c.x - pw / 2, (int)a.left, (int)a.right - pw), py = std::clamp((int)c.y - ph / 2, (int)a.top, (int)a.bottom - ph);
+            rDa = {px, py, px + pw, py + ph};
+        }
+        morph = 1; mx = 0; tM = vetro::ms();
+        v.posiziona(rDa.left, rDa.top, rDa.right - rDa.left, rDa.bottom - rDa.top, HWND_TOP, SWP_SHOWWINDOW);
+        if (daCentro && dockSu) dockSu(true);
+        if (registro) { char b[140]; snprintf(b, 140, "impostazioni: crescono da%s (%ld,%ld-%ld,%ld -> %d,%d %dx%d)", daCentro ? "l centro di controllo" : dalMouse ? "l mouse" : "l centro dello schermo", rDa.left, rDa.top, rDa.right, rDa.bottom, x, y, w, h); registro(b); }
         if (!fTitolo) {
             fTitolo = v.formato(22 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fVoce = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
@@ -208,6 +225,15 @@ public:
     void chiudi() {
         if (aperta && daCentro && tornaAlCentro && v.fin && IsWindowVisible(v.fin)) {
             if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }   // (spostata trascinandola: rientra da li')
+            else if (morph > 0) giraMorph(-1);
+            if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            vetro::battito(v.fin, 1);
+            return;
+        }
+        // aperte da un menu o dalla ricerca: rientrano nel punto da cui sono cresciute, svanendo (come chiudiFuori)
+        if (aperta && daPunto && v.fin && IsWindowVisible(v.fin)) {
+            fuori = true;
+            if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }
             else if (morph > 0) giraMorph(-1);
             if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
             vetro::battito(v.fin, 1);
@@ -246,7 +272,7 @@ public:
                     // rientrata: ricompare il centro di controllo (sopra) e questa sparisce. Si finisce a forma < 1%
                     // (pochi px dal rettangolo del centro): la coda di x^3 lasciava il vetro vuoto quasi fermo per ~100 ms
                     if (morph < 0 && (mx <= 0 || forma() < 0.01)) {
-                        if (registro) registro(fuori ? "impostazioni: chiuse nell'icona" : "impostazioni: rientrate nel centro di controllo");
+                        if (registro) registro(daPunto ? "impostazioni: rientrate nel punto da cui sono cresciute" : fuori ? "impostazioni: chiuse nell'icona" : "impostazioni: rientrate nel centro di controllo");
                         if (tornaAlCentro && !fuori) tornaAlCentro();
                         nascondi();
                         return true;
@@ -368,16 +394,23 @@ private:
          L"Spento: resta su anche sopra le finestre ingrandite", L"Off: it stays up over maximized windows too", &Valori::dockAuto, S_DOCK},
         {L"Finestre ingrandite sopra il dock", L"Maximized windows above the dock",
          L"Come la barra di Windows: si fermano sopra. Spento: fino in fondo", L"Like the Windows taskbar: they stop above. Off: full screen", &Valori::dockSpazio, S_DOCK},
+        {L"Segue il mouse sugli altri schermi", L"Follows the mouse to other screens",
+         L"Mouse in basso su un altro schermo. Spento: solo sul principale",
+         L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
          L"FluidWin si apre da solo quando accedi", L"FluidWin opens by itself when you sign in", &Valori::avvio, S_GENERALE},
+        {L"Cerca aggiornamenti", L"Check for updates",
+         L"All'avvio chiede a GitHub se c'è una versione nuova", L"At startup it asks GitHub for a new version", &Valori::aggiornamenti, S_GENERALE},
         {L"Effetto genio", L"Genie effect",
          L"Riduzione e ripristino che entrano ed escono dal dock", L"Minimize into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
         {L"Animazione di apertura", L"Open animation",
          L"Le finestre aperte da Start o dalla ricerca crescono dal centro", L"Windows opened from Start or search grow from the center", &Valori::apertura, S_ANIMAZIONI},
         {L"Animazione di chiusura", L"Close animation",
          L"La finestra si rimpicciolisce e svanisce sul posto", L"The window shrinks and fades away in place", &Valori::chiusura, S_ANIMAZIONI},
+        {L"Affiancamento di FluidWin", L"FluidWin snapping",
+         L"Bordi dello schermo e Win+frecce, al posto dello Snap di Windows", L"Screen edges and Win+arrows, instead of Windows Snap", &Valori::affianca, S_ANIMAZIONI},
         {L"Onda di luce della ricerca", L"Search light wave",
          L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda, S_ANIMAZIONI},
         {L"Notch", L"Notch",
@@ -404,6 +437,7 @@ private:
     // crescita dal centro di controllo e rientro (vedi apri): morph 1 cresce, -1 rientra, 0 fermo; mx 0..1 avanzamento
     // (0 = rettangolo del centro rDa, 1 = impostazioni rA); rientra: curva del rientro (vedi forma)
     bool daCentro = false, rientra = false, fuori = false, fuoriDopo = false;   // fuori: si chiudono nell'icona (vedi chiudiFuori)
+    bool daPunto = false;   // cresciute da un punto (menu, ricerca): si chiudono rientrandoci (vedi chiudi)
     int morph = 0;
     double mx = 1;
     ULONGLONG tM = 0;
@@ -674,7 +708,7 @@ private:
         if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
         if (v.fin && fuori) SetWindowPos(v.fin, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (daCentro && dockSu) dockSu(false);   // (dopo tornaAlCentro: col pannello gia' aperto il dock non scende)
-        aperta = false; daCentro = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+        aperta = false; daCentro = false; daPunto = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
     }
 
     // forma del vetro 0..1 (0 = rettangolo del centro di controllo, 1 = impostazioni). Tutte e due le direzioni

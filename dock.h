@@ -238,9 +238,18 @@ public:
     double diagLente() const { return lente; }
     // riduzione a icona col genio di FluidWin (clic sull'icona dell'app gia' in primo piano); false = non possibile
     bool (*riduci)(HWND) = nullptr;
-    // il dock e' passato a uno schermo con un'altra scala: tutte le misure sono fatte con quella di prima, FluidWin
-    // si riavvia (e riparte su quello schermo: lo schermo del dock si ricorda nel registro, SchermoDock)
-    void (*riavviami)(const char*) = nullptr;
+    // foto per l'animazione di chiusura, prima di chiudere una finestra dal menu del dock (false: niente animazione)
+    bool (*preparaChiusura)(HWND) = nullptr;
+    // il dock segue il mouse sul bordo in basso degli altri schermi (impostazione; spento resta sul principale). Si
+    // imposta prima di inizializza
+    bool altriSchermi = true;
+    void impostaAltriSchermi(bool si) {
+        if (si == altriSchermi) return;
+        altriSchermi = si; bordoAltro = nullptr;
+        // spento con il dock su un altro schermo: torna sul principale
+        const HMONITOR principale = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        if (!si && monitor != principale) { if (registro) scrivi("altri schermi spento: torna sul principale"); cambiaSchermo(principale); }
+    }
 
     // centro dello schermo del dock, ricordato fra un avvio e l'altro
     static void ricordaSchermo(const RECT& s) {
@@ -268,17 +277,16 @@ public:
     bool inizializza(HINSTANCE inst) {
         gIstanza() = this;
         // lo schermo dove stava il dock l'ultima volta (se c'e' ancora), altrimenti il principale
-        HMONITOR mon = schermoRicordato();
+        HMONITOR mon = altriSchermi ? schermoRicordato() : nullptr;
         if (!mon) mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
         monitor = mon;
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
-        UINT dx = 96, dy = 96; dpi = 1.0f;
-        if (HMODULE sh = LoadLibraryW(L"shcore.dll")) {
-            typedef HRESULT (WINAPI *Fn)(HMONITOR, int, UINT*, UINT*);
-            if (auto f = (Fn)GetProcAddress(sh, "GetDpiForMonitor")) if (SUCCEEDED(f(mon, 0, &dx, &dy))) dpi = dx / 96.0f;
-        }
+        // Misure sempre alla scala dello schermo principale, anche se il dock nasce su un altro: cosi' passa da uno
+        // schermo all'altro subito, senza ricreare niente. Prima si faceva con la scala del suo schermo e ogni
+        // passaggio a uno con un'altra scala riavviava FluidWin (2 s senza dock, con la barra di Windows che ricompariva)
+        dpi = ::vetro::dpiMonitor(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY));
         S = latoIcone * dpi; M = S * INGRANDITE;   // icone a riposo e ingrandite (impostazione: impostaLatoIcone)
         PAD = 8 * dpi; GAP = distanzaIcone * dpi; MARGINE = 8 * dpi;   // (GAP: impostazione, impostaDistanzaIcone)
         RAGGIO = raggio::vetro() * dpi;   // come gli angoli DWM del vetro: fondo e vetro devono coincidere
@@ -370,16 +378,7 @@ public:
         }
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
         if (!GetMonitorInfoW(verso, &mi)) return;
-        // scala diversa da quella con cui e' fatto il dock: si ricorda lo schermo e FluidWin riparte con la scala giusta
-        {
-            const float nuova = ::vetro::dpiMonitor(verso);
-            if (std::fabs(nuova - dpi) > 0.01f && riavviami) {
-                ricordaSchermo(mi.rcMonitor);
-                if (registro) { char b[96]; snprintf(b, 96, "schermo con un'altra scala (%.0f%% -> %.0f%%): riavvio", dpi * 100, nuova * 100); scrivi(b); }
-                riavviami("il dock e' passato a uno schermo con un'altra scala");
-                return;
-            }
-        }
+        // (uno schermo con un'altra scala non cambia niente: le misure restano quelle dello schermo principale)
         monitor = verso;
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
@@ -685,7 +684,8 @@ public:
         return L"";
     }
     // scala con cui e' fatto il dock e quella di adesso del suo schermo (cambiata dalle Impostazioni: si riparte)
-    bool scalaCambiata() const { return attivo && monitor && std::fabs(::vetro::dpiMonitor(monitor) - dpi) > 0.01f; }
+    // (il dock e' fatto alla scala dello schermo principale, su qualsiasi schermo stia)
+    bool scalaCambiata() const { return attivo && std::fabs(::vetro::dpiMonitor(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY)) - dpi) > 0.01f; }
     // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
     void numeriNotificheNuovi(const std::unordered_map<std::wstring, int>& c) { if (c != numeriNotifiche) { numeriNotifiche = c; dirty = true; } }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
@@ -1185,7 +1185,7 @@ private:
             const HMONITOR m = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
             MONITORINFO mi{}; mi.cbSize = sizeof(mi);
             const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
-            if (m && !tasti && !nascostoSchermoIntero && GetMonitorInfoW(m, &mi) && pt.y >= mi.rcMonitor.bottom - 2) {
+            if (m && altriSchermi && !tasti && !nascostoSchermoIntero && GetMonitorInfoW(m, &mi) && pt.y >= mi.rcMonitor.bottom - 2) {
                 if (m != bordoAltro) { bordoAltro = m; bordoAltroDa = adesso(); }
                 else if (adesso() - bordoAltroDa > 0.2) { bordoAltro = nullptr; spostaVerso(m); }
             } else bordoAltro = nullptr;
@@ -2306,6 +2306,12 @@ public:
     // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
     bool dockSu = false;
     void tieniSu(bool b) { if (dockSu != b) { dockSu = b; dirty = true; } }
+    // un genio verso il dock (o fuori dal dock) e' in corso: su ancora per 0,25 s (lo si chiama a ogni fotogramma del
+    // genio, quindi scende 0,25 s dopo che la finestra e' entrata)
+    void tieniPerGenio() {
+        const double fino = adesso() + 0.25;
+        if (fino > rivelaFino) { const bool prima = adesso() <= rivelaFino; rivelaFino = fino; if (!prima) { dirty = true; posizionaVetri(); } }
+    }
 
     void apriLauncher();
 
@@ -2555,6 +2561,7 @@ private:
                 if (!IsWindow(h)) continue;
                 wchar_t c[64] = L""; GetClassNameW(h, c, 64);
                 if (registro) { char b[200]; snprintf(b, sizeof(b), "chiudi dal dock: %p (%ls)%s", (void*)h, c, IsIconic(h) ? " ridotta" : ""); registro(b); }
+                if (preparaChiusura) preparaChiusura(h);   // la foto per l'animazione di chiusura (come Alt+F4)
                 PostMessageW(h, WM_SYSCOMMAND, SC_CLOSE, 0);
             }
         }

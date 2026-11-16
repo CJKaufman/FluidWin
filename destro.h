@@ -25,6 +25,7 @@
 #include <cwctype>
 #include "menu.h"
 #include "testi.h"
+#include "condividi.h"
 
 namespace destro {
 
@@ -181,6 +182,31 @@ inline std::wstring percorsoSelezionato(IFolderView2* fv) {
     }
     if (a) a->Release();
     return r;
+}
+
+// tutti i file selezionati (percorsi del file system; gli elementi virtuali, come "Questo PC", si saltano)
+inline std::vector<std::wstring> percorsiSelezionati(IFolderView2* fv) {
+    std::vector<std::wstring> r;
+    IShellItemArray* a = nullptr; DWORD n = 0;
+    if (fv && SUCCEEDED(fv->GetSelection(FALSE, &a)) && a && SUCCEEDED(a->GetCount(&n))) {
+        for (DWORD i = 0; i < n && i < 500; i++) {
+            IShellItem* it = nullptr; LPWSTR s = nullptr;
+            if (SUCCEEDED(a->GetItemAt(i, &it)) && it && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &s)) && s) { r.emplace_back(s); CoTaskMemFree(s); }
+            if (it) it->Release();
+        }
+    }
+    if (a) a->Release();
+    return r;
+}
+
+// Rinomina: il file con il fuoco entra nella modifica del nome, nella vista (desktop o Esplora file). La voce "Rinomina"
+// del menu della vista e' un comando interno di Esplora file: chiamata da qui risponde E_NOTIMPL e non fa niente
+inline bool rinomina(IFolderView2* fv, HWND radice) {
+    int i = -1;
+    if (!fv) return false;
+    if ((FAILED(fv->GetFocusedItem(&i)) || i < 0) && (FAILED(fv->GetSelectedItem(-1, &i)) || i < 0)) return false;
+    SetForegroundWindow(radice);   // (la casella del nome si apre solo nella finestra in primo piano)
+    return SUCCEEDED(fv->SelectItem(i, SVSI_EDIT));
 }
 
 // voce del menu compatto di Windows 11? (file: Apri, Apri con, Copia come percorso, Aggiungi a Preferiti, Modifica con,
@@ -365,13 +391,29 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
                 }
                 SetForegroundWindow(proprietario);
                 const UINT cmd = menu::mostra(voci, pt, proprietario, false, prepara);
+                // Rinomina e Condividi: comandi interni di Esplora file, che chiamati da un altro processo non fanno
+                // niente (provato: Rinomina E_NOTIMPL, Condividi nessuna finestra). Li fa FluidWin (vedi rinomina e
+                // condividi.h); se non riesce prova comunque il comando del menu
+                int quale = 0;
+                for (const auto& x : voci) if (x.id == cmd && cmd > 0) { quale = x.pulsante; break; }
+                bool fatto = false;
+                if (quale == menu::I_RINOMINA) {
+                    fatto = rinomina(fv, radice);
+                    if (registro) registro(fatto ? "tasto destro: rinomina (casella del nome nella vista)" : "tasto destro: rinomina non riuscita, comando del menu");
+                } else if (quale == menu::I_CONDIVIDI) {
+                    fatto = condividi::file(percorsiSelezionati(fv), pt, radice, registro);
+                }
                 if (cmd == ID_ADMIN) ShellExecuteW(radice, L"runas", file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                else if (cmd > 0) {
-                    SetForegroundWindow(radice);   // (rinomina, incolla... agiscono sulla vista)
+                else if (cmd > 0 && !fatto) {
+                    SetForegroundWindow(radice);   // (incolla, annulla... agiscono sulla vista)
                     CMINVOKECOMMANDINFOEX ci{}; ci.cbSize = sizeof(ci); ci.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
                     ci.hwnd = radice; ci.lpVerb = MAKEINTRESOURCEA(cmd - 1); ci.lpVerbW = MAKEINTRESOURCEW(cmd - 1);
                     ci.nShow = SW_SHOWNORMAL; ci.ptInvoke = pt;
-                    cm->InvokeCommand((CMINVOKECOMMANDINFO*)&ci);
+                    const HRESULT hr = cm->InvokeCommand((CMINVOKECOMMANDINFO*)&ci);
+                    if (FAILED(hr) && registro) {   // (altri comandi interni come questi si vedono qui)
+                        char b[200]; snprintf(b, 200, "tasto destro: comando '%ls' non eseguito (0x%08lx)", cmd ? std::wstring([&] { for (const auto& x : voci) if (x.id == cmd) return x.testo; return std::wstring(); }()).c_str() : L"", (unsigned long)hr);
+                        registro(b);
+                    }
                 }
             }
             if (cm3) cm3->Release();

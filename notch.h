@@ -173,11 +173,12 @@ private:
     ID2D1SolidColorBrush* pen = nullptr;
     ID2D1Bitmap *bCopertina = nullptr, *bIcona = nullptr;
 
-    // forma: larghezza, altezza e raggio inseguono il bersaglio con una molla (rimbalza un poco, come una gelatina)
+    // forma: larghezza, altezza e raggio inseguono il bersaglio con una molla (rimbalza un poco, come una gelatina).
+    // 320 e 0,76: piu' morbida di prima (420 e 0,70), con meno rimbalzo (circa 2,5% invece di 4,6%)
     struct Molla {
         double x = 0, v = 0, obj = 0;
         bool passo(double dt) {
-            const double k = 420, c = 2 * std::sqrt(k) * 0.70;
+            const double k = 320, c = 2 * std::sqrt(k) * 0.76;
             v += (-k * (x - obj) - c * v) * dt; x += v * dt;
             if (std::fabs(x - obj) < 0.3 && std::fabs(v) < 3) { x = obj; v = 0; return false; }
             return true;
@@ -211,7 +212,7 @@ private:
 
     std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero, fGrande}; }
 
-    static double adesso() { return vetro::ms() / 1000.0; }
+    static double adesso() { return vetro::secondi(); }
 
     void visibilita() {
         const bool si = acceso && abilitato && modoAtt != NASCOSTO && fin;
@@ -309,7 +310,7 @@ private:
         for (Molla* m : {&mw, &mh, &mr}) ancora |= m->passo(dt);
         if (std::fabs(livelloVis - livello) > 0.002f) { livelloVis += (livello - livelloVis) * (float)std::min(1.0, dt * 18); ancora = true; }
         else livelloVis = livello;
-        if (scenaPrima != scena) { if (t - tScena < 0.30) ancora = true; else scenaPrima = scena; }
+        if (scenaPrima != scena) { if (t - tScena < 0.32) ancora = true; else scenaPrima = scena; }   // (dissolvenza: 0,06 + 0,24)
         if ((scena == TIMER || scena == TIMER_APERTO) && t - tScena < 0.45) ancora = true;   // comparsa del timer
         if (t - tSegnoSveglio < 0.32 || t - tSegnoSilenzio < 0.32) ancora = true;           // tazzina e luna
         ridisegna();
@@ -592,9 +593,11 @@ private:
                 rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), g), strato);
                 const double t = adesso() - tScena;
                 if (scenaPrima != scena) {
-                    const float a = (float)std::clamp(1 - t / 0.12, 0.0, 1.0);
+                    // dissolvenze addolcite (smoothstep): prima erano lineari, e quella in uscita durava 0,12 s
+                    auto morbida = [](double k) { k = std::clamp(k, 0.0, 1.0); return (float)(k * k * (3 - 2 * k)); };
+                    const float a = 1 - morbida(t / 0.16);
                     if (a > 0) contenuto(scenaPrima, a);
-                    contenuto(scena, (float)std::clamp((t - 0.07) / 0.18, 0.0, 1.0));
+                    contenuto(scena, morbida((t - 0.06) / 0.24));
                 } else contenuto(scena, 1);
                 rt->PopLayer();
                 strato->Release();

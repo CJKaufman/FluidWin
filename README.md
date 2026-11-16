@@ -86,6 +86,16 @@ Alt, press Tab to move, let go to switch.
   <img src="docs/gif/ricerca.gif" width="640" alt="The search with the colored edges">
 </p>
 
+### Snapping
+
+Drag a window to the top edge of the screen to maximize it, to the left or right edge to fill half of the screen, or
+to a corner to fill a quarter. A glass preview shows where it will go, and the window glides into place. **Win+Left**
+and **Win+Right** do the same from the keyboard. Rest the mouse on the maximize button (or press **Win+Z**) to pick a
+layout: two halves, two thirds and one third, three columns or four quarters. Drag a maximized window by its title bar
+to pull it away, or double-click the title bar to restore it. FluidWin's snapping replaces the Windows one only while
+FluidWin is open (you can switch back in the settings, **Animations**). Apps started as administrator can't be snapped by
+FluidWin.
+
 ### Custom cursors
 
 Drop a cursor pack (a `.zip`, `.rar` or `.7z`, like the ones you find on DeviantArt) into the **Cursor** section of
@@ -101,6 +111,21 @@ Every feature can be turned on or off from the settings, divided into simple sec
 </p>
 
 ...and a lot more.
+
+## What's new in 1.2.3
+
+- **Snapping:** FluidWin now snaps windows itself, with animations. Drag a window to an edge or a corner, use
+  Win+Left/Right, or pick a layout from the maximize button or with **Win+Z** (see above). Maximized windows can be
+  dragged away from the title bar, and the content no longer stretches while a window changes size.
+- **Updates:** FluidWin tells you when a new version is out and can download and install it with one click (see
+  **Updates** below).
+- **Right-click menu:** it follows the mouse smoothly, submenus open reliably, and **Rename** and **Share** work.
+- The close animation plays for every window, also for apps that draw their own buttons and for Windows Settings;
+  the dock stays up until a minimizing window has gone into it.
+- The settings window opens with its animation however you open it.
+- Softer, smoother animations for the notch.
+- With more than one screen, the dock works on every screen without restarting FluidWin and without bringing back
+  the Windows taskbar.
 
 ## What's new in 1.2.2
 
@@ -158,6 +183,8 @@ A release focused on fixes and on the feedback received after 1.2.0.
 | Alt+Tab      | Overview of your open windows                 |
 | Win+Tab      | Search                                        |
 | Ctrl+Win+T   | Keep the active window always on top (or not) |
+| Win+Left/Right | Snap the active window to half of the screen |
+| Win+Z        | Choose a layout for the active window         |
 
 ## How to try it
 
@@ -179,6 +206,13 @@ From the same menu you can open the **settings** and turn each feature on or off
 right-clicking an empty spot of the dock.
 
 To remove it completely, close it and delete its folder.
+
+## Updates
+
+When a new version is published here, FluidWin tells you the next time it starts, with a small card in the top-right
+corner. Click **Download**: it downloads the new version from this page, checks that the file is exactly the published
+one, replaces itself and restarts. Nothing happens unless you click. You can turn the check off in the settings,
+**General**, **Check for updates**.
 
 ## How FluidWin is made
 
@@ -205,8 +239,8 @@ The source code is public, so anyone can inspect how FluidWin works and judge th
   you a short report (with no personal data) to paste there.
 - The interface is in **English** and **Italian** (you can switch in the settings).
 - It doesn't ask for administrator rights, doesn't touch Windows files and doesn't inject code into other apps.
-- It only goes online for the weather ([Open-Meteo](https://open-meteo.com)) and the news
-  ([ANSA](https://www.ansa.it)).
+- It only goes online for the weather ([Open-Meteo](https://open-meteo.com)), the news
+  ([ANSA](https://www.ansa.it)) and, at startup, to ask GitHub if there is a new version (no personal data is sent).
 
 ## For those who want to look at the code
 

@@ -36,6 +36,8 @@ inline int aperti = 0;
 inline bool chiudiTutti = false;
 inline void chiudi() { if (aperti > 0) chiudiTutti = true; }
 inline bool animazioni() { return animazioniInCorso && passoAnimazioni && animazioniInCorso(); }
+// registro di FluidWin (solo con --log): alla chiusura di ogni menu, quanto arrivavano in ritardo i movimenti del mouse
+inline void (*registro)(const char*) = nullptr;
 
 struct Voce {
     std::wstring testo;
@@ -111,7 +113,22 @@ private:
     // sottomenu: da quando il mouse sta sul menu padre sopra un'altra voce (0: no). Si chiude solo se ci resta un
     // attimo: andando in diagonale verso una voce del sottomenu si passa per forza sopra le voci sotto quella aperta
     ULONGLONG tAltrove = 0;
-    static constexpr ULONGLONG ATTESA_ALTROVE_MS = 350;
+    static constexpr ULONGLONG ATTESA_ALTROVE_MS = 300;
+    // Sottomenu: si aprono col mouse fermo sulla voce per un attimo (come Windows), non al solo passaggio. Prima si
+    // aprivano subito: scorrendo le voci se ne aprivano 6-7 (registro), e ognuno fermava il menu (la shell li riempie,
+    // "Apri con" cerca le app) e teneva la zona blu ferma sulla sua voce mentre il mouse era gia' altrove
+    ULONGLONG tSopra = 0;   // da quando il mouse e' sulla voce 'sopra' (per aprire il suo sottomenu)
+    static constexpr ULONGLONG ATTESA_SOTTO_MS = 200;
+    void cambiaSopra(int s) { if (s != sopra) { sopra = s; tSopra = GetTickCount64(); disegna(); } }
+    // sottomenu da aprire adesso: mouse fermo da ATTESA_SOTTO_MS sulla voce col sottomenu (true se l'ha aperto)
+    bool sottoDaAprire() {
+        if (fine || aperto >= 0 || sopra < 0 || sopra >= (int)voci.size() || !voci[sopra].sotto || !tSopra) return false;
+        if (GetTickCount64() - tSopra < ATTESA_SOTTO_MS) return false;
+        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+        RECT cr; GetClientRect(fin, &cr);
+        if (!PtInRect(&cr, c) || voceIn(c.x, c.y) != sopra) { tSopra = 0; return false; }   // (arrivata con la tastiera: niente)
+        tSopra = 0; apriSotto(sopra); return true;
+    }
     bool inSotto = false;
     // riga dei pulsanti in cima e freccia in fondo che allunga il menu con le voci "extra"
     D2D1_RECT_F rettFreccia{};
@@ -126,6 +143,8 @@ private:
     int hMax = 0;           // altezza massima della finestra
     float scorri = 0;       // di quanto sono salite le voci
     ULONGLONG tScorri = 0;  // ultimo passo dello scorrimento dai bordi
+    // diagnostica (registro): movimenti del mouse ricevuti e loro ritardo, ridisegni e loro durata
+    int nMosse = 0, nDisegni = 0; DWORD ritardoTot = 0, ritardoMax = 0; double tDisegni = 0;
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
@@ -325,6 +344,8 @@ private:
 
     void disegna() {
         if (!rt) return;
+        LARGE_INTEGER q0, qf; QueryPerformanceCounter(&q0); QueryPerformanceFrequency(&qf);
+        struct Misura { Menu* m; LARGE_INTEGER a, f; ~Misura() { LARGE_INTEGER b; QueryPerformanceCounter(&b); m->nDisegni++; m->tDisegni += (double)(b.QuadPart - a.QuadPart) * 1000 / f.QuadPart; } } misura{this, q0, qf};
         rt->BeginDraw();
         rt->Clear(D2D1::ColorF(0, 0, 0, 0));
         // velo sopra il vetro, come i pannelli del dock
@@ -361,7 +382,8 @@ private:
                 rt->DrawLine({r.left + 8 * dpi, cy}, {r.right - 8 * dpi, cy}, pen, 1.0f);
                 continue;
             }
-            const bool evid = i == sopra || i == aperto;
+            // (la voce del sottomenu aperto resta blu, tranne quando il mouse e' su un'altra voce di questo menu)
+            const bool evid = i == sopra || (i == aperto && (sopra < 0 || sopra == aperto));
             if (evid) {
                 pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1));
                 // concentrica con l'angolo del vetro (6 px piu' dentro), al massimo a pillola
@@ -539,7 +561,7 @@ private:
         POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
         RECT cr; GetClientRect(fin, &cr);
         const int qui = PtInRect(&cr, c) ? voceIn(c.x, c.y) : -1;
-        if (qui >= 0 && qui != i && !fine) { sopra = qui; disegna(); if (voci[qui].sotto) apriSotto(qui); return; }
+        if (qui >= 0 && qui != i && !fine) { sopra = qui; tSopra = GetTickCount64(); disegna(); return; }   // (il suo sottomenu: col mouse fermo)
         disegna();
     }
 
@@ -586,6 +608,7 @@ private:
             if (padre && tAltrove) controllaPadre();
             if (chiudiTutti) { fine = true; scelta = 0; }   // chiusi tutti da fuori (vedi menu::chiudi)
             if (fine) break;
+            if (sottoDaAprire()) continue;   // mouse fermo su una voce col sottomenu
             if (espanso && kEsp < 1) { passoEspansione(); if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue; }
             // apertura: dissolvenza e scivolata (150 ms)
             if (alfa < 255) {
@@ -603,6 +626,11 @@ private:
         }
         ReleaseCapture();
         chiudiAnimato();
+        if (registro && nMosse) {
+            char b[160]; snprintf(b, 160, "menu: %d movimenti del mouse, ritardo medio %lu ms, massimo %lu ms; %d ridisegni, %.1f ms in media",
+                                  nMosse, ritardoTot / nMosse, ritardoMax, nDisegni, nDisegni ? tDisegni / nDisegni : 0.0);
+            registro(b);
+        }
         return scelta;
     }
 
@@ -647,15 +675,27 @@ private:
                 RECT cr; GetClientRect(fin, &cr);
                 const bool dentro = PtInRect(&cr, p);
                 if (msg.message == WM_MOUSEMOVE) {
+                    {   // ritardo del movimento: da quando Windows l'ha generato (msg.time) a adesso
+                        const DWORD r = GetTickCount() - msg.time;
+                        if (r < 10000) { nMosse++; ritardoTot += r; ritardoMax = std::max(ritardoMax, r); }
+                    }
                     if (padre) controllaPadre();   // mouse tornato sul menu padre, su un'altra voce: il sottomenu si chiude
                     if (fine) return true;
                     // sulla freccia in fondo, senza cliccare: il menu si allunga con le altre voci
                     if (dentro && conFreccia && !espanso && p.y + scorri >= rettFreccia.top - 2 && p.y + scorri < rettFreccia.bottom + 4) { espanso = true; tEsp = GetTickCount64(); }
-                    const int s = dentro ? voceIn(p.x, p.y) : -1;
-                    if (s != sopra) {
-                        sopra = s; disegna();
-                        if (s >= 0 && voci[s].sotto) apriSotto(s);   // i sottomenu si aprono al passaggio
-                    }
+                    // Mouse su un menu padre mentre questo sottomenu e' aperto (i suoi messaggi passano da questo ciclo): la
+                    // sua zona blu segue subito il mouse; il sottomenu si chiude dopo ATTESA_ALTROVE_MS (controllaPadre).
+                    // Prima il padre restava fermo sulla voce del sottomenu finche' questo non si chiudeva
+                    if (!dentro) {
+                        for (Menu* q = padre; q; q = q->padre) {
+                            if (msg.hwnd != q->fin) continue;
+                            POINT s = p; MapWindowPoints(fin, q->fin, &s, 1);
+                            RECT qr; GetClientRect(q->fin, &qr);
+                            q->cambiaSopra(PtInRect(&qr, s) ? q->voceIn(s.x, s.y) : -1);
+                            break;
+                        }
+                    } else for (Menu* q = padre; q; q = q->padre) if (q->sopra != q->aperto) q->cambiaSopra(q->aperto);   // tornato qui
+                    cambiaSopra(dentro ? voceIn(p.x, p.y) : -1);   // (il sottomenu si apre col mouse fermo: vedi sottoDaAprire)
                     return true;
                 }
                 if (!dentro) {   // clic fuori: si chiude tutto (il clic non passa sotto, come i menu di Windows)

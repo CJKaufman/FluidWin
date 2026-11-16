@@ -39,6 +39,8 @@
 #include "ricerca.h"
 #include "banner.h"
 #include "destro.h"
+#include "aggiorna.h"
+#include "affianca.h"
 
 // ---------------------------------------------------------------------------------------------
 // Parametri
@@ -146,6 +148,8 @@ struct Anim {
     // o subito se la preparazione non va in porto (il tasto non deve mai andare perso)
     UINT       comando = 0;
     bool       comandoDato = false;
+    // affiancamento (affianca.h): comando COMANDO_POSIZIONA, la finestra va nel rettangolo 'dove' (GetWindowRect)
+    RECT       dove{};
     // ingrandimento: la miniatura sta in una finestrella sua grande quanto lei (non layered: DWM le arrotonda gli
     // angoli come alle finestre vere e le da' l'ombra), invece che nell'overlay a tutto schermo
     HWND       vetrina = nullptr;
@@ -155,6 +159,7 @@ struct Anim {
     genio::Immagine fotoPrima;       // lo stato di prima (se lo si sapeva in anticipo: tasto della capsula): sfuma nella nuova
     int        passiZ = 0;           // 0 foto da fare, 1..2 foto a schermo sotto la finestrella, 3 animazione
     std::vector<genio::Vertice> magliaZ, ombraZ;
+    std::vector<genio::Vertice> magliaNuova, magliaVecchia, magliaPrima;   // magliaZ con le uv ritagliate per ogni foto
     // La foto alla misura nuova si rifa' in sottofondo durante l'animazione: le app come Chromium ridisegnano la
     // pagina alla misura nuova solo dopo qualche fotogramma, e la prima foto (fatta subito) ha ancora l'impaginazione
     // vecchia, ancorata in alto a sinistra (contenuto spostato, che non segue la finestra). La foto nuova arriva
@@ -268,11 +273,20 @@ static HWND gDoppioH = nullptr;   // (thread principale) finestra del primo clic
 // Maiusc o Ctrl insieme) resta di Windows
 static std::atomic<HWND> gFgZoom{nullptr};
 static std::atomic<int> gFgStato{0};
+// comando "vai in questo rettangolo" (affiancamento): non e' un SC_ di Windows
+static const UINT COMANDO_POSIZIONA = 0xF00F;
+// Il comando a una finestra di un'altra app senza aspettarla: WM_SYSCOMMAND postato, oppure (affiancamento)
+// ShowWindowAsync per toglierla da ingrandita e SetWindowPos asincrono (li esegue il suo thread, in ordine)
+static void eseguiComando(HWND h, UINT comando, const RECT& dove) {
+    if (comando != COMANDO_POSIZIONA) { PostMessageW(h, WM_SYSCOMMAND, comando, 0); return; }
+    if (IsZoomed(h)) ShowWindowAsync(h, SW_SHOWNORMAL);
+    SetWindowPos(h, nullptr, dove.left, dove.top, dove.right - dove.left, dove.bottom - dove.top, SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+}
 static void daiComando(Anim& a) {
     if (!a.comando || a.comandoDato) return;
     a.comandoDato = true;
-    PostMessageW(a.hwnd, WM_SYSCOMMAND, a.comando, 0);
-    logf("comando %s dato a %p", a.comando == SC_MAXIMIZE ? "ingrandisci" : "ripristina", a.hwnd);
+    eseguiComando(a.hwnd, a.comando, a.dove);
+    logf("comando %s dato a %p", a.comando == SC_MAXIMIZE ? "ingrandisci" : a.comando == COMANDO_POSIZIONA ? "affianca" : "ripristina", a.hwnd);
 }
 
 struct InfoFinestra {
@@ -659,6 +673,7 @@ static bool haSegni(HWND h) {
 // Fuori dal guardiano (uscita, crash, avvio) resta tutto sul thread che chiama, come prima
 static void ripristinaTutte(bool conLimite = false) {
     cursori::ripristinaSeServe();   // cursori di FluidWin rimasti da un FluidWin caduto: tornano quelli di Windows
+    affianca::rimettiSnap();        // Snap di Windows spento da un FluidWin caduto (segno SnapDaRimettere): torna acceso
     ripristinaBarra();
     dock::togliAppbarRimasta();   // spazio riservato al dock rimasto da un FluidWin terminato male
     mostraBarreWindows(true);
@@ -1133,6 +1148,9 @@ static RECT rettGelatina(const Gelatina& g) {
 // La gelatina parte allora (al primo spostamento a finestra gia' normale e ridisegnata)
 static HWND gDaIngrandita = nullptr;
 static double gSganciata = 0;
+// staccata da FluidWin (staccaPasso, con lo Snap di Windows spento): la gelatina aspetta che si ridisegni
+static HWND gStaccata = nullptr;
+static double gStaccataT = 0;
 // finestra in un trascinamento di Windows (tra MOVESIZESTART e MOVESIZEEND)
 static HWND gInSpostamento = nullptr;
 // Trascinamento fatto dall'app per conto suo (senza il ciclo di spostamento di Windows, quindi senza MOVESIZESTART):
@@ -1149,6 +1167,12 @@ static void suInizioSpostamento(HWND h) {
     gInSpostamento = h;
     POINT pt; GetCursorPos(&pt);
     if ((!impostazioni::valori().gelatina || !gMovimento) && !gelatinaDi(h)) return;   // gelatina spenta nelle impostazioni
+    // staccata da FluidWin un attimo fa (staccaPasso): e' gia' normale, ma il contenuto e' ancora impaginato da
+    // ingrandita. Come per lo stacco di Windows, la gelatina parte 150 ms dopo lo stacco (LOCATIONCHANGE, gDaIngrandita)
+    if (h == gStaccata) {
+        gStaccata = nullptr;
+        if (ora() - gStaccataT < 1.0 && !gelatinaDi(h)) { gDaIngrandita = h; gSganciata = gStaccataT; return; }
+    }
     if (IsZoomed(h) && !gelatinaDi(h)) { gDaIngrandita = h; gSganciata = 0; return; }
     if (Gelatina* g = gelatinaDi(h)) {
         // ripresa mentre oscillava o stava ricomparendo: si riafferra dal nuovo punto, con la stessa foto
@@ -1207,6 +1231,293 @@ static void suInizioSpostamento(HWND h) {
     gGelatine.push_back(std::move(g));
     avviaViva(gGelatine.back());
     logf("gelatina pronta %p (foto %.1f ms)", h, (ora() - t1) * 1000);
+}
+
+// ---- affiancamento (affianca.h): trascinamento sui bordi e Win+Sinistra/Destra ----
+static affianca::Anteprima gAffAnteprima;
+static HWND gAffH = nullptr;                    // finestra trascinata (spostamento, non ridimensionamento)
+static affianca::Zona gAffZona = affianca::NESSUNA;
+static HMONITOR gAffMon = nullptr;
+static SIZE gAffMisura{};                       // misura della finestra all'inizio del trascinamento (0: non ancora)
+static float gAffDpi = 0;                       // scala dello schermo su cui stava quando e' stata presa la misura
+static bool gAffAttivo = false;                 // affiancamento di FluidWin acceso (Snap di Windows spento)
+static std::atomic<HWND> gFgAff{nullptr};       // finestra in primo piano che si puo' affiancare da tastiera (gancio)
+static const UINT WM_AFFIANCA_TASTO = WM_APP + 44;   // Win+Sinistra/Destra trattenuti (wParam 0 sinistra, 1 destra)
+static bool preparaZoom(HWND h, const InfoFinestra& i, bool coprire, const char* perche);
+
+// Il comando da dare a una preparazione (Win+frecce, affiancamento): se e' gia' coperta (copertura ereditata) parte
+// subito, altrimenti quando la copertura e' pronta (passo, attesa 2 -> 3). Prima solo l'affiancamento gestiva il caso
+// gia' coperto, e Win+Su durante una gelatina restava fermo fino alla scadenza di 5 s (R20261116-010212-S3)
+static void comandoPreparato(Anim& a, UINT comando, const RECT& dove) {
+    a.comando = comando; a.dove = dove;
+    if (a.attesa == 3) { daiComando(a); a.fase = 1; a.tFase = ora(); }
+}
+
+// Mette la finestra nella casella z dello schermo m: preparata (copertura, poi il comando, poi l'animazione) se si
+// puo', altrimenti subito. PIENO e' l'ingrandimento vero di Windows (che ricorda la misura di prima da solo)
+static void affiancaInRett(HWND h, bool pieno, const RECT& v, const char* perche);
+static void affiancaIn(HWND h, affianca::Zona z, HMONITOR m, const char* perche) {
+    if (!IsWindow(h) || z == affianca::NESSUNA || !m) return;
+    logf("affianca %p: casella %d (%s)", h, (int)z, perche);
+    affiancaInRett(h, z == affianca::PIENO, affianca::rettZona(m, z), perche);
+}
+// la finestra nel rettangolo visibile v (o ingrandita, se 'pieno'): preparata se si puo', altrimenti subito
+static void affiancaInRett(HWND h, bool pieno, const RECT& v, const char* perche) {
+    if (!IsWindow(h)) return;
+    InfoFinestra* i = traccia(h);
+    if (!i || !leggiRettangoli(h, *i)) return;
+    UINT comando = COMANDO_POSIZIONA; RECT dove{};
+    if (pieno) { if (IsZoomed(h)) return; comando = SC_MAXIMIZE; }
+    else {
+        // bordi da finestra normale (dopo il comando lo sara'): da ingrandita sono altri (in alto 8 invece di 0), e
+        // con quelli la meta' veniva spostata di qualche pixel (misurato: -1,-8-901,1441 invece di 0,0-900,1440)
+        RECT b = {i->visibile.left - i->finestra.left, i->visibile.top - i->finestra.top, i->finestra.right - i->visibile.right, i->finestra.bottom - i->visibile.bottom};
+        if (IsZoomed(h)) {
+            const LONG s = std::lround(7 * scalaFinestra(h));
+            b = i->bordiOk ? i->bordi : RECT{s, 0, s, s};   // (Windows 11: 7 punti ai lati e sotto, 0 in alto)
+        }
+        dove = {v.left - b.left, v.top - b.top, v.right + b.right, v.bottom + b.bottom};
+    }
+    if (!IsZoomed(h) || !pieno) {
+        if (!animDi(h) && preparaZoom(h, *i, true, perche)) {
+            if (Anim* a = animDi(h)) { comandoPreparato(*a, comando, dove); return; }
+        }
+    }
+    eseguiComando(h, comando, dove);   // senza animazione, ma la finestra ci va comunque
+    logf("affianca %p senza preparazione: comando dato subito", h);
+}
+
+static void affiancaPasso() {
+    if (!gAffH || !IsWindow(gAffH)) { KillTimer(gMessaggi, 24); gAffAnteprima.togli(); gAffH = nullptr; return; }
+    // cambiata di misura durante il gesto: era un ridimensionamento, niente casella
+    if (RECT wr; !IsZoomed(gAffH) && GetWindowRect(gAffH, &wr)) {
+        const SIZE s = {wr.right - wr.left, wr.bottom - wr.top};
+        // passata su uno schermo con un'altra scala: l'app si ridimensiona da sola (WM_DPICHANGED), non e' un
+        // ridimensionamento dell'utente: la misura di riferimento si aggiorna (R20261116-011042-S2)
+        const float dpiOra = vetro::dpiMonitor(MonitorFromWindow(gAffH, MONITOR_DEFAULTTONEAREST));
+        if (!gAffMisura.cx || std::fabs(dpiOra - gAffDpi) > 0.01f) { gAffMisura = s; gAffDpi = dpiOra; }
+        else if (s.cx != gAffMisura.cx || s.cy != gAffMisura.cy) {
+            logf("affianca %p: cambiata di misura durante il trascinamento, niente casella", gAffH);
+            KillTimer(gMessaggi, 24); gAffAnteprima.togli(); gAffH = nullptr; gAffZona = affianca::NESSUNA; return;
+        }
+    }
+    POINT pt; GetCursorPos(&pt);
+    HMONITOR m = nullptr;
+    const affianca::Zona z = affianca::zonaDalPunto(pt, m);
+    if (z != gAffZona || m != gAffMon) {
+        gAffZona = z; gAffMon = m;
+        if (z != affianca::NESSUNA) gAffAnteprima.verso(affianca::rettZona(m, z), pt, gAffH); else gAffAnteprima.togli();
+    }
+}
+
+static void affiancaInizio(HWND h) {
+    gAffH = nullptr; gAffZona = affianca::NESSUNA; gAffMon = nullptr;
+    if (!gAffAttivo || gPausa || !finestraApp(h) || IsIconic(h) || !(GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) return;
+    // spostamento o ridimensionamento: lo dice la finestra (hit test nel punto preso). Solo barra (HTCAPTION) o zona
+    // normale (HTCLIENT: app che si spostano da sole) sono spostamenti. Prima bastava il punto dentro il rettangolo
+    // visibile, ma su Windows 11 il bordo in alto per ridimensionare e' dentro la finestra (R20261116-010212-S5)
+    POINT pt; GetCursorPos(&pt);
+    DWORD_PTR colpo = 0;
+    if (!SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &colpo)) return;
+    if (colpo != HTCAPTION && colpo != HTCLIENT) { if (gLog) logf("affianca %p: preso il bordo (hit test %d), e' un ridimensionamento", h, (int)colpo); return; }
+    gAffH = h;
+    // misura di partenza (per riconoscere un ridimensionamento): da ingrandita la si prende appena Windows la rimette
+    // normale sotto il mouse (all'inizio del trascinamento cambia misura per conto suo)
+    gAffMisura = {};
+    gAffDpi = vetro::dpiMonitor(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST));
+    if (RECT wr; !IsZoomed(h) && GetWindowRect(h, &wr)) gAffMisura = {wr.right - wr.left, wr.bottom - wr.top};
+    SetTimer(gMessaggi, 24, 15, nullptr);
+}
+
+static void affiancaFine(HWND h) {
+    if (h != gAffH) return;
+    KillTimer(gMessaggi, 24);
+    affiancaPasso();   // (l'ultima posizione del mouse)
+    const affianca::Zona z = gAffZona; const HMONITOR m = gAffMon;
+    gAffH = nullptr; gAffZona = affianca::NESSUNA;
+    gAffAnteprima.togli();
+    if (z != affianca::NESSUNA) affiancaIn(h, z, m, "trascinamento sul bordo");
+}
+
+// ---- stacco dall'ingrandita: presa dalla barra e trascinata, torna normale sotto il mouse ----
+// Con lo Snap di Windows spento (affiancamento di FluidWin) Windows non stacca piu' la finestra ingrandita trascinata
+// dalla barra: provato con SPI_SETWINARRANGING a 0 la finestra resta ingrandita e ferma, a 1 si stacca. Lo fa FluidWin:
+// la pressione sulla barra di un'ingrandita arma lo stacco; passata la soglia di trascinamento col tasto ancora giu', la
+// finestra torna normale con il punto preso sotto il mouse (in proporzione in orizzontale, alla stessa altezza nella
+// barra) e le si posta SC_MOVE|HTCAPTION: parte il trascinamento vero di Windows (provato: MOVESIZESTART, la finestra
+// segue il mouse fino al rilascio), quindi gelatina e caselle come sempre
+static bool livelloRaggiungibile(HWND h);
+static HWND gStaccaH = nullptr;                 // finestra armata (premuta sulla barra da ingrandita)
+static POINT gStaccaDa{};
+static RECT gStaccaVis{};
+static void staccaDisarma() { if (gStaccaH) KillTimer(gMessaggi, 25); gStaccaH = nullptr; }
+// alla pressione del tasto sinistro (suSinistro): si arma solo sulla barra vera (HTCAPTION) di un'ingrandita, fuori
+// dai tasti. Le barre disegnate dall'app che rispondono HTCLIENT si spostano per conto loro: non si toccano
+static void staccaForse(POINT pt) {
+    staccaDisarma();
+    // ultimo clic sulla barra di un'ingrandita, per il doppio clic non trattenuto (vedi sotto). Ogni pressione lo
+    // consuma: vale solo se e' la pressione subito prima (un clic in mezzo, altrove, interrompe la sequenza:
+    // R20261116-112214-S3)
+    static HWND barraH = nullptr; static POINT barraPt{}; static ULONGLONG barraT = 0;
+    const HWND primaH = barraH; const POINT primaPt = barraPt; const ULONGLONG primaT = barraT;
+    barraH = nullptr;
+    if (!gAffAttivo || gPausa) return;
+    HWND h = GetAncestor(WindowFromPoint(pt), GA_ROOT);
+    if (!h || !IsZoomed(h) || !finestraApp(h) || !(GetWindowLongPtrW(h, GWL_STYLE) & WS_THICKFRAME)) return;
+    RECT v;
+    if (FAILED(DwmGetWindowAttribute(h, DWMWA_EXTENDED_FRAME_BOUNDS, &v, sizeof v))) return;
+    if (!PtInRect(&v, pt) || pt.y > v.top + (LONG)(56 * scalaFinestra(h))) return;
+    if (!livelloRaggiungibile(h)) return;   // (elevata: i messaggi postati non arrivano)
+    DWORD_PTR colpo = 0;
+    if (!SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &colpo)) return;
+    if (colpo == HTCLIENT) {   // barra fatta da una finestra figlia (Esplora file): risponde lei
+        if (HWND f = WindowFromPoint(pt); f && f != h && GetAncestor(f, GA_ROOT) == h) {
+            DWORD_PTR cf = 0;
+            if (SendMessageTimeoutW(f, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &cf)) colpo = cf;
+        }
+    }
+    if (colpo != HTCAPTION) return;
+    // sui tasti delle barre classiche l'hit test di Windows 11 risponde spesso HTCAPTION (vedi suSinistro): vale il
+    // rettangolo dei tasti di DWM. Prima del doppio clic: una pressione su un tasto non e' un clic sulla barra
+    // (R20261116-112214-S1)
+    TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
+    DWORD_PTR ok = 0;
+    if (SendMessageTimeoutW(h, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tb, SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &ok))
+        for (int k = 2; k <= 5; k++)
+            if (tb.rgrect[k].right > tb.rgrect[k].left && PtInRect(&tb.rgrect[k], pt) && !(tb.rgstate[k] & STATE_SYSTEM_INVISIBLE)) return;
+    // seconda pressione di un doppio clic arrivata fin qui: non l'ha trattenuta il gancio (animazioni spente, foto non
+    // riuscita), quindi non la ripristina nessuno. Con lo Snap di Windows spento Windows non lo fa (vedi suSinistro)
+    const ULONGLONG adesso = GetTickCount64();
+    if (h == primaH && adesso - primaT <= GetDoubleClickTime() && std::abs(pt.x - primaPt.x) <= GetSystemMetrics(SM_CXDOUBLECLK) &&
+        std::abs(pt.y - primaPt.y) <= GetSystemMetrics(SM_CYDOUBLECLK)) {
+        PostMessageW(h, WM_SYSCOMMAND, SC_RESTORE, 0);
+        logf("doppio clic sulla barra di %p ingrandita: ripristinata da FluidWin (senza preparazione)", h);
+        return;
+    }
+    barraH = h; barraPt = pt; barraT = adesso;
+    gStaccaH = h; gStaccaDa = pt; gStaccaVis = v;
+    SetTimer(gMessaggi, 25, 15, nullptr);
+}
+// timer 25: col tasto ancora giu' e il mouse oltre la soglia, la finestra si stacca
+static void staccaPasso() {
+    const HWND h = gStaccaH;
+    if (!h || !IsWindow(h) || !IsZoomed(h)) { staccaDisarma(); return; }
+    // (GetAsyncKeyState legge i tasti fisici: con i tasti scambiati il sinistro logico e' il destro)
+    if (!(GetAsyncKeyState(GetSystemMetrics(SM_SWAPBUTTON) ? VK_RBUTTON : VK_LBUTTON) & 0x8000)) { staccaDisarma(); return; }
+    POINT pt; GetCursorPos(&pt);
+    // soglia: quella del trascinamento di Windows, almeno quella del doppio clic (un doppio clic un po' mosso ingrandisce
+    // o ripristina, non stacca)
+    const UINT dpi = scala::dpiSchermo(MonitorFromPoint(gStaccaDa, MONITOR_DEFAULTTONEAREST));
+    const int sx = std::max(GetSystemMetricsForDpi(SM_CXDRAG, dpi), GetSystemMetricsForDpi(SM_CXDOUBLECLK, dpi));
+    const int sy = std::max(GetSystemMetricsForDpi(SM_CYDRAG, dpi), GetSystemMetricsForDpi(SM_CYDOUBLECLK, dpi));
+    if (std::abs(pt.x - gStaccaDa.x) <= sx && std::abs(pt.y - gStaccaDa.y) <= sy) return;
+    staccaDisarma();
+    WINDOWPLACEMENT wp{}; wp.length = sizeof wp;
+    if (!GetWindowPlacement(h, &wp)) { logf("stacco %p: posizione normale non letta", h); return; }
+    const LONG w = wp.rcNormalPosition.right - wp.rcNormalPosition.left, hh = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+    if (w <= 0 || hh <= 0) return;
+    // bordi invisibili da finestra normale (da ingrandita sono altri; Windows 11: 7 punti ai lati e sotto, 0 in alto)
+    const InfoFinestra* i = traccia(h);
+    const LONG s7 = std::lround(7 * scalaFinestra(h));
+    const RECT b = (i && i->bordiOk) ? i->bordi : RECT{s7, 0, s7, s7};
+    const double frac = std::clamp((gStaccaDa.x - gStaccaVis.left) / (double)std::max(1L, gStaccaVis.right - gStaccaVis.left), 0.0, 1.0);
+    const LONG vl = pt.x - std::lround(frac * (w - b.left - b.right)), vt = pt.y - (gStaccaDa.y - gStaccaVis.top);
+    const RECT dove = {vl - b.left, vt - b.top, vl - b.left + w, vt - b.top + hh};
+    gStaccata = h; gStaccataT = ora();
+    eseguiComando(h, COMANDO_POSIZIONA, dove);
+    // (lParam: il punto, come lo manda DefWindowProc per un trascinamento dalla barra)
+    PostMessageW(h, WM_SYSCOMMAND, SC_MOVE | HTCAPTION, MAKELPARAM((short)pt.x, (short)pt.y));
+    logf("stacco %p dall'ingrandita: %ldx%ld a %ld,%ld, trascinamento passato a Windows", h, w, hh, dove.left, dove.top);
+}
+
+// Win+Sinistra/Destra: meta' schermo; da meta' verso il bordo, sullo schermo accanto (se c'e'); da meta' verso il centro,
+// al centro; fra i quarti, quello accanto. Dall'ingrandita: la meta' di quel lato
+static void suAffiancaTasto(bool destra, HWND h) {
+    using namespace affianca;
+    if (!IsWindow(h)) return;
+    InfoFinestra* i = traccia(h);
+    if (!i || !leggiRettangoli(h, *i)) return;
+    HMONITOR m = MonitorFromRect(&i->visibile, MONITOR_DEFAULTTONEAREST);
+    const Zona ora = IsZoomed(h) ? PIENO : zonaDi(i->visibile, m);
+    Zona z = destra ? DESTRA : SINISTRA;
+    switch (ora) {
+        case SINISTRA: case DESTRA:
+            if ((ora == SINISTRA) == destra) z = CENTRO;          // verso il centro: staccata, al centro
+            else {                                                 // verso il bordo: sullo schermo accanto, se c'e'
+                MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(m, &mi);
+                const POINT oltre = {destra ? mi.rcMonitor.right + 1 : mi.rcMonitor.left - 2, (mi.rcMonitor.top + mi.rcMonitor.bottom) / 2};
+                const HMONITOR m2 = MonitorFromPoint(oltre, MONITOR_DEFAULTTONULL);
+                if (!m2) return;
+                m = m2; z = destra ? SINISTRA : DESTRA;
+            }
+            break;
+        case ALTO_SX: case ALTO_DX: z = destra ? ALTO_DX : ALTO_SX; break;
+        case BASSO_SX: case BASSO_DX: z = destra ? BASSO_DX : BASSO_SX; break;
+        default: break;
+    }
+    if (z == ora) return;
+    affiancaIn(h, z, m, destra ? "Win+Destra" : "Win+Sinistra");
+}
+
+// ---- riquadro dei layout (affianca::Riquadro) ----
+static affianca::Riquadro gAffRiquadro;
+static bool livelloRaggiungibile(HWND h);
+static HWND gIngrH = nullptr;      // finestra col mouse sopra il tasto ingrandisci
+static RECT gIngrTasto{};          // il tasto (schermo)
+static double gIngrDa = 0;         // da quando il mouse e' fermo li'
+
+// col mouse fermo 0,45 s sul tasto ingrandisci (senza tasti premuti) si apre il riquadro, come in Windows 11. Dal timer
+// da 60 ms: costa poco (rettangolo della finestra) finche' il mouse non e' nell'angolo in alto a destra di una finestra
+static void controllaTastoIngrandisci() {
+    if (!gAffAttivo || gPausa || gAffRiquadro.aperta() || gAffH ||
+        ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000)) { gIngrH = nullptr; return; }
+    POINT p; GetCursorPos(&p);
+    const HWND h = GetAncestor(WindowFromPoint(p), GA_ROOT);
+    RECT wr;
+    if (!h || IsIconic(h) || !(GetWindowLongPtrW(h, GWL_STYLE) & WS_MAXIMIZEBOX) || !GetWindowRect(h, &wr)) { gIngrH = nullptr; return; }
+    const double sc = scalaFinestra(h);
+    if (p.y > wr.top + (LONG)((IsZoomed(h) ? 8 : 0) + 60 * sc) || p.x < wr.right - (LONG)(260 * sc)) { gIngrH = nullptr; return; }
+    if (h == gIngrH && PtInRect(&gIngrTasto, p)) {   // ancora sul tasto: dopo 0,45 s il riquadro
+        if (ora() - gIngrDa >= 0.45) {
+            gIngrH = nullptr;
+            if (finestraApp(h) && livelloRaggiungibile(h)) gAffRiquadro.mostra(h, POINT{(gIngrTasto.left + gIngrTasto.right) / 2, gIngrTasto.bottom}, gIngrTasto, false);
+        }
+        return;
+    }
+    // il tasto: rettangolo di DWM (barre classiche) o hit test (barre disegnate dall'app che rispondono HTMAXBUTTON)
+    RECT tasto{};
+    TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
+    DWORD_PTR ok = 0;
+    if (SendMessageTimeoutW(h, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tb, SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &ok) &&
+        tb.rgrect[3].right > tb.rgrect[3].left && !(tb.rgstate[3] & STATE_SYSTEM_INVISIBLE)) tasto = tb.rgrect[3];
+    else {
+        DWORD_PTR colpo = 0;
+        if (SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM(p.x, p.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &colpo) && colpo == HTMAXBUTTON)
+            tasto = {p.x - (LONG)(23 * sc), wr.top, p.x + (LONG)(23 * sc), p.y + (LONG)(14 * sc)};
+    }
+    if (!PtInRect(&tasto, p)) { gIngrH = nullptr; return; }
+    gIngrH = h; gIngrTasto = tasto; gIngrDa = ora();
+}
+
+// Win+Z: il riquadro per la finestra in primo piano, sotto il suo tasto ingrandisci (o in alto a destra)
+static void riquadroDaTastiera(HWND h) {
+    if (!IsWindow(h) || gAffRiquadro.aperta()) return;
+    RECT wr; if (!GetWindowRect(h, &wr)) return;
+    const double sc = scalaFinestra(h);
+    RECT tasto = {wr.right - (LONG)(140 * sc), wr.top, wr.right - (LONG)(92 * sc), wr.top + (LONG)(32 * sc)};
+    TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
+    DWORD_PTR ok = 0;
+    if (SendMessageTimeoutW(h, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tb, SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &ok) &&
+        tb.rgrect[3].right > tb.rgrect[3].left && !(tb.rgstate[3] & STATE_SYSTEM_INVISIBLE)) tasto = tb.rgrect[3];
+    gAffRiquadro.mostra(h, POINT{(tasto.left + tasto.right) / 2, tasto.bottom}, tasto, true);
+}
+
+// acceso o spento (impostazione, pausa): lo Snap di Windows fa il contrario
+static void aggiornaAffiancamento() {
+    const bool vuole = impostazioni::valori().affianca && !gPausa;
+    if (vuole == gAffAttivo) return;
+    gAffAttivo = vuole;
+    if (vuole) affianca::spegniSnap(); else { affianca::rimettiSnap(); gAffAnteprima.subito(); gAffRiquadro.chiudi(); gAffH = nullptr; KillTimer(gMessaggi, 24); }
 }
 
 static void suFineSpostamento(HWND h) {
@@ -1684,9 +1995,25 @@ static bool preparaChiusura(HWND h) {
     return true;
 }
 
-// la finestra e' sparita (nascosta o distrutta): parte l'animazione
+struct Anim;
+static Anim* animDi(HWND h);
+static genio::Immagine fotoPerChiusura(HWND h, RECT& da);
+
+// la finestra e' sparita (nascosta, nascosta da DWM o distrutta): parte l'animazione
 static void avviaChiusura(HWND h) {
-    for (auto& c : gChiusure) if (c.h == h && c.t0 < 0) { c.t0 = ora(); logf("chiusura animata %p", h); PostMessageW(gMessaggi, WM_NULL, 0, 0); }
+    bool c0 = false;
+    for (auto& c : gChiusure) if (c.h == h) { c0 = true; if (c.t0 < 0) { c.t0 = ora(); logf("chiusura animata %p", h); PostMessageW(gMessaggi, WM_NULL, 0, 0); } }
+    if (c0 || gPausa || !gGenioOk || !gMovimento || !impostazioni::valori().chiusura || schermoInteroAttivo()) return;
+    // Nessuna chiusura preparata, ma c'e' la foto fatta alla pressione nella zona dei tasti disegnati dall'app (Discord,
+    // VS Code, l'app di Claude: il loro hit test dice "zona normale" e non si sa se sara' riduci, ingrandisci o chiudi):
+    // era una chiusura. Prima quella foto si buttava ("nascosta, ridotta o chiusa") e la finestra spariva di colpo
+    Chiusura c; c.h = h;
+    c.foto = fotoPerChiusura(h, c.da);
+    if (!c.foto.srv) return;
+    c.tIntento = c.t0 = ora();
+    gChiusure.push_back(c);
+    logf("chiusura animata %p dalla foto della pressione", h);
+    PostMessageW(gMessaggi, WM_NULL, 0, 0);
 }
 
 // foto di chiusure mai avvenute (l'app e' rimasta aperta): via dopo 4 s
@@ -1789,6 +2116,10 @@ static void passo(double t) {
     std::vector<genio::Elemento> elementi;
     elementiCoperture(elementi);   // sotto a tutto il resto: sono solo lo sfondo dietro finestre appena nate
     bool serveGenio = false;
+    // Genio verso il dock o fuori dal dock in corso: il dock resta su finche' la finestra non e' entrata (o uscita), poi
+    // scende. Prima saliva solo se gia' voleva nascondersi quando il genio chiedeva l'icona: riducendo una finestra con
+    // dietro una ingrandita, il dock decideva di nascondersi un attimo dopo e scendeva mentre la finestra ci entrava
+    if (gDockOk && std::any_of(gAnim.begin(), gAnim.end(), [](const Anim& a) { return a.genio && a.tipo != Tipo::Pronta; })) gDock.tieniPerGenio();
     for (auto it = gAnim.begin(); it != gAnim.end();) {
         Anim& a = *it;
         bool finita = !IsWindow(a.hwnd);
@@ -1906,7 +2237,7 @@ static void passo(double t) {
             } else if (!viva) {
                 annulla("nascosta, ridotta o chiusa"); finita = true;   // (niente foto ferma al posto di una finestra sparita)
             } else if (a.attesa == 3) {
-                if (mossa && (IsZoomed(a.hwnd) != FALSE) != a.zoomAllaPressione) {
+                if (mossa && ((IsZoomed(a.hwnd) != FALSE) != a.zoomAllaPressione || (a.comando == COMANDO_POSIZIONA && a.comandoDato))) {
                     // si sta ingrandendo (o ripristinando) sotto la foto: si parte adesso, senza aspettare l'evento
                     if (InfoFinestra* fi = traccia(a.hwnd); fi && leggiRettangoli(a.hwnd, *fi)) avviaZoom(a.hwnd, *fi);
                     elementiZoom(a, 0, 0, 1.0, elementi);
@@ -2165,6 +2496,20 @@ static void fotoDelClic(HWND h, const InfoFinestra& i, POINT pt) {
     logf("foto del clic %p (tasti disegnati dall'app) in %.1f ms", h, (ora() - t0) * 1000);
 }
 
+// Foto per una chiusura non preparata (vedi avviaChiusura): quella della preparazione dell'ingrandimento fatta alla
+// pressione nella zona dei tasti disegnati dall'app (che si annulla: la finestra torna come prima, se ricompare), o
+// quella del clic. Vuota se non ce n'e'
+static genio::Immagine fotoPerChiusura(HWND h, RECT& da) {
+    genio::Immagine f;
+    if (Anim* a = animDi(h); a && a->zoomAtteso && a->fotoPrima.srv && !a->chiudi) {
+        f = a->fotoPrima; a->fotoPrima = {}; da = a->da;
+        annullaAnimDi(h);
+    } else if (gFotoClic.h == h && gFotoClic.foto.srv && ora() - gFotoClic.t <= 2.0) {
+        f = gFotoClic.foto; gFotoClic.foto = {}; gFotoClic.h = nullptr; da = gFotoClic.vis;
+    }
+    return f;
+}
+
 // riduzione non prevista subito dopo un clic in alto a destra: genio dalla foto del clic
 static bool riduciDallaFotoDelClic(HWND h) {
     if (gFotoClic.h != h || !gFotoClic.foto.srv || ora() - gFotoClic.t > 2.0) return false;
@@ -2241,6 +2586,56 @@ static bool tastiDaHitTest(HWND h, const RECT& v, double sc) {
 // coprire: subito (tasto) o solo alla seconda pressione (primo clic sulla barra)
 static bool preparaZoom(HWND h, const InfoFinestra& i, bool coprire, const char* perche) {
     if (!zoomAnimato()) return false;
+    // Un ingrandimento ancora in corso o una gelatina che si assesta (lasciata) non fanno piu' rinunciare: finiscono
+    // adesso (la finestra torna opaca alla sua misura vera) e si prepara da li'. Prima si rinunciava e l'ingrandimento
+    // partiva senza animazione (registro: 3 casi su 4 erano questi). Solo con 'coprire': la foto del primo clic sulla
+    // barra non deve fermare una gelatina (il clic che la fa partire)
+    // Non si chiude e si ricomincia (la finestra tornerebbe opaca e lo stile layered dovrebbe essere tolto prima di
+    // poterla ricoprire: "stile layered ancora da togliere", misurato): si EREDITANO la copertura e l'immagine che e'
+    // a schermo adesso. La finestra resta invisibile sotto, senza un fotogramma scoperto
+    if (coprire && h != gInSpostamento && h != gDaIngrandita) {
+        genio::Immagine eredita; const char* daChi = nullptr;
+        // (solo se la finestra e' davvero ancora nascosta e lo stile layered non si sta togliendo: nelle fasi finali
+        // dell'ingrandimento la finestra vera e' gia' tornata, e una copertura "ereditata" non coprirebbe niente:
+        // R20261116-010212-S4)
+        const bool coperta = GetPropW(h, PROP_NASCOSTA) && !GetPropW(h, PROP_STILE);
+        if (Anim* p = animDi(h); coperta && p && p->zoom && !p->zoomAtteso && !p->chiudi) {
+            genio::Immagine& u = p->fotoZ.srv ? p->fotoZ : p->fotoPrima;   // la foto alla misura nuova, se c'e' gia'
+            eredita = u; u = {};
+            chiudiMiniatura(*p); liberaFotoZoom(*p);
+            for (auto it = gAnim.begin(); it != gAnim.end(); ++it) if (&*it == p) { gAnim.erase(it); break; }
+            daChi = "dell'ingrandimento in corso";
+        } else if (Gelatina* g = gelatinaDi(h); coperta && g && g->lasciata && g->nascosta) {
+            genio::Immagine& u = g->vivaPronta ? g->viva : g->foto;          // com'e' la finestra adesso
+            genio::Immagine& altra = g->vivaPronta ? g->foto : g->viva;
+            eredita = u; u = {}; altra.libera(); fermaViva(*g);
+            for (auto it = gGelatine.begin(); it != gGelatine.end(); ++it) if (&*it == g) { gGelatine.erase(it); break; }
+            daChi = "della gelatina";
+        }
+        if (daChi) {
+            RECT wr{};
+            if (!eredita.srv || !GetWindowRect(h, &wr)) {   // (senza immagine: torna com'era, e niente animazione)
+                eredita.libera(); rendiVisibileFinestra(h);
+                logf("ingrandimento non preparato %p (%s): preso il posto %s senza immagine", h, perche, daChi);
+                return false;
+            }
+            Anim n;
+            n.hwnd = h; n.tipo = Tipo::Ripristina; n.zoom = true; n.zoomAtteso = true; n.coprire = true;
+            n.da = n.attuale = n.a = i.visibile; n.fin = wr; n.zoomAllaPressione = IsZoomed(h) != FALSE;
+            n.t0 = n.tFase = n.tCoperta = ora(); n.tLimite = n.t0 + GetDoubleClickTime() / 1000.0;
+            n.sorgente = sorgenteDa(i); n.wrRilettura = wr;
+            n.fotoPrima = eredita;
+            n.attesa = 3;   // gia' coperta
+            alfaFinestra(h, ALFA_INVISIBILE);
+            gAnim.push_back(n);
+            // (gia' coperta: niente da trattenere. Prima qui si armava l'attesa del rilascio, che nessuno sbloccava
+            // piu' fino alla scadenza del gancio: R20261116-010212-S2)
+            rimandaTrattenuti(h);
+            PostMessageW(gMessaggi, WM_NULL, 0, 0);
+            logf("ingrandimento preparato %p (%s): preso il posto %s, copertura ereditata", h, perche, daChi);
+            return true;
+        }
+    }
     // (ogni rinuncia nel registro: per capire le finestre che non si animano)
     const char* no = animDi(h) ? "un'altra animazione in corso" : gelatinaDi(h) ? "gelatina in corso" : aperturaDi(h) ? "appena aperta" :
                      (h == gDaIngrandita || h == gInSpostamento) ? "in trascinamento" : !IsWindowVisible(h) ? "non visibile" :
@@ -2256,7 +2651,7 @@ static bool preparaZoom(HWND h, const InfoFinestra& i, bool coprire, const char*
     n.sorgente = sorgenteDa(i);
     n.wrRilettura = wr;
     n.rilettura = stampa::avvia(h, wr.right - wr.left, wr.bottom - wr.top, THREAD_PRIORITY_ABOVE_NORMAL);
-    if (!n.rilettura) return false;
+    if (!n.rilettura) { logf("ingrandimento non preparato %p (%s): foto non avviata (%s)", h, perche, IsHungAppWindow(h) ? "app che non risponde" : "un'altra foto della finestra in corso"); return false; }
     gAnim.push_back(n);
     if (coprire) attendiRilascio(h);   // un rilascio veloce aspetta la copertura
     PostMessageW(gMessaggi, WM_NULL, 0, 0);
@@ -2280,6 +2675,7 @@ static void aggiornaFgZoom() {
         if (st && !livelloRaggiungibile(f)) st = 0;   // (WM_SYSCOMMAND verso una finestra elevata non arriva)
     }
     gFgStato = st; gFgZoom = st ? f : nullptr;
+    gFgAff = (gAffAttivo && f && finestraApp(f) && !IsIconic(f) && IsWindowVisible(f) && (GetWindowLongPtrW(f, GWL_STYLE) & WS_THICKFRAME) && livelloRaggiungibile(f)) ? f : nullptr;
     if (gDoppioH && f != gDoppioH) { if (Anim* v = animDi(gDoppioH); v && v->zoomAtteso && !v->coprire) annullaAnimDi(gDoppioH); gDoppioH = nullptr; disarmaDoppioClic(); }
 }
 
@@ -2288,7 +2684,7 @@ static void suZoomTasto(UINT comando, HWND h) {
     if (!IsWindow(h)) return;
     InfoFinestra* i = traccia(h);
     if (i && leggiRettangoli(h, *i) && !animDi(h) && preparaZoom(h, *i, true, comando == SC_MAXIMIZE ? "Win+Su" : "Win+Giu")) {
-        if (Anim* a = animDi(h)) { a->comando = comando; return; }
+        if (Anim* a = animDi(h)) { comandoPreparato(*a, comando, RECT{}); return; }
     }
     // non preparata: il comando subito, come avrebbe fatto Windows
     PostMessageW(h, WM_SYSCOMMAND, comando, 0);
@@ -2312,12 +2708,19 @@ static void suSinistro(WPARAM w, POINT pt) {
         // seconda pressione sulla barra, trattenuta dal gancio: ora si copre, poi riparte
         Anim* a = gDoppioH ? animDi(gDoppioH) : nullptr;
         gUltimaPressione = gDoppioH; gDoppioH = nullptr;
-        if (a && a->zoomAtteso && !a->coprire && a->attesa < 3 && !a->chiudi) { a->coprire = true; a->fase = 0; attendiRilascio(a->hwnd); logf("doppio clic sulla barra di %p: si copre", a->hwnd); }
+        if (a && a->zoomAtteso && !a->coprire && a->attesa < 3 && !a->chiudi) {
+            a->coprire = true; a->fase = 0; attendiRilascio(a->hwnd); logf("doppio clic sulla barra di %p: si copre", a->hwnd);
+            // con lo Snap di Windows spento il doppio clic sulla barra di un'ingrandita non la ripristina piu' (provato:
+            // SPI_SETWINARRANGING a 0 resta ingrandita, a 1 si ripristina): il comando lo da' FluidWin, a copertura
+            // pronta. (Se l'app la ripristina da se', SC_RESTORE su una finestra normale non fa niente)
+            if (gAffAttivo && IsZoomed(a->hwnd)) comandoPreparato(*a, SC_RESTORE, RECT{});
+        }
         else rimandaTrattenuti(nullptr);
         PostMessageW(gMessaggi, WM_NULL, 0, 0);
         return;
     }
     gUltimaPressione = nullptr;
+    staccaForse(pt);   // (anche con le animazioni spente: e' un comportamento, non un effetto)
     if (gPausa || !zoomAnimato()) return;
     HWND h = GetAncestor(WindowFromPoint(pt), GA_ROOT);
     if (!h || IsIconic(h) || !finestraApp(h)) return;
@@ -2354,9 +2757,16 @@ static void suSinistro(WPARAM w, POINT pt) {
         ingrandisci = sul(3);
         // riduci (2) e chiudi (5): li prepara suCattura (genio, chiusura). Presi per la barra, la foto del possibile doppio
         // clic bloccava la preparazione del genio (misurato su Free Download Manager: riduzione senza genio)
-        if (!ingrandisci && (sul(2) || sul(5))) return;
+        if (!ingrandisci && sul(5)) { preparaChiusura(h); return; }   // (vedi sotto)
+        if (!ingrandisci && sul(2)) return;
     }
-    if (colpo == HTMINBUTTON || colpo == HTCLOSE) return;
+    // chiudi: la foto per l'animazione si fa qui, alla pressione. Prima la faceva solo suCattura, e le app che non
+    // catturano il mouse sul tasto (Impostazioni e le altre app di Windows) si chiudevano senza animazione
+    // (se il rettangolo di DWM dice "ingrandisci", vale lui: sulle finestre classiche ingrandite l'hit test di Windows
+    // 11 risponde HTMINBUTTON anche sul tasto ripristina, misurato: hit test 8 a 1729,11. Con il controllo dell'hit test
+    // prima, il ripristino col tasto non si animava mai)
+    if (!ingrandisci && colpo == HTCLOSE) { preparaChiusura(h); return; }
+    if (!ingrandisci && colpo == HTMINBUTTON) return;
     if (ingrandisci) { preparaZoom(h, *i, true, "tasto ingrandisci"); return; }
     // tasti disegnati dall'app (HTCLIENT): angolo in alto a destra, 170 x 48 punti. Puo' essere riduci, ingrandisci o
     // chiudi: si prepara lo stesso, e decide quello che succede (vedi suRiduci; chiusa o nascosta: si annulla)
@@ -2571,32 +2981,50 @@ static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector
         const double sx = c == 0 ? -1 : (c == OC - 1 ? 1 : 0), sy = r == 0 ? -1 : (r == OR - 1 ? 1 : 0);
         a.ombraZ[r * OC + c] = {(float)(b.x + sx * M), (float)(b.y + sy * M), (float)(b.u + sx * M / fw), (float)(b.v + sy * M / fh)};
     }
-    // angoli: sempre 24 px e tondi a schermo (raggio delle finestre), riportati alla scala della foto nei due versi
+    // Le foto non si stirano: stirata sull'intera griglia, la foto di una finestra 800x500 che diventa 900x1440 si
+    // allungava di quasi tre volte in verticale (testo e icone deformati per tutto il tragitto). Ogni foto si disegna
+    // in scala uniforme, ancorata in alto a sinistra come fa una finestra vera quando cambia misura: quello che esce
+    // dal rettangolo si taglia. Se il rettangolo e' piu' grande della foto, la foto di sotto (la nuova) si ingrandisce
+    // solo quanto basta a coprirlo, uguale nei due versi; quelle che sfumano sopra restano alla loro misura e fuori
+    // non c'e' niente (si vede la nuova): ingrandita per coprire, la foto di una meta' schermo che diventa intera
+    // raddoppiava (scritte enormi a inizio ingrandimento, provato).
     const double pm = (pv + pl) / 2, larg = std::max(1.0, dw + (aw - dw) * pm), alt = std::max(1.0, dh + (ah - dh) * pm);
     const double R = raggioDi(a.hwnd);
+    // nw x nh: misura a schermo della foto quando e' al naturale (la finestra da cui e' presa)
+    auto elementoFoto = [&](const genio::Immagine& img, double nw, double nh, double alfaFoto, bool copre,
+                            std::vector<genio::Vertice>& maglia) {
+        nw = std::max(1.0, nw); nh = std::max(1.0, nh);
+        const double s = copre ? std::max({1.0, larg / nw, alt / nh}) : 1.0;
+        const double usaU = larg / (nw * s), usaV = alt / (nh * s);   // (oltre 1 solo per quelle di sopra)
+        maglia = a.magliaZ;
+        for (genio::Vertice& m : maglia) { m.u = (float)(m.u * usaU); m.v = (float)(m.v * usaV); }
+        genio::Elemento e{&img, a.a, a.a, 0, alfaFoto};
+        e.maglia = maglia.data(); e.colonne = ZOOM_C; e.righe = ZOOM_R;
+        e.finU = std::min(1.0, usaU); e.finV = std::min(1.0, usaV);
+        if (!copre) {
+            // dove finisce prima del rettangolo il bordo sfuma (64 px a schermo), e la foto si fa piu' leggera quanto
+            // meno del rettangolo copre: senza, a meta' ingrandimento si vedeva un taglio netto sulla foto nuova
+            // la fascia cresce con quanto il rettangolo supera la foto, fino a 64 px: tutta subito appena la superava,
+            // un punto 16 px dentro il bordo passava in un fotogramma da opaco a un quarto (R20261116-105638-S1)
+            const double k = scala::dpiSchermo(MonitorFromWindow(a.hwnd, MONITOR_DEFAULTTONEAREST)) / 96.0 * 64.0;
+            if (usaU > 1) e.sfumaX = std::min(k, larg - nw) * std::max(1, img.w) / nw;
+            if (usaV > 1) e.sfumaY = std::min(k, alt - nh) * std::max(1, img.h) / nh;
+            e.alfa *= std::min(1.0, 1.0 / std::max(1.0, usaU * usaV));
+        }
+        // angoli: sempre del raggio delle finestre a schermo, riportati ai pixel della foto
+        e.raggio = R * std::max(1, img.w) / (nw * s); e.raggioY = R * std::max(1, img.h) / (nh * s);
+        el.push_back(e);
+    };
     genio::Elemento o{&base, a.a, a.a, 0, alfa};
     o.maglia = a.ombraZ.data(); o.colonne = OC; o.righe = OR; o.ombra = true; o.raggio = R * fw / larg;
     el.push_back(o);
-    genio::Elemento e{&a.fotoZ, a.a, a.a, 0, alfa};
-    e.maglia = a.magliaZ.data(); e.colonne = ZOOM_C; e.righe = ZOOM_R; e.raggio = R * fw / larg; e.raggioY = R * fh / alt;
-    el.push_back(e);
+    elementoFoto(a.fotoZ, aw, ah, alfa, true, a.magliaNuova);
     // la foto sostituita da una rilettura sfuma sopra la nuova (vedi rileggiFotoZoom)
-    if (a.fotoZVecchia.srv && a.alfaVecchia > 0) {
-        genio::Elemento v{&a.fotoZVecchia, a.a, a.a, 0, alfa * a.alfaVecchia};
-        v.maglia = a.magliaZ.data(); v.colonne = ZOOM_C; v.righe = ZOOM_R;
-        v.raggio = R * a.fotoZVecchia.w / larg; v.raggioY = R * a.fotoZVecchia.h / alt;
-        el.push_back(v);
-    }
-    // lo stato di prima sopra, che sfuma nel nuovo nella prima meta' del tragitto (niente impaginazione "sfasata")
-    if (a.fotoPrima.srv) {
-        const double sfuma = a.alfaPrima;   // resta finche' la pagina nuova non si e' assestata (vedi rileggiFotoZoom)
-        if (sfuma > 0) {
-            genio::Elemento p{&a.fotoPrima, a.a, a.a, 0, alfa * sfuma};
-            p.maglia = a.magliaZ.data(); p.colonne = ZOOM_C; p.righe = ZOOM_R;
-            p.raggio = R * a.fotoPrima.w / larg; p.raggioY = R * a.fotoPrima.h / alt;
-            el.push_back(p);
-        }
-    }
+    if (a.fotoZVecchia.srv && a.alfaVecchia > 0)
+        elementoFoto(a.fotoZVecchia, aw, ah, alfa * a.alfaVecchia, false, a.magliaVecchia);
+    // lo stato di prima sopra, che sfuma nel nuovo (niente impaginazione "sfasata"); resta finche' la pagina nuova
+    // non si e' assestata (vedi rileggiFotoZoom)
+    if (a.fotoPrima.srv && a.alfaPrima > 0) elementoFoto(a.fotoPrima, dw, dh, alfa * a.alfaPrima, false, a.magliaPrima);
 }
 
 // Ingrandita o ripristinata (le animazioni native sono spente: e' gia' al nuovo posto). Si anima solo se era
@@ -2640,9 +3068,9 @@ static void CALLBACK suEvento(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG fi
 static void gestisciEvento(DWORD ev, HWND h) {
     switch (ev) {
         case EVENT_SYSTEM_MOVESIZESTART:
-            suInizioSpostamento(h); break;
+            suInizioSpostamento(h); affiancaInizio(h); break;
         case EVENT_SYSTEM_MOVESIZEEND:
-            suFineSpostamento(h); break;
+            suFineSpostamento(h); affiancaFine(h); break;   // (dopo: gelatina lasciata, preparaZoom ne prende il posto)
         case EVENT_SYSTEM_CAPTURESTART:  suCattura(h); break;
         case EVENT_SYSTEM_CAPTUREEND:    suFineCattura(h); break;
         case EVENT_SYSTEM_MINIMIZESTART:
@@ -2673,7 +3101,8 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (gDockOk && GetAncestor(h, GA_ROOT) == h) { gDock.segnaCambiamento(); gDock.controllaFinestre(); }
             break;
         case EVENT_OBJECT_HIDE:
-            if (!gChiusure.empty()) avviaChiusura(h);
+        case EVENT_OBJECT_CLOAKED:   // (le app di Windows chiuse spariscono cosi', prima di essere distrutte)
+            if (GetAncestor(h, GA_ROOT) == h) avviaChiusura(h);
             break;
         case EVENT_OBJECT_UNCLOAKED:
             suSvelata(h);
@@ -2682,7 +3111,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
             suCreata(h);
             break;
         case EVENT_OBJECT_DESTROY:
-            if (!gChiusure.empty()) avviaChiusura(h);
+            avviaChiusura(h);
             annullaAnimDi(h); gInfo.erase(h); gNascoste.erase(h); gDaAdottare.erase(h); liberaFoto(h); gUltimoPosto.erase(h); gNateVelate.erase(h);
             if (auto at = gInAttesa.find(h); at != gInAttesa.end()) { at->second.copertura.libera(); gInAttesa.erase(at); }
             if (h == gTrascinoApp) gTrascinoApp = nullptr;
@@ -2691,6 +3120,8 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (h == gDoppioH) { gDoppioH = nullptr; disarmaDoppioClic(); }
             gTastiHT.erase(h);
             if (h == gInSpostamento) gInSpostamento = nullptr;
+            if (h == gStaccata) gStaccata = nullptr;
+            if (h == gStaccaH) staccaDisarma();
             // tutte le risorse, come a fine gelatina: prima si liberava solo la foto, la texture della copia viva restava
             // fino all'uscita (audit FW-AUDIT-003). Non liberaGelatina: durante la distruzione IsWindow puo' essere
             // ancora vero, e rimettere visibile una finestra che muore lancerebbe il thread di togliStile per niente
@@ -2751,7 +3182,12 @@ static void gestisciEvento(DWORD ev, HWND h) {
             // (si guarda GetWindowRect: quello "visibile" di DWM salta di qualche pixel quando cambia lo stile layered)
             RECT wr; GetWindowRect(h, &wr);
             // ingrandimento preparato ma la finestra si e' mossa in un altro modo (Snap Layouts, trascinata): torna visibile
-            if (a && a->zoomAtteso && !EqualRect(&wr, &a->fin)) { logf("ingrandimento preparato annullato %p (mossa senza ingrandirsi)", h); annullaAnimDi(h); break; }
+            if (a && a->zoomAtteso && !EqualRect(&wr, &a->fin)) {
+                // ...tranne l'affiancamento di FluidWin: lo spostamento e' il suo comando (l'evento puo' arrivare prima del
+                // passo dei fotogrammi, misurato: prima qui si annullava e la meta' destra compariva senza animazione)
+                if (a->comando == COMANDO_POSIZIONA && a->comandoDato && a->attesa == 3) { avviaZoom(h, it->second); break; }
+                logf("ingrandimento preparato annullato %p (mossa senza ingrandirsi)", h); annullaAnimDi(h); break;
+            }
             if (a && a->tipo == Tipo::Pronta && a->fase < 2 && !a->genio && !EqualRect(&wr, &a->fin)) annullaPronta(*a, ora());
             break;
         }
@@ -2787,8 +3223,10 @@ static void controlloSicurezza() {
 
 static NOTIFYICONDATAW gIcona;
 
+static void aggiornaAffiancamento();
 static void impostaPausa(bool p) {
     gPausa = p;
+    aggiornaAffiancamento();   // in pausa torna lo Snap di Windows
     for (auto& a : gAnim) {
         if (a.tipo != Tipo::Riduci && !(a.zoomAtteso && a.attesa < 3)) rendiVisibileFinestra(a.hwnd);
         if (a.zoomAtteso && IsWindow(a.hwnd)) daiComando(a);   // (Win+frecce: il tasto non va perso)
@@ -3083,6 +3521,27 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                     return 1;
                 }
             }
+            // Win+Z (riquadro dei layout) con l'affiancamento di FluidWin: lo fa lui, Windows non lo vede
+            if (gWinGiu && giu && k->vkCode == 'Z' && viva && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000) && !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+                const HWND f = gFgAff.load();
+                if (f && f == GetForegroundWindow()) {
+                    gFrecciaPresa = k->vkCode;
+                    gWinConAltro = true; gWinMaschera = true;
+                    PostMessageW(gMessaggi, WM_AFFIANCA_TASTO, 2, (LPARAM)f);
+                    return 1;
+                }
+            }
+            // Win+Sinistra/Destra con l'affiancamento di FluidWin: li fa lui (vedi suAffiancaTasto), Windows non li vede
+            if (gWinGiu && giu && (k->vkCode == VK_LEFT || k->vkCode == VK_RIGHT) && viva &&
+                !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000) && !(GetAsyncKeyState(VK_MENU) & 0x8000)) {
+                const HWND f = gFgAff.load();
+                if (f && f == GetForegroundWindow()) {
+                    gFrecciaPresa = k->vkCode;
+                    gWinConAltro = true; gWinMaschera = true;
+                    PostMessageW(gMessaggi, WM_AFFIANCA_TASTO, k->vkCode == VK_RIGHT, (LPARAM)f);
+                    return 1;
+                }
+            }
             if (win && giu) { if (!gWinGiu) { gWinGiu = true; gWinConAltro = false; gWinMaschera = false; } }
             else if (win) {
                 const bool solo = gWinGiu && !gWinConAltro;
@@ -3212,8 +3671,8 @@ static std::wstring diagnostica() {
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
-    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls", v.dockAuto, v.dockOpacita, v.dockSpazio,
-         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)");
+    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d", v.dockAuto, v.dockOpacita, v.dockSpazio,
+         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi);
     riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
     return t;
 }
@@ -3237,9 +3696,10 @@ static bool copiaDiagnostica() {
     return ok;
 }
 
-static void apriImpostazioni() {
+// dalMouse: aperte da un menu (crescono dal punto del clic); senza, dal centro dello schermo (ricerca)
+static void apriImpostazioni(bool dalMouse = false) {
     gImpostazioni.raggioWindhawk = raggio::windhawk();
-    gImpostazioni.apri();
+    gImpostazioni.apri(nullptr, dalMouse);
 }
 
 // applica le impostazioni (all'avvio e a ogni cambio dalla finestra)
@@ -3251,9 +3711,10 @@ static void applicaImpostazioni() {
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
     if (gDockOk) { gDock.impostaNotch(v.notch); gDock.impostaOraNelDock(v.oraDock); }
-    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio);
+    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
     aggiornaTransizioni();
+    aggiornaAffiancamento();   // affiancamento di FluidWin acceso: Snap di Windows spento (e viceversa)
     // cursori di FluidWin (cursori.h): il pacchetto scelto, o quelli di Windows
     cursori::applicaSeCambiato(v.cursore);
     // lingua cambiata: i testi si leggono al momento di disegnare, basta ridisegnare (date e nomi del dock si rifanno)
@@ -3295,6 +3756,73 @@ static void attivaFinestraInCima() {
     }
 }
 
+// ---- aggiornamenti (aggiorna.h): controllo 15 s dopo l'avvio, scaricamento solo col clic su "Scarica" ----
+// I thread lavorano su copie e consegnano con PostMessage (WM_AGGIORNA, wParam: 1 versione nuova, 2 avanzamento in
+// millesimi nel lParam, 3 installata, 4 errore); i dati passano da gAggLock
+static const UINT WM_AGGIORNA = WM_APP + 70;
+static std::mutex gAggLock;
+static aggiorna::Versione gAggNuova;   // l'ultima trovata
+static std::wstring gAggErrore;
+static std::wstring gAggVersione;      // questa (o quella finta, per le prove: --versione-finta con --log)
+static bool gAggProva = false;         // versione finta: si scarica e si controlla tutto, ma l'exe in uso non si cambia
+static std::atomic<bool> gAggInCorso{false};
+static HANDLE gAggThread = nullptr;     // il thread in corso (o finito), per aspettarlo all'uscita (R20261116-000127-S2)
+static bool avviaThreadAgg(LPTHREAD_START_ROUTINE f) {
+    if (gAggThread) { CloseHandle(gAggThread); gAggThread = nullptr; }   // (gAggInCorso: il precedente e' gia' finito)
+    gAggThread = CreateThread(nullptr, 0, f, nullptr, 0, nullptr);
+    return gAggThread != nullptr;
+}
+static aggiorna::Avviso gAggAvviso;
+
+static void controllaAggiornamenti() {
+    if (gAggInCorso.exchange(true)) return;
+    LPTHREAD_START_ROUTINE lavoro = [](LPVOID) -> DWORD {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        aggiorna::Versione v;
+        if (aggiorna::ultima(v) && aggiorna::dettagli::piuNuova(v.testo, gAggVersione)) {
+            { std::lock_guard<std::mutex> g(gAggLock); gAggNuova = std::move(v); }
+            PostMessageW(gMessaggi, WM_AGGIORNA, 1, 0);
+        } else logf("aggiornamenti: nessuna versione piu' nuova della %ls", gAggVersione.c_str());
+        gAggInCorso = false;
+        CoUninitialize();
+        return 0;
+    };
+    if (!avviaThreadAgg(lavoro)) { logf("aggiornamenti: thread del controllo non avviato (%lu)", GetLastError()); gAggInCorso = false; }
+}
+
+static void scaricaAggiornamento() {
+    // (gia' in corso un controllo o uno scaricamento: l'avviso lo dice invece di restare fermo)
+    if (gAggInCorso.exchange(true)) { gAggAvviso.errore(testi::t(L"Un controllo \u00e8 gi\u00e0 in corso, riprova tra poco", L"A check is already running, try again shortly")); return; }
+    LPTHREAD_START_ROUTINE lavoro = [](LPVOID) -> DWORD {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        aggiorna::Versione v; { std::lock_guard<std::mutex> g(gAggLock); v = gAggNuova; }
+        std::wstring perche; int ultimo = -1;
+        const bool ok = aggiorna::installa(v, perche, [&](double x) {
+            const int m = (int)(x * 1000); if (m / 10 != ultimo / 10) { ultimo = m; PostMessageW(gMessaggi, WM_AGGIORNA, 2, m); } }, gAggProva);
+        if (!ok) { std::lock_guard<std::mutex> g(gAggLock); gAggErrore = perche; }
+        PostMessageW(gMessaggi, WM_AGGIORNA, ok ? 3 : 4, 0);
+        gAggInCorso = false;
+        CoUninitialize();
+        return 0;
+    };
+    // (prima, se il thread non partiva, l'avviso restava fermo su "Scaricamento 0%" senza tasti: R20261116-000127-S3)
+    if (!avviaThreadAgg(lavoro)) {
+        logf("aggiornamenti: thread dello scaricamento non avviato (%lu)", GetLastError());
+        gAggInCorso = false;
+        gAggAvviso.errore(testi::t(L"Impossibile avviare lo scaricamento", L"Couldn't start the download"));
+    }
+}
+
+static void suAggiorna(WPARAM w, LPARAM l) {
+    if (w == 1) {
+        aggiorna::Versione v; { std::lock_guard<std::mutex> g(gAggLock); v = gAggNuova; }
+        logf("aggiornamenti: avviso per la %ls (questa %ls)", v.testo.c_str(), gAggVersione.c_str());
+        gAggAvviso.mostra(v, gAggVersione);
+    } else if (w == 2) gAggAvviso.avanzamento(l / 1000.0);
+    else if (w == 3) { gAggAvviso.fatto(); SetTimer(gMessaggi, 22, 900, nullptr); }   // (si legge "Riavvio...", poi si riavvia)
+    else if (w == 4) { std::wstring e; { std::lock_guard<std::mutex> g(gAggLock); e = gAggErrore; } gAggAvviso.errore(e); }
+}
+
 static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
     // Explorer riavviato (o andato in crash): la sua area di notifica e' nuova e vuota, l'icona di FluidWin va rimessa
     static const UINT WM_BARRA_CREATA = RegisterWindowMessageW(L"TaskbarCreated");
@@ -3309,6 +3837,8 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_STILE_TOLTO) { stileTolto((HWND)w, l != 0); return 0; }
     if (m == WM_SINISTRO) { suSinistro(w, POINT{GET_X_LPARAM(l), GET_Y_LPARAM(l)}); return 0; }
     if (m == WM_ZOOM_TASTO) { suZoomTasto((UINT)w, (HWND)l); return 0; }
+    if (m == WM_AFFIANCA_TASTO) { if (w == 2) riquadroDaTastiera((HWND)l); else suAffiancaTasto(w != 0, (HWND)l); return 0; }
+    if (m == WM_AGGIORNA) { suAggiorna(w, l); return 0; }
     switch (m) {
         case WM_TRAY:
             if (LOWORD(l) == WM_RBUTTONUP || LOWORD(l) == WM_LBUTTONUP) {
@@ -3323,7 +3853,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 if (GetForegroundWindow() == h) attivaFinestraInCima();   // il fuoco non resta alla nostra finestra invisibile
                 if (scelta == 1) impostaPausa(!gPausa);
                 else if (scelta == 2) PostQuitMessage(0);
-                else if (scelta == 3) apriImpostazioni();
+                else if (scelta == 3) apriImpostazioni(true);
             }
             return 0;
         case WM_DISPLAYCHANGE:
@@ -3401,13 +3931,18 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             gPanoramica.apri(w == 1);   // ha un suo ciclo dei messaggi finche' resta aperta (w = 1: da Alt+Tab)
             return 0;
         case WM_RICERCA: logf("ricerca"); gRicerca.apri(); return 0;
-        case WM_IMPOSTAZIONI: apriImpostazioni(); return 0;
+        case WM_IMPOSTAZIONI: apriImpostazioni(w == 1); return 0;   // (w = 1: come da un menu, dal punto del mouse)
         case WM_PANNELLO: if (gDockOk) gDock.apriPannelloIsola((int)w); return 0;
         case WM_CHIUDI_FG:   // Alt+F4: foto, poi la chiusura normale (quella che farebbe Windows)
             if (IsWindow((HWND)w)) { preparaChiusura((HWND)w); PostMessageW((HWND)w, WM_SYSCOMMAND, SC_CLOSE, 0); }
             return 0;
         case WM_TIMER:
             if (w == 13) { gBattito = GetTickCount64(); return 0; }   // battito per l'hook della tastiera (uiViva)
+            if (w == 24) { affiancaPasso(); return 0; }   // trascinamento: casella sotto il mouse e anteprima
+            if (w == 25) { staccaPasso(); return 0; }     // stacco dall'ingrandita trascinata dalla barra
+            if (w == 21) { KillTimer(h, 21); if (impostazioni::valori().aggiornamenti) controllaAggiornamenti(); return 0; }
+            if (w == 22) { KillTimer(h, 22); gAggAvviso.nascondi(); SetTimer(h, 23, 260, nullptr); return 0; }   // (esce animato, poi il riavvio)
+            if (w == 23) { KillTimer(h, 23); if (gAggProva) logf("aggiornamenti: prova, niente riavvio"); else riavvia("aggiornamento installato"); return 0; }
             if (w == TIMER_ALT_TAB) {
                 // Alt ancora premuto: compare la panoramica. Se quella di prima si sta ancora chiudendo, si riprova tra poco
                 if (gPanoramica.aperta()) { SetTimer(h, TIMER_ALT_TAB, 30, nullptr); return 0; }
@@ -3431,6 +3966,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
             if (w == 7) {
+                controllaTastoIngrandisci();   // mouse fermo sul tasto ingrandisci: riquadro dei layout
                 if (gFotoClic.foto.srv && ora() - gFotoClic.t > 2.5) liberaFotoClic();   // nessuna riduzione dopo il clic
                 controllaAngolo();
                 if (!gChiusure.empty()) pulisciChiusure();
@@ -3533,6 +4069,9 @@ static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
         } else if (ferma && WaitForSingleObject(ferma, 0) == WAIT_OBJECT_0) r = WAIT_OBJECT_0;
     }
     if (r == WAIT_OBJECT_0) ExitProcess(0);   // riavvio voluto: ci pensa il FluidWin nuovo
+    // aggiornamento interrotto fra le due rinomine (crash, chiusura da Gestione attivita'): senza FluidWin.exe nessuno
+    // lo potrebbe piu' avviare; il guardiano (che gira dalla stessa cartella) lo rimette (R20261116-000127-S1)
+    aggiorna::recupera(aggiorna::dettagli::exeInUso());
     ripristinaTutte(true);   // (i banner di Windows restano spenti finche' l'opzione e' accesa: vedi banner.h)
     // (un thread di ripristino rimasto appeso dentro un'altra app non deve tenere vivo il guardiano: ExitProcess lo
     // chiude senza aspettarlo; il ritorno normale passerebbe dai distruttori statici con quel thread ancora attivo)
@@ -3657,6 +4196,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool riavviato = false, vuoleLog = false;
+    std::wstring versioneFinta;   // --versione-finta x.y.z (solo con --log): per provare l'avviso degli aggiornamenti
     for (int i = 1; argv && i < argc; i++) {
         // --guardiano / --lancia-guardiano <pid> <processo> <evento> (maniglie ereditate: vedi guardiano)
         const bool g = !wcscmp(argv[i], L"--guardiano"), lg = !wcscmp(argv[i], L"--lancia-guardiano");
@@ -3673,6 +4213,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             if (HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, wcstoul(argv[i + 1], nullptr, 10))) { WaitForSingleObject(p, 15000); CloseHandle(p); }
         }
         if (!wcscmp(argv[i], L"--log")) vuoleLog = true;
+        if (!wcscmp(argv[i], L"--versione-finta") && i + 1 < argc) versioneFinta = argv[i + 1];
     }
     if (argv) LocalFree(argv);
 
@@ -3701,10 +4242,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     logf("genio disponibile: %d", (int)gGenioOk);
     salvaStatoBarra();                      // prima che il dock nasconda la barra di Windows
     gDock.riduci = riduciDalDock;
+    gDock.preparaChiusura = preparaChiusura;
     gDock.registro = [](const char* s) { logf("dock: %s", s); };
     cursori::registro = [](const char* s) { logf("%s", s); };
     cursori::pulisciAvanzi();   // installazioni di cursori interrotte: recupero (prima di leggere quale pacchetto e' scelto)
     impostazioni::carica();   // prima di tutto: la lingua dei testi (dock compreso)
+    gDock.altriSchermi = impostazioni::valori().dockSchermi;   // (spento: il dock nasce sul principale)
     gDockOk = gDock.inizializza(inst);
     if (!gDockOk) { gDock.chiudi(); ripristinaBarra(); }
     else { mostraBarreWindows(false); gDock.controllaFinestre(); }
@@ -3745,7 +4288,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     logf("indicatore del volume: %d (errore %lu), thread principale %lu", (int)gOsdOk, gOsdOk ? 0 : GetLastError(), GetCurrentThreadId());
     gPanoramica.idonea = finestraApp;
     gRicerca.elencoApp = []() { return gDockOk ? gDock.elencoApp() : std::vector<std::pair<std::wstring, std::wstring>>{}; };
-    gRicerca.apriImpostazioni = apriImpostazioni;
+    gRicerca.apriImpostazioni = [] { apriImpostazioni(false); };   // (dalla ricerca: crescono dal centro dello schermo)
     gRicerca.conOnda = []() { return gMovimento && impostazioni::valori().onda; };
     gRicerca.registro = [](const char* s) { logf("%s", s); };
     gBanner.isola = []() { return gDockOk ? gDock.rettIsolaSchermo() : vetro::areaPrincipale(true); };
@@ -3770,16 +4313,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.cambiato = applicaImpostazioni;
     gImpostazioni.copiaDiagnostica = copiaDiagnostica;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
-    gDock.impostazioni = [](const RECT* da) { gImpostazioni.raggioWindhawk = raggio::windhawk(); gImpostazioni.apri(da); };
+    // (senza rettangolo: dal menu del dock, crescono dal punto del clic)
+    gDock.impostazioni = [](const RECT* da) { gImpostazioni.raggioWindhawk = raggio::windhawk(); gImpostazioni.apri(da, da == nullptr); };
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };
-    gDock.riavviami = riavvia;
+    affianca::registro() = [](const char* s) { logf("%s", s); };   // (prima di applicaImpostazioni, che spegne lo Snap)
+    gAffRiquadro.scelto = [](HWND h, const RECT& z, HMONITOR) { logf("affianca %p: casella dal riquadro dei layout", h); affiancaInRett(h, false, z, "riquadro dei layout"); };
     applicaImpostazioni();
     // banner di FluidWin spenti: quelli di Windows tornano com'erano anche se l'ultima chiusura e' stata brusca
     // (FluidWin e guardiano chiusi insieme, per esempio togliendo la corrente)
     if (!impostazioni::valori().banner) if (const int restano = banner::ripristinaBannerWindows()) logf("banner di Windows: %s %d", restano < 0 ? "chiave delle copie non apribile, niente ripristinato" : "copie non ripristinate (restano):", restano);   // opzione spenta: banner di Windows come prima
     SetTimer(gMessaggi, 7, 60, nullptr);   // angolo della panoramica
+    // aggiornamenti: via il FluidWin.exe di prima (se si viene da un aggiornamento), controllo tra 15 s (non rallenta
+    // l'avvio; con l'opzione spenta non si va in rete)
+    aggiorna::dettagli::registro() = [](const char* s) { logf("%s", s); };
+    aggiorna::pulisci();
+    gAggProva = gLog && !versioneFinta.empty();
+    gAggVersione = gAggProva ? versioneFinta : aggiorna::dettagli::versioneDi(aggiorna::dettagli::exeInUso());
+    gAggAvviso.scarica = scaricaAggiornamento;
+    SetTimer(gMessaggi, 21, 15000, nullptr);
 
     if (gDockOk) {
         gLauncherTasto = !schermoInteroAttivo();
@@ -3805,12 +4358,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         // CREATE: comparsa nativa spenta in tempo; HIDE: chiusure animate
         SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, suEvento, 0, 0, fl),
         SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, suEvento, 0, 0, fl),
-        SetWinEventHook(EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, suEvento, 0, 0, fl),   // aperture delle app di Windows
+        SetWinEventHook(EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, suEvento, 0, 0, fl),   // aperture e chiusure delle app di Windows
     };
 
     // i menu e la panoramica hanno un loro ciclo dei messaggi: mentre sono aperti fanno avanzare loro le animazioni
     menu::animazioniInCorso = daDisegnare;
     menu::passoAnimazioni = unFotogramma;
+    if (gLog) menu::registro = [](const char* s) { logf("%s", s); };
 
     // ciclo principale: messaggi quando non c'e' niente da animare, un passo per fotogramma del compositore quando si anima
     MSG msg;
@@ -3842,6 +4396,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // (rimanda i clic trattenuti e toglie il gancio prima che il processo finisca: al massimo mezzo secondo)
     if (gThreadMouseH) { WaitForSingleObject(gThreadMouseH, 500); CloseHandle(gThreadMouseH); gThreadMouseH = nullptr; }
     impostaPausa(true);
+    condividi::ferma();   // annulla la preparazione dei file senza aspettare prima di ripristinare Windows
     cursori::togli();   // di nuovo i cursori di Windows
     if (gDockOk) gDock.chiudi();
     gBanner.chiudiLettore();
@@ -3856,6 +4411,20 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gFineStile = true;
     ripristinaTutte();
     Shell_NotifyIconW(NIM_DELETE, &gIcona);
+    // thread degli aggiornamenti: la richiesta in corso si interrompe e lo si aspetta (al massimo 5 s) prima di chiudere
+    // il registro e i dati che usa. Se non finisce (rete appesa), il processo si chiude senza passare dai distruttori
+    // statici con il thread ancora vivo: Windows e' gia' rimesso a posto (R20261116-000127-S2)
+    aggiorna::ferma();
+    if (!condividi::ferma(5000)) {
+        logf("condividi: il provider non finisce, chiusura dopo il ripristino di Windows");
+        ReleaseMutex(mutex);
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
+    if (gAggThread && WaitForSingleObject(gAggThread, 5000) != WAIT_OBJECT_0) {
+        logf("aggiornamenti: il thread non finisce, chiusura senza aspettarlo");
+        ReleaseMutex(mutex);
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     if (gLog) fclose(gLog);
     ReleaseMutex(mutex);
     return 0;

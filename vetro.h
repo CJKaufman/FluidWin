@@ -283,6 +283,12 @@ inline ULONGLONG ms() {
     static const double f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (double)q.QuadPart / 1000.0; }();
     LARGE_INTEGER c; QueryPerformanceCounter(&c); return (ULONGLONG)(c.QuadPart / f);
 }
+// secondi con i decimali, per le molle: con i millisecondi interi a 60 Hz il passo alternava 16 e 17 ms (un piccolo
+// tremolio nelle animazioni del notch)
+inline double secondi() {
+    static const double f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (double)q.QuadPart; }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c); return (double)c.QuadPart / f;
+}
 // al posto di SetTimer(fin, id, 15) e KillTimer(fin, id) per le animazioni
 inline void battito(HWND h, UINT id) { if (h) Battito::io().iscrivi(h, id); }
 inline void fermaBattito(HWND h, UINT id) { if (h) Battito::io().togli(h, id); }

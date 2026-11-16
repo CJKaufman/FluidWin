@@ -46,14 +46,18 @@ struct Elemento {
     double alza = 0;      // ombra: 0 = finestra posata (come l'ombra di Windows), 1 = sollevata (piu' morbida e raccolta)
     double raggio = -1;   // angoli in pixel della foto (< 0: raggioAngoli)
     double raggioY = -1;  // ... in verticale, se la foto e' stirata diversamente nei due versi (< 0: come raggio)
+    // parte della foto usata dalla griglia (uv da 0 a questi valori): la foto ritagliata invece che stirata. Gli angoli
+    // arrotondati vanno sul bordo della parte usata, non su quello della foto
+    double finU = 1, finV = 1;
+    double sfumaX = 0, sfumaY = 0;   // pixel della foto su cui sfuma il suo bordo destro/basso, se finisce prima della griglia
 };
 
 static const int RIGHE = 160;   // righe della griglia: piu' righe = curve piu' morbide
 
-struct Costanti { float origine[2]; float dimensione[2]; float alfa; float raggio; float texDim[2]; float ombra; float pad[3]; };
+struct Costanti { float origine[2]; float dimensione[2]; float alfa; float raggio; float texDim[2]; float ombra; float pad[3]; float estensione[2]; float sfumaBordo[2]; };
 
 static const char* SHADER = R"(
-cbuffer C : register(b0) { float2 origine; float2 dimensione; float alfa; float raggio; float2 texDim; float ombra; float alza; float raggioY; };
+cbuffer C : register(b0) { float2 origine; float2 dimensione; float alfa; float raggio; float2 texDim; float ombra; float alza; float raggioY; float2 estensione; float2 sfumaBordo; };
 Texture2D tex : register(t0);
 SamplerState camp : register(s0);
 struct VO { float4 pos : SV_POSITION; float2 uv : TEXCOORD0; };
@@ -77,7 +81,8 @@ float4 ps(VO i) : SV_TARGET {
         return float4(0, 0, 0, s);
     }
     // angoli arrotondati come le finestre di Windows 11 (ellittici nella foto se e' stirata: tondi sullo schermo)
-    float2 q = min(px, texDim - px);
+    float2 E = texDim * estensione;   // (parte della foto usata: ritagliata, gli angoli vanno sul suo bordo)
+    float2 q = min(px, E - px);
     float2 r2 = float2(raggio, raggioY > 0 ? raggioY : raggio);
     float m = 1.0;
     if (q.x < r2.x && q.y < r2.y) {
@@ -87,6 +92,11 @@ float4 ps(VO i) : SV_TARGET {
     }
     // le foto sono opache (alfa 1); le immagini vive di Windows.Graphics.Capture sono premoltiplicate, con il bordo
     // sottile di DWM semitrasparente e gli angoli gia' tondi: si rispetta la loro trasparenza
+    // fuori dalla foto (uv oltre 1: una foto che sfuma sopra l'altra non si ingrandisce, vedi elementiZoom) non c'e'
+    // niente; il bordo dove finisce sfuma su sfumaBordo pixel (mezzo pixel se 0), cosi' sulla foto di sotto non
+    // resta un taglio netto
+    float2 fb = max(sfumaBordo, 0.5);
+    m *= saturate((texDim.x - px.x) / fb.x + 0.5 / fb.x) * saturate((texDim.y - px.y) / fb.y + 0.5 / fb.y);
     float a = m * alfa;
     return float4(c.rgb * a, c.a * a);
 }
@@ -341,6 +351,8 @@ public:
                 c->ombra = e.ombra ? 1.0f : 0.0f;
                 c->pad[0] = (float)e.alza;
                 c->pad[1] = (float)e.raggioY;
+                c->estensione[0] = (float)e.finU; c->estensione[1] = (float)e.finV;
+                c->sfumaBordo[0] = (float)e.sfumaX; c->sfumaBordo[1] = (float)e.sfumaY;
                 ctx->Unmap(cbuf, 0);
             }
             ctx->PSSetShaderResources(0, 1, &e.img->srv);
