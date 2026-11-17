@@ -185,7 +185,7 @@ inline auto Motore::applicaTutteApp(std::vector<AppL> nuove) -> void {
         filtra();
         if (lAperto) { lSel = std::clamp(sel, 0, std::max(0, (int)filtrate.size() - 1)); lScrollObj = std::clamp(scr, 0.0, lScrollMax()); }
     }
-    for (auto& a : tutteApp) if (!a.icona && !a.provata) { a.provata = true; chiediIcona(sorgenteIconaL(a), 96); }
+    for (auto& a : tutteApp) if (!a.icona && !a.provata && (!mostraGiochi || !appartieneAiGiochi(a))) { a.provata = true; chiediIcona(sorgenteIconaL(a), 96); }
     if (registro) { char b[64]; snprintf(b, 64, "launcher: %d app", (int)tutteApp.size()); scrivi(b); }
 }
 
@@ -235,6 +235,13 @@ static inline std::wstring normalizzaPercorso(std::wstring p) {
     while (p.size() > 3 && p.back() == L'\\') p.pop_back();
     if (p.size() == 2 && p[1] == L':') p.push_back(L'\\');
     return p;
+}
+
+static inline std::wstring chiaveTitolo(const std::wstring& s) {
+    std::wstring r;
+    r.reserve(s.size());
+    for (wchar_t c : s) if (iswalnum(c)) r.push_back((wchar_t)towlower(c));
+    return r;
 }
 
 static inline std::wstring leggiValoreReg(HKEY k, const wchar_t* nome) {
@@ -413,6 +420,36 @@ inline auto Motore::salvaGiochiAggiunti(const std::vector<std::pair<std::wstring
     RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiAggiunti", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
 }
 
+inline auto Motore::leggiIconeGiochi() -> std::unordered_map<std::wstring, std::wstring> {
+    std::unordered_map<std::wstring, std::wstring> m;
+    DWORD cb = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return m;
+    std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return m;
+    for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+        const std::wstring r = p;
+        const size_t tab = r.find(L'\t');
+        if (tab == std::wstring::npos || tab == 0 || tab + 1 >= r.size()) continue;
+        m[minuscolo(r.substr(0, tab))] = r.substr(tab + 1);
+    }
+    return m;
+}
+
+inline auto Motore::salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m) -> void {
+    std::vector<wchar_t> buf;
+    for (const auto& [chiave, percorso] : m) {
+        if (chiave.empty() || percorso.empty()) continue;
+        const std::wstring k = minuscolo(chiave);
+        buf.insert(buf.end(), k.begin(), k.end());
+        buf.push_back(L'\t');
+        buf.insert(buf.end(), percorso.begin(), percorso.end());
+        buf.push_back(L'\0');
+    }
+    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi"); return; }
+    buf.push_back(L'\0');
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+}
+
 inline auto Motore::leggiTuttiGiochi(bool subito) -> void {
     gLetto = adesso();
     if (subito) { Cronometro cr(this, "leggiTuttiGiochi"); applicaTuttiGiochi(elencaTuttiGiochi()); return; }
@@ -433,12 +470,13 @@ inline auto Motore::applicaTuttiGiochi(std::vector<AppL> nuovi) -> void {
     }
     for (auto& v : tuttiGiochi) if (v.icona) v.icona->Release();
     tuttiGiochi = std::move(nuovi);
-    if (lModoGiochi) {
+    {
         const int sel = lSel; const double scr = lScrollObj;
         filtra();
         if (lAperto) { lSel = std::clamp(sel, 0, std::max(0, (int)filtrate.size() - 1)); lScrollObj = std::clamp(scr, 0.0, lScrollMax()); }
     }
     for (auto& a : tuttiGiochi) if (!a.icona && !a.provata) { a.provata = true; chiediIcona(sorgenteIconaL(a), 96); }
+    if (!lModoGiochi) for (auto& a : tutteApp) if (!a.icona && !a.provata && (!mostraGiochi || !appartieneAiGiochi(a))) { a.provata = true; chiediIcona(sorgenteIconaL(a), 96); }
     if (registro) { char b[64]; snprintf(b, 64, "launcher giochi: %d", (int)tuttiGiochi.size()); scrivi(b); }
 }
 
@@ -638,10 +676,21 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
         return !a.manuale && nascosti.count(minuscolo(a.avvio)) != 0;
     }), nuove.end());
 
+    const auto iconePers = leggiIconeGiochi();
+    for (AppL& a : nuove) {
+        auto it = iconePers.find(minuscolo(a.avvio));
+        if (it == iconePers.end()) it = iconePers.find(a.minuscolo);
+        if (it != iconePers.end() && esisteFile(it->second)) {
+            a.iconaFile = it->second;
+            a.iconaPers = true;
+        }
+    }
+
     std::sort(nuove.begin(), nuove.end(), [](const AppL& a, const AppL& b) {
         const int c = lstrcmpiW(a.nome.c_str(), b.nome.c_str());
         if (c != 0) return c < 0;
         if (a.manuale != b.manuale) return a.manuale > b.manuale;
+        if (a.iconaPers != b.iconaPers) return a.iconaPers > b.iconaPers;
         const bool ia = !a.iconaFile.empty(), ib = !b.iconaFile.empty();
         if (ia != ib) return ia > ib;
         return a.avvio < b.avvio;
@@ -669,12 +718,31 @@ inline auto Motore::sottosequenza(const std::wstring& nome, const std::wstring& 
     return k == q.size();
 }
 
+inline auto Motore::appartieneAiGiochi(const AppL& a) const -> bool {
+    std::wstring par = a.avvio;
+    if (par.rfind(L"shell:AppsFolder\\", 0) == 0) par.erase(0, 17);
+    const std::wstring parMin = minuscolo(normalizzaPercorso(std::move(par)));
+    const std::wstring ta = chiaveTitolo(a.nome);
+    for (const auto& g : tuttiGiochi) {
+        const std::wstring avvG = minuscolo(normalizzaPercorso(g.avvio));
+        const std::wstring icoG = minuscolo(normalizzaPercorso(g.iconaFile));
+        if (!parMin.empty() && (parMin == avvG || (!icoG.empty() && parMin == icoG))) return true;
+        if (!g.cartella.empty()) {
+            const std::wstring cartG = minuscolo(normalizzaPercorso(g.cartella)) + L"\\";
+            if (parMin.size() > cartG.size() && parMin.compare(0, cartG.size(), cartG) == 0) return true;
+        }
+        if (a.minuscolo == g.minuscolo || (!ta.empty() && ta == chiaveTitolo(g.nome))) return true;
+    }
+    return false;
+}
+
 inline auto Motore::filtra() -> void {
     filtrate.clear();
     const std::wstring q = minuscolo(query);
     const auto& el = elencoAttivo();
     std::vector<int> livelli[3];   // iniziali, contiene, lettere in ordine
     for (int i = 0; i < (int)el.size(); i++) {
+        if (!lModoGiochi && mostraGiochi && appartieneAiGiochi(el[i])) continue;
         if (q.empty()) { filtrate.push_back(i); continue; }
         const std::wstring& n = el[i].minuscolo;
         const size_t p = n.find(q);
@@ -746,6 +814,7 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
             if (tuttiGiochi.empty()) leggiTuttiGiochi(true);
             else if (adesso() - gLetto > 600) leggiTuttiGiochi();
         } else {
+            if (mostraGiochi && tuttiGiochi.empty()) leggiTuttiGiochi(true);
             if (tutteApp.empty()) leggiTutteApp(true);
             else if (adesso() - lLetto > 600) leggiTutteApp();
         }
@@ -865,12 +934,13 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
     }
     it->Release();
     if (!cm) return;
-    const UINT ID_DOCK = 0x7F00;
+    const UINT ID_DOCK = 0x7F00, ID_GIOCHI = 0x7EFF;
     HMENU m = CreatePopupMenu();
-    if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, ID_DOCK - 1, CMF_NORMAL))) {
+    if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, ID_GIOCHI - 1, CMF_NORMAL))) {
         cm->QueryInterface(IID_PPV_ARGS(&menuShell2)); cm->QueryInterface(IID_PPV_ARGS(&menuShell3));
         // le voci di Windows, disegnate da noi; in cima il nome dell'app e "Aggiungi al dock"
         std::vector<menu::Voce> voci = {menu::titolo(a.nome), menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), ID_DOCK)};
+        if (mostraGiochi) voci.push_back(menu::voce(testi::t(L"Sposta nei giochi", L"Move to Games"), ID_GIOCHI));
         // "Disinstalla" (la voce di Windows, per le app dello Store e per le altre) in cima, subito visibile
         UINT idDisinstalla = 0;
         for (int i = 0; i < GetMenuItemCount(m) && !idDisinstalla; i++) {
@@ -892,6 +962,17 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
         if (menuShell2) { menuShell2->Release(); menuShell2 = nullptr; }
         if (cmd == ID_DOCK) {
             aggiungiAlDock(a.nome, exe, id, a.avvio);
+        } else if (cmd == ID_GIOCHI) {
+            auto el = leggiGiochiAggiunti();
+            const std::wstring target = (!exe.empty() && esisteFile(exe)) ? exe : a.avvio;
+            const std::wstring tMin = minuscolo(target);
+            bool gia = false;
+            for (const auto& kv : el) if (minuscolo(kv.second) == tMin) { gia = true; break; }
+            if (!gia) {
+                el.push_back({a.nome, target});
+                salvaGiochiAggiunti(el);
+            }
+            leggiTuttiGiochi(true);
         } else if (cmd > 0) {
             CMINVOKECOMMANDINFOEX ci{}; ci.cbSize = sizeof(ci); ci.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
             ci.hwnd = launcher; ci.lpVerb = MAKEINTRESOURCEA(cmd - 1); ci.lpVerbW = MAKEINTRESOURCEW(cmd - 1);
@@ -921,9 +1002,9 @@ inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring&
     else {   // app dello Store o collegamento URI: il collegamento punta al PIDL
         PIDLIST_ABSOLUTE pidl = nullptr;
         if (SUCCEEDED(SHParseDisplayName(avvio.c_str(), nullptr, &pidl, 0, nullptr))) { ok = SUCCEEDED(sl->SetIDList(pidl)); CoTaskMemFree(pidl); }
-        if (ok && !icona.empty() && (finisceCon(icona, L".ico") || finisceCon(icona, L".exe")) && esisteFile(icona))
-            sl->SetIconLocation(icona.c_str(), 0);
     }
+    if (ok && !icona.empty() && (finisceCon(icona, L".ico") || finisceCon(icona, L".exe")) && esisteFile(icona))
+        sl->SetIconLocation(icona.c_str(), 0);
     if (ok && !id.empty()) {   // cosi' il dock riconosce le finestre dell'app
         IPropertyStore* ps = nullptr;
         if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&ps)))) {
@@ -981,6 +1062,37 @@ inline auto Motore::aggiungiGiocoDialogo() -> void {
     lDirty = true;
 }
 
+inline auto Motore::cambiaIconaGioco(const AppL& a) -> void {
+    if (lDialogoAperto) return;
+    lDialogoAperto = true;
+    const std::wstring avvio = a.avvio;
+    wchar_t p[MAX_PATH * 4] = L"";
+    OPENFILENAMEW of{};
+    of.lStructSize = sizeof(of);
+    of.hwndOwner = launcher;
+    of.lpstrFile = p;
+    of.nMaxFile = MAX_PATH * 4;
+    of.lpstrFilter = L"Icons & images (*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.exe)\0*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.exe\0All files (*.*)\0*.*\0";
+    of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    const bool scelto = GetOpenFileNameW(&of) != FALSE;
+    lDialogoAperto = false;
+    if (lAperto && !lChiusura) prendiFuoco(launcher);
+    if (scelto && p[0]) {
+        auto ic = leggiIconeGiochi();
+        ic[minuscolo(avvio)] = p;
+        salvaIconeGiochi(ic);
+        iconeChieste.erase(chiaveIcona(p, 96));
+        for (auto& g : tuttiGiochi) {
+            if (g.avvio == avvio) {
+                if (g.icona) { g.icona->Release(); g.icona = nullptr; }
+                g.provata = false;
+            }
+        }
+        leggiTuttiGiochi(true);
+    }
+    lDirty = true;
+}
+
 inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (i < 0 || i >= (int)filtrate.size()) return;
     const AppL a = tuttiGiochi[filtrate[i]];
@@ -998,6 +1110,9 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         vv.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 2));
     if (hasCartella || hasFile)
         vv.push_back(menu::voce(testi::t(L"Apri percorso", L"Open folder"), 3));
+    vv.push_back(menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 6));
+    if (a.iconaPers)
+        vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 7));
     vv.push_back(menu::separatore());
     if (a.manuale)
         vv.push_back(menu::voce(testi::t(L"Rimuovi dai giochi", L"Remove from Games"), 4));
@@ -1011,7 +1126,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         ShellExecuteW(nullptr, L"open", a.avvio.c_str(), nullptr, a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
     } else if (cmd == 2) {
         if (isExe) {
-            aggiungiAlDock(a.nome, a.avvio, L"", a.avvio);
+            aggiungiAlDock(a.nome, a.avvio, L"", a.avvio, a.iconaFile);
         } else if (isLnk) {
             std::wstring exe, id;
             IShellLinkW* sl = nullptr;
@@ -1061,6 +1176,20 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         auto n = leggiGiochiNascosti();
         n.insert(minuscolo(a.avvio));
         salvaGiochiNascosti(n);
+        leggiTuttiGiochi(true);
+    } else if (cmd == 6) {
+        cambiaIconaGioco(a);
+    } else if (cmd == 7) {
+        auto ic = leggiIconeGiochi();
+        ic.erase(minuscolo(a.avvio));
+        ic.erase(a.minuscolo);
+        salvaIconeGiochi(ic);
+        for (auto& g : tuttiGiochi) {
+            if (g.avvio == a.avvio) {
+                if (g.icona) { g.icona->Release(); g.icona = nullptr; }
+                g.provata = false;
+            }
+        }
         leggiTuttiGiochi(true);
     }
 }

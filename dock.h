@@ -617,6 +617,7 @@ public:
         if (si == mostraGiochi) return;
         mostraGiochi = si;
         if (!si && lAperto && lModoGiochi) chiudiLauncher();
+        if (lAperto && !lModoGiochi) filtra();
         if (attivo) aggiornaApp();
     }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
@@ -928,13 +929,66 @@ private:
     // ---- icone ----
     // pixel dell'icona (premoltiplicati), senza Direct2D: si puo' chiamare anche da un altro thread
     static bool pixelIcona(const std::wstring& percorso, int lato, int& w, int& h, std::vector<UINT>& px) {
-        IShellItemImageFactory* fab = nullptr;
-        if (FAILED(SHCreateItemFromParsingName(percorso.c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
         auto finisce = [&](const wchar_t* est) {
             const size_t n = wcslen(est);
             return percorso.size() >= n && !_wcsicmp(percorso.c_str() + percorso.size() - n, est);
         };
-        const bool img = finisce(L".jpg") || finisce(L".jpeg") || finisce(L".png");
+        const bool imgWic = finisce(L".ico") || finisce(L".png") || finisce(L".jpg") || finisce(L".jpeg") || finisce(L".bmp") || finisce(L".webp");
+        if (imgWic && lato > 0) {
+            IWICImagingFactory* wic = nullptr;
+            IWICBitmapDecoder* dec = nullptr;
+            IWICBitmapFrameDecode* fr = nullptr;
+            IWICBitmapClipper* cl = nullptr;
+            IWICBitmapScaler* sc = nullptr;
+            IWICFormatConverter* cv = nullptr;
+            bool ok = false;
+            if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) && wic &&
+                SUCCEEDED(wic->CreateDecoderFromFilename(percorso.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) && dec) {
+                UINT cnt = 0;
+                dec->GetFrameCount(&cnt);
+                UINT best = 0;
+                ULONGLONG bestArea = 0;
+                for (UINT i = 0; i < cnt; i++) {
+                    IWICBitmapFrameDecode* tf = nullptr;
+                    if (SUCCEEDED(dec->GetFrame(i, &tf)) && tf) {
+                        UINT tw = 0, th = 0;
+                        if (SUCCEEDED(tf->GetSize(&tw, &th)) && (ULONGLONG)tw * th > bestArea) {
+                            bestArea = (ULONGLONG)tw * th;
+                            best = i;
+                        }
+                        tf->Release();
+                    }
+                }
+                UINT fw = 0, fh = 0;
+                if (SUCCEEDED(dec->GetFrame(best, &fr)) && fr && SUCCEEDED(fr->GetSize(&fw, &fh)) && fw && fh) {
+                    IWICBitmapSource* src = fr;
+                    if (fw != fh) {
+                        const UINT q = std::min(fw, fh);
+                        const WICRect rc{(INT)(fw - q) / 2, (INT)(fh - q) / 2, (INT)q, (INT)q};
+                        if (SUCCEEDED(wic->CreateBitmapClipper(&cl)) && cl && SUCCEEDED(cl->Initialize(fr, &rc))) src = cl;
+                        else src = nullptr;
+                    }
+                    if (src && SUCCEEDED(wic->CreateBitmapScaler(&sc)) && sc &&
+                        SUCCEEDED(sc->Initialize(src, (UINT)lato, (UINT)lato, (WICBitmapInterpolationMode)4 /* WICBitmapInterpolationModeHighQualityCubic, absent from MinGW wincodec.h */)) &&
+                        SUCCEEDED(wic->CreateFormatConverter(&cv)) && cv &&
+                        SUCCEEDED(cv->Initialize(sc, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
+                        px.resize((size_t)lato * lato);
+                        if (SUCCEEDED(cv->CopyPixels(nullptr, (UINT)(lato * 4), (UINT)(lato * lato * 4), (BYTE*)px.data()))) {
+                            w = h = lato;
+                            ok = true;
+                        } else {
+                            px.clear();
+                        }
+                    }
+                }
+            }
+            for (IUnknown* u : {(IUnknown*)cv, (IUnknown*)sc, (IUnknown*)cl, (IUnknown*)fr, (IUnknown*)dec, (IUnknown*)wic})
+                if (u) u->Release();
+            if (ok) return true;
+        }
+        IShellItemImageFactory* fab = nullptr;
+        if (FAILED(SHCreateItemFromParsingName(percorso.c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
+        const bool img = finisce(L".jpg") || finisce(L".jpeg") || finisce(L".png") || finisce(L".bmp") || finisce(L".webp");
         HBITMAP hb = nullptr;
         HRESULT hr = fab->GetImage({lato, lato}, img ? SIIGBF_BIGGERSIZEOK : (SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK), &hb);
         if (!img && (FAILED(hr) || !hb)) { hb = nullptr; hr = fab->GetImage({lato, lato}, SIIGBF_BIGGERSIZEOK, &hb); }
@@ -2216,6 +2270,7 @@ private:
     struct AppL {
         std::wstring nome, avvio, minuscolo, iconaFile, cartella;
         bool manuale = false;
+        bool iconaPers = false;
         ID2D1Bitmap1* icona = nullptr;
         bool provata = false;
     };
@@ -2300,6 +2355,9 @@ private:
     static void salvaGiochiNascosti(const std::unordered_set<std::wstring>& s);
     static std::vector<std::pair<std::wstring, std::wstring>> leggiGiochiAggiunti();
     static void salvaGiochiAggiunti(const std::vector<std::pair<std::wstring, std::wstring>>& el);
+    static std::unordered_map<std::wstring, std::wstring> leggiIconeGiochi();
+    static void salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
+    bool appartieneAiGiochi(const AppL& a) const;
 
     static bool iniziali(const std::wstring& nome, const std::wstring& q);
     static bool sottosequenza(const std::wstring& nome, const std::wstring& q);
@@ -2373,6 +2431,8 @@ private:
     void aggiungiGiocoDialogo();
 
     void aggiungiGiocoFile(const std::wstring& percorso);
+
+    void cambiaIconaGioco(const AppL& a);
 
     void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"");
 
