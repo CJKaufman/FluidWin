@@ -225,11 +225,14 @@ inline bool leggiInf(const std::wstring& p, std::wstring (&file)[N_POSTI], std::
 }
 
 // senza .inf (o se non dice niente): il posto dal nome del file. L'ordine conta: "link select" prima di "select"
-inline int postoDaNome(const std::wstring& file) {
+inline int postoDaNome(const std::wstring& file, const std::wstring& prefisso = L"") {
     std::wstring n = minuscolo(nomeFile(file));
     n = n.substr(0, n.find_last_of(L'.'));
-    auto ha = [&](const wchar_t* x) { return n.find(x) != std::wstring::npos; };
     auto idx = [](const wchar_t* nome) { for (int i = 0; i < N_POSTI; i++) if (!wcscmp(POSTI[i].nome, nome)) return i; return -1; };
+    if (n.find(L"--cursor--") != std::wstring::npos) return idx(L"Arrow");
+    if (n.find(L"--pointer--") != std::wstring::npos) return idx(L"Hand");
+    if (!prefisso.empty() && n.size() > prefisso.size() && n.rfind(prefisso, 0) == 0) n = n.substr(prefisso.size());
+    auto ha = [&](const wchar_t* x) { return n.find(x) != std::wstring::npos; };
     if (ha(L"help")) return idx(L"Help");
     if (ha(L"work") || ha(L"background") || ha(L"appstart") || ha(L"progress")) return idx(L"AppStarting");
     if (ha(L"busy") || ha(L"wait") || ha(L"load")) return idx(L"Wait");
@@ -248,7 +251,7 @@ inline int postoDaNome(const std::wstring& file) {
     if (ha(L"link") || ha(L"hand") || (ha(L"point") && !ha(L"pointer"))) return idx(L"Hand");
     if (ha(L"pin") || ha(L"location")) return idx(L"Pin");
     if (ha(L"person")) return idx(L"Person");
-    if (ha(L"pointer") || ha(L"arrow") || ha(L"normal") || ha(L"select") || ha(L"default")) return idx(L"Arrow");
+    if (ha(L"pointer") || ha(L"arrow") || ha(L"normal") || ha(L"select") || ha(L"default") || ha(L"cursor")) return idx(L"Arrow");
     return -1;
 }
 
@@ -419,9 +422,30 @@ inline Esito installa(const std::wstring& sorgente) {
     }
     // posti rimasti vuoti: dal nome del file (solo file della stessa cartella del primo trovato, per non mischiare varianti)
     const std::wstring cartellaPrincipale = !scelti[0].empty() ? minuscolo(cartellaDi(scelti[0])) : (cur.empty() ? L"" : minuscolo(cartellaDi(cur[0])));
-    for (const auto& c : cur) {
-        if (minuscolo(cartellaDi(c)) != cartellaPrincipale) continue;
-        const int k = postoDaNome(c);
+    std::wstring prefisso;
+    std::vector<std::wstring> principali;
+    for (const auto& c : cur) if (minuscolo(cartellaDi(c)) == cartellaPrincipale) principali.push_back(c);
+    if (principali.size() >= 2) {
+        auto stem = [](const std::wstring& p) {
+            std::wstring s = minuscolo(nomeFile(p));
+            return s.substr(0, s.find_last_of(L'.'));
+        };
+        prefisso = stem(principali[0]);
+        for (size_t i = 1; i < principali.size(); i++) {
+            const std::wstring s = stem(principali[i]);
+            size_t len = 0;
+            while (len < prefisso.size() && len < s.size() && prefisso[len] == s[len]) len++;
+            prefisso.resize(len);
+        }
+        while (!prefisso.empty() && std::iswalnum(prefisso.back())) prefisso.pop_back();
+    }
+    for (const auto& c : principali) {
+        int k = postoDaNome(c, prefisso);
+        if (k < 0 && !prefisso.empty()) k = postoDaNome(c);
+        if (k == 0 && !scelti[0].empty() && scelti[14].empty()) {
+            std::wstring s = minuscolo(nomeFile(c));
+            if (s.find(L"pointer") != std::wstring::npos) k = 14;
+        }
         if (k >= 0 && scelti[k].empty()) scelti[k] = c;
     }
     // validi per Windows (si caricano davvero)
