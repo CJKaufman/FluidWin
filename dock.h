@@ -22,6 +22,7 @@
 #include <shobjidl.h>
 #include <propkey.h>
 #include <propvarutil.h>
+#include <commdlg.h>
 #include <dwmapi.h>
 #include "raggio.h"
 #include "sistema.h"
@@ -90,6 +91,7 @@ static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Wi
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
+static const wchar_t* const AVVIO_GIOCHI = L"*giochi";       // la voce "Giochi" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
@@ -361,6 +363,7 @@ public:
     // Lingua dell'interfaccia cambiata: date, nomi delle voci fisse e pannelli si rifanno nella lingua nuova
     void linguaCambiata() {
         testoOra.clear();   // le date si ricalcolano anche se l'ora non e' cambiata
+        for (auto& v : voci) if (v.avvio == AVVIO_GIOCHI) v.nome = testi::t(L"Giochi", L"Games");
         aggiornaStato(true);
         appDaAggiornare = true; dirty = true; pDirty = true; lDirty = true;
     }
@@ -495,7 +498,7 @@ public:
             usa(0);
             if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso) chiudiTutte();
         }
-        if (lAperto && !lChiusura && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
+        if (lAperto && !lChiusura && !lDialogoAperto && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
     }
 
     // Dove deve entrare il genio per questa finestra: l'icona della sua app nel dock (coordinate schermo)
@@ -920,8 +923,14 @@ private:
     static bool pixelIcona(const std::wstring& percorso, int lato, int& w, int& h, std::vector<UINT>& px) {
         IShellItemImageFactory* fab = nullptr;
         if (FAILED(SHCreateItemFromParsingName(percorso.c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
+        auto finisce = [&](const wchar_t* est) {
+            const size_t n = wcslen(est);
+            return percorso.size() >= n && !_wcsicmp(percorso.c_str() + percorso.size() - n, est);
+        };
+        const bool img = finisce(L".jpg") || finisce(L".jpeg") || finisce(L".png");
         HBITMAP hb = nullptr;
-        HRESULT hr = fab->GetImage({lato, lato}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hb);
+        HRESULT hr = fab->GetImage({lato, lato}, img ? SIIGBF_BIGGERSIZEOK : (SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK), &hb);
+        if (!img && (FAILED(hr) || !hb)) { hb = nullptr; hr = fab->GetImage({lato, lato}, SIIGBF_BIGGERSIZEOK, &hb); }
         fab->Release();
         if (FAILED(hr) || !hb) return false;
         BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
@@ -999,6 +1008,7 @@ private:
         std::vector<Voce> nuove;
         // 0) prima icona: il launcher di tutte le app (disegnata dal dock, senza finestre)
         { Voce l; l.fissata = true; l.avvio = AVVIO_LAUNCHER; l.nome = L"App"; nuove.push_back(std::move(l)); }
+        { Voce g; g.fissata = true; g.avvio = AVVIO_GIOCHI; g.nome = testi::t(L"Giochi", L"Games"); nuove.push_back(std::move(g)); }
         // 1) aggiunte alla barra, nell'ordine dei collegamenti. Leggerle (ogni .lnk aperto dalla shell) costa: si
         // rileggono solo se la cartella e' cambiata (collegamento aggiunto, tolto o rinominato) o dopo un minuto
         wchar_t cart[MAX_PATH];
@@ -1056,7 +1066,7 @@ private:
                 }
                 nuove.push_back(std::move(v));
             }
-            if (!valida) { fissateCache.assign(nuove.begin() + 1, nuove.end()); fissateOk = letta; }
+            if (!valida) { fissateCache.assign(nuove.begin() + 2, nuove.end()); fissateOk = letta; }
         }
         const size_t fissate = nuove.size();
         // 2) finestre aperte: si agganciano all'app fissata corrispondente, o creano una nuova voce
@@ -1113,7 +1123,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -1388,6 +1398,7 @@ private:
             const float alfa = (premuto < 1 ? 0.8f : 1.0f) * std::min(1.0f, sc * 1.5f);
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
+            else if (v.avvio == AVVIO_GIOCHI) disegnaIconaGiochi(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
@@ -1406,7 +1417,7 @@ private:
             }
             // pallino delle app aperte: uno per finestra, al massimo tre
             // (uno anche sotto App e il centro di controllo mentre sono aperti)
-            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
+            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -2193,7 +2204,13 @@ private:
     }
 
     // ---- launcher: tutte le app, con la ricerca (tasto Win o icona "App" del dock) ----
-    struct AppL { std::wstring nome, avvio, minuscolo; ID2D1Bitmap1* icona = nullptr; bool provata = false; };
+    struct AppL {
+        std::wstring nome, avvio, minuscolo, iconaFile, cartella;
+        bool manuale = false;
+        ID2D1Bitmap1* icona = nullptr;
+        bool provata = false;
+    };
+    static std::wstring sorgenteIconaL(const AppL& a) { return a.iconaFile.empty() ? a.avvio : a.iconaFile; }
     HWND launcher = nullptr, vetroLauncher = nullptr;
     IDXGISwapChain1* scL = nullptr; IDCompositionTarget* targetL = nullptr; IDCompositionVisual* visualL = nullptr;
     IDCompositionEffectGroup* effettoL = nullptr; ID2D1Bitmap1* bersaglioL = nullptr;
@@ -2203,7 +2220,11 @@ private:
     bool lRipreso = false;                 // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
     RECT rettLauncher{};                   // il launcher vero e proprio (la finestra arriva piu' in basso, fino all'icona)
     POINT ancora{};                        // icona "App": da qui cresce e qui rientra (coordinate della finestra)
-    std::vector<AppL> tutteApp;
+    std::vector<AppL> tutteApp, tuttiGiochi;
+    bool lModoGiochi = false, lavoroGiochi = false, lDialogoAperto = false;
+    double gLetto = -1e9;
+    std::vector<AppL>& elencoAttivo() { return lModoGiochi ? tuttiGiochi : tutteApp; }
+    const std::vector<AppL>& elencoAttivo() const { return lModoGiochi ? tuttiGiochi : tutteApp; }
     std::vector<int> filtrate;
     std::wstring query;
     bool lAperto = false, lChiusura = false, lDirty = false, lAnim = false, lRegione = false, lMouseDentro = false;
@@ -2263,6 +2284,14 @@ private:
 
     static std::vector<AppL> elencaTutteApp();
 
+    void leggiTuttiGiochi(bool subito = false);
+    void applicaTuttiGiochi(std::vector<AppL> nuovi);
+    static std::vector<AppL> elencaTuttiGiochi();
+    static std::unordered_set<std::wstring> leggiGiochiNascosti();
+    static void salvaGiochiNascosti(const std::unordered_set<std::wstring>& s);
+    static std::vector<std::pair<std::wstring, std::wstring>> leggiGiochiAggiunti();
+    static void salvaGiochiAggiunti(const std::vector<std::pair<std::wstring, std::wstring>>& el);
+
     static bool iniziali(const std::wstring& nome, const std::wstring& q);
     static bool sottosequenza(const std::wstring& nome, const std::wstring& q);
     void filtra();
@@ -2313,7 +2342,7 @@ public:
         if (fino > rivelaFino) { const bool prima = adesso() <= rivelaFino; rivelaFino = fino; if (!prima) { dirty = true; posizionaVetri(); } }
     }
 
-    void apriLauncher();
+    void apriLauncher(bool giochi = false);
 
 private:
     void chiudiLauncher();
@@ -2328,7 +2357,15 @@ private:
 
     void menuApp(int i, POINT pt);
 
-    void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio);
+    void menuGioco(int i, POINT pt);
+
+    void menuSpazioGiochi(POINT pt);
+
+    void aggiungiGiocoDialogo();
+
+    void aggiungiGiocoFile(const std::wstring& percorso);
+
+    void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"");
 
     void menuEnergia(POINT pt);
 
@@ -2337,6 +2374,8 @@ private:
     void selezionaVisibile();
 
     void disegnaIconaApp(const D2D1_RECT_F& r, float alfa, bool scuro);
+
+    void disegnaIconaGiochi(const D2D1_RECT_F& r, float alfa, bool scuro);
 
     // l'icona del centro di controllo: la stessa piastrella di vetro di "App", con i due interruttori di iOS (quello in
     // alto acceso, azzurro; quello in basso spento)
@@ -2397,7 +2436,7 @@ private:
     bool mouseSuIconaApp() const {
         POINT pt; GetCursorPos(&pt);
         const int i = iconaInPunto((float)(pt.x - schermo.left), (float)(pt.y - (schermo.bottom - H)));
-        return i >= 0 && voci[i].avvio == AVVIO_LAUNCHER;
+        return i >= 0 && (voci[i].avvio == AVVIO_LAUNCHER || voci[i].avvio == AVVIO_GIOCHI);
     }
     int iconaInPunto(float x, float y) const {
         for (size_t i = 0; i < voci.size(); i++) {
@@ -2446,7 +2485,8 @@ private:
     void clic(int i) {
         if (i < 0 || i >= (int)voci.size() || voci[i].uscente) return;
         Voce& v = voci[i];
-        if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
+        if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(false); return; }
+        if (v.avvio == AVVIO_GIOCHI) { apriLauncher(true); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
         if (v.avvio == AVVIO_PILA) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
@@ -2491,7 +2531,7 @@ private:
         // Spazio vuoto del dock, launcher e centro di controllo: le impostazioni di FluidWin. Prima il tasto destro li'
         // non faceva niente, e le impostazioni si aprivano solo dal centro di controllo, dalla ricerca o dall'icona
         // nell'area di notifica (nascosta con la barra di Windows): difficili da trovare
-        const bool suApp = i >= 0 && i < (int)voci.size() && voci[i].avvio != AVVIO_LAUNCHER && voci[i].avvio != AVVIO_CONTROLLO;
+        const bool suApp = i >= 0 && i < (int)voci.size() && voci[i].avvio != AVVIO_LAUNCHER && voci[i].avvio != AVVIO_GIOCHI && voci[i].avvio != AVVIO_CONTROLLO;
         if (!suApp) {
             if (i >= 0 && i < (int)voci.size() && voci[i].uscente) return;
             SetForegroundWindow(icone);
