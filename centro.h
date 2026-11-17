@@ -336,7 +336,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     const D2D1_POINT_2F a = m.TransformPoint({0, 0}), b = m.TransformPoint({pw, ph});
     SetWindowPos(vetroPannello, nullptr, x + (int)std::lround(a.x), r.top + (int)std::lround(a.y),
                  std::max(1, (int)std::lround(b.x - a.x)), std::max(1, (int)std::lround(b.y - a.y)), SWP_NOACTIVATE | SWP_NOZORDER);
-    SetLayeredWindowAttributes(vetroPannello, 0, (BYTE)std::lround(std::clamp(alfa, 0.0, 1.0) * 255), LWA_ALPHA);
+    SetLayeredWindowAttributes(vetroPannello, 0, alfaVetro((float)alfa), LWA_ALPHA);
     effettoP->SetOpacity((float)std::clamp(alfa, 0.0, 1.0) * pOpContenuto);   // (pOpContenuto: vedi cediPannello)
     dcomp->Commit();
 }

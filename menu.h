@@ -14,6 +14,7 @@
 #include <dwmapi.h>
 #include "raggio.h"
 #include "fabbriche.h"
+#include "vetro.h"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
@@ -256,7 +257,7 @@ private:
         // vetro acrilico di Windows 11 sotto al disegno, angoli arrotondati, niente animazioni native
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(fin, &mg);
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &sc, sizeof(sc));
-        int tipo = 3; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
+        int tipo = vetro::tipoBackdrop(true); DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
         int angoli = 2; DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         f2d = fabbrica2d();
@@ -349,8 +350,7 @@ private:
         rt->BeginDraw();
         rt->Clear(D2D1::ColorF(0, 0, 0, 0));
         // velo sopra il vetro, come i pannelli del dock
-        pen->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.45f) : D2D1::ColorF(1, 1, 1, 0.55f));
-        rt->FillRectangle({0, 0, (float)W, (float)H}, pen);
+        vetro::disegnaVelo(rt, pen, W, H, dpi, scuro);
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.9f);
         if (conFreccia) {   // freccia: giu' da chiusa, su da aperta (gira mentre il menu si allunga)
             const D2D1_RECT_F r = {rettFreccia.left, rettFreccia.top - scorri, rettFreccia.right, rettFreccia.bottom - scorri};

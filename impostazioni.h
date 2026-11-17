@@ -36,6 +36,7 @@ struct Valori {
     DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
+    int stileVetro = 0;           // stile del vetro (vetro::Stile: acrilico, liquido, mica, trasparente)
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
@@ -122,6 +123,8 @@ inline void carica() {
     v.dockColore = leggiDword(L"DockColore", 0) & (COLORE_SCELTO | 0xFFFFFF);
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
+    v.stileVetro = std::clamp((int)leggiDword(L"StileVetro", 0), 0, vetro::N_STILI - 1);
+    vetro::stile() = v.stileVetro;
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
@@ -143,7 +146,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -214,6 +217,7 @@ public:
         rileggiPacchetti();
         anim.clear();
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
+        scorriDock = 0; maxScorriDock = 0; rotella = 0;
         if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
         v.alfa(daCentro ? 1 : 0);
         vetro::battito(v.fin, 1);
@@ -337,11 +341,19 @@ public:
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
                 return true;
             case WM_CLOSE: chiudi(); return true;
-            case WM_MOUSEWHEEL:   // sezione Cursore: l'elenco dei pacchetti scorre (non ci stanno tutti: R20261114-141207-S7)
+            case WM_MOUSEWHEEL:   // sezione Cursore / Dock: l'elenco scorre quando supera la finestra
                 if (sezione == S_CURSORE && !morph) {
                     // (si sommano: ogni WHEEL_DELTA una riga; prima un delta di 60 per volta non scorreva mai, R20261114-142613)
                     rotella += GET_WHEEL_DELTA_WPARAM(w);
                     scorriCursori -= rotella / WHEEL_DELTA; rotella %= WHEEL_DELTA;
+                    disegna();
+                } else if (sezione == S_DOCK && !morph && maxScorriDock > 0) {
+                    rotella += GET_WHEEL_DELTA_WPARAM(w);
+                    const int q = WHEEL_DELTA / 4;
+                    const int passo = std::max(1, (int)std::lround(9 * v.dpi));
+                    while (rotella >= q) { scorriDock -= passo; rotella -= q; }
+                    while (rotella <= -q) { scorriDock += passo; rotella += q; }
+                    scorriDock = std::clamp(scorriDock, 0, maxScorriDock);
                     disegna();
                 }
                 return true;
@@ -479,6 +491,7 @@ private:
     static constexpr DWORD COLORI[] = {0x2C2C2E, 0xF2F2F7, 0x0A84FF, 0x5E5CE6, 0xBF5AF2, 0xFF375F, 0xFF9F0A, 0x30D158};
     static constexpr int N_COLORI = sizeof(COLORI) / sizeof(COLORI[0]);
     static constexpr int Z_COLORE_MIO = Z_COLORE + 1 + N_COLORI;
+    static constexpr int Z_STILE = 620;
     void scegliColore(int id) {
         DWORD& c = valori().dockColore;
         if (id == Z_COLORE) c = 0;
@@ -505,6 +518,7 @@ private:
     unsigned giroAnteprime = ~0u;
     bool installando = false, erroreCursori = false;
     int scorriCursori = 0;   // prima riga mostrata dell'elenco (0 = "Cursori di Windows"): rotella del mouse
+    int scorriDock = 0, maxScorriDock = 0;
     int rotella = 0;         // scatti piccoli della rotella (touchpad, rotelle ad alta precisione) messi da parte
     std::wstring statoCursori;
 
@@ -593,6 +607,7 @@ private:
     void vaiASezione(int s) {
         if (s == sezione) return;
         sezione = s; kSez = 0; tSez = vetro::ms();
+        scorriDock = 0; maxScorriDock = 0; rotella = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -605,6 +620,16 @@ private:
             scegliColore(id);
             salva();
             if (cambiato) cambiato();
+            disegna();
+            return;
+        }
+        if (id >= Z_STILE && id < Z_STILE + vetro::N_STILI) {
+            valori().stileVetro = id - Z_STILE;
+            vetro::stile() = valori().stileVetro;
+            v.aggiornaStile();
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
             disegna();
             return;
         }
@@ -794,6 +819,32 @@ private:
         const float L = B + 28 * d + sx, R = W - 28 * d + sx;
         v.testo(nomeSezione(sezione), fTitolo, {L, 20 * d, R - 50 * d, 54 * d}, inkS);
         float y = 72 * d;
+        const float clipTop = 64 * d, clipBot = H - 10 * d;
+        if (sezione == S_DOCK) {
+            float hDock = y;
+            for (const auto& x : voci) if (x.sezione == S_DOCK) hDock += 60 * d;
+            for (const auto& c : cursori) if (c.sezione == S_DOCK) hDock += 60 * d;
+            hDock += 70 * d + 60 * d;
+            maxScorriDock = std::max(0, (int)std::ceil(hDock - clipBot));
+            scorriDock = std::clamp(scorriDock, 0, maxScorriDock);
+            if (maxScorriDock > 0) {
+                const std::wstring hint = testi::t(L"scorri", L"scroll");
+                const float hw = v.larghezza(hint, fSotto) + 2 * d;
+                v.testo(hint, fSotto, {R - 32 * d - hw, 26 * d, R - 32 * d, 50 * d}, tenueS);
+            }
+            y -= (float)scorriDock;
+            v.rt->PushAxisAlignedClip({B, clipTop, W, clipBot}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        } else {
+            maxScorriDock = 0;
+        }
+        auto aggiungiZona = [&](D2D1_RECT_F rz, int id) {
+            if (sezione == S_DOCK) {
+                rz.top = std::max(rz.top, clipTop);
+                rz.bottom = std::min(rz.bottom, clipBot);
+                if (rz.bottom <= rz.top) return;
+            }
+            zone.push_back({rz, id});
+        };
         auto riquadro = [&](const D2D1_RECT_F& r, bool evid) {
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
@@ -808,7 +859,7 @@ private:
         for (size_t i = 0; i < voci.size(); i++) {
             if (voci[i].sezione != sezione) continue;
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
-            zone.push_back({r, (int)i});
+            aggiungiZona(r, (int)i);
             riquadro(r, sopra == (int)i);
             v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 74 * d, r.top + 29 * d}, inkS);
             v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
@@ -867,7 +918,7 @@ private:
             v.testo(testi::t(c.nome, c.name), fVoce, {r.left + 16 * d, r.top + 7 * d, x0 - 16 * d, r.top + 29 * d}, inkS);
             v.testo(testi::t(c.spiega, c.explain), fSotto, {r.left + 16 * d, r.top + 28 * d, x0 - 16 * d, r.top + 48 * d}, tenueS);
             binari[i] = {x0, cy - 12 * d, x1, cy + 12 * d};
-            zone.push_back({{x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id});
+            aggiungiZona({x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id);
             const int val = valori().*(c.campo);
             const float p = (val - c.min) / (float)(c.max - c.min), xm = x0 + (x1 - x0) * p;
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
@@ -883,6 +934,46 @@ private:
             y += 60 * d;
         }
         if (sezione == S_DOCK) {
+            // tema del vetro: Acrilico, Liquido, Mica, Trasparente
+            {
+                const D2D1_RECT_F r = {L, y, R, y + 64 * d};
+                riquadro(r, false);
+                const std::wstring tit = testi::t(L"Tema del vetro", L"Glass theme");
+                const std::wstring sub = testi::t(L"Dock, pannelli e menu", L"Dock, panels and menus");
+                const wchar_t* nomi[vetro::N_STILI] = {
+                    testi::t(L"Acrilico", L"Acrylic"),
+                    testi::t(L"Liquido", L"Liquid"),
+                    L"Mica",
+                    testi::t(L"Trasparente", L"Clear")
+                };
+                float lw[vetro::N_STILI]{}, sumW = 0;
+                for (int k = 0; k < vetro::N_STILI; k++) { lw[k] = v.larghezza(nomi[k], fCentro); sumW += lw[k]; }
+                const float xLeftEnd = std::min(r.right - 16 * d - 240 * d,
+                                                r.left + 16 * d + std::max(v.larghezza(tit, fVoce), v.larghezza(sub, fSotto)) + 12 * d);
+                const float larg = std::min(360 * d, r.right - 16 * d - xLeftEnd);
+                const float x0 = r.right - 16 * d - larg, h = 34 * d, yl = r.top + 15 * d;
+                v.testo(tit, fVoce, {r.left + 16 * d, r.top + 11 * d, x0 - 10 * d, r.top + 33 * d}, inkS);
+                v.testo(sub, fSotto, {r.left + 16 * d, r.top + 32 * d, x0 - 10 * d, r.top + 52 * d}, tenueS);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const float pad = std::max(4.0f * d, (larg - 6 * d - sumW) / (float)vetro::N_STILI);
+                float cx = x0 + 3 * d;
+                for (int k = 0; k < vetro::N_STILI; k++) {
+                    const float pw = lw[k] + pad;
+                    const D2D1_RECT_F rp = {cx, yl + 3 * d, cx + pw, yl + h - 3 * d};
+                    aggiungiZona(rp, Z_STILE + k);
+                    if (valori().stileVetro == k) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == Z_STILE + k) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[k], fCentro, rp, inkS);
+                    cx += pw;
+                }
+                y += 70 * d;
+            }
             // colore del dock: automatico (meta' chiaro e meta' scuro), i colori pronti, e "+" per sceglierne uno
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);
@@ -897,7 +988,7 @@ private:
                 const int id = Z_COLORE + k;
                 const float cx = xInizio + passo * k;
                 const D2D1_ELLIPSE el = {{cx, cy}, rc, rc};
-                zone.push_back({{cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id});
+                aggiungiZona({cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id);
                 const bool attivo = k == 0 ? !(scelto & COLORE_SCELTO)
                                   : k <= N_COLORI ? scelto == (COLORE_SCELTO | COLORI[k - 1])
                                                   : ((scelto & COLORE_SCELTO) && !pronto);
@@ -924,6 +1015,7 @@ private:
                 }
             }
             y += 60 * d;
+            v.rt->PopAxisAlignedClip();
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),

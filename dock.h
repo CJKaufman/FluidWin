@@ -670,8 +670,23 @@ public:
         a = std::clamp(a, 0.2f, 1.0f);
         if (std::fabs(a - opacita) < 0.001f) return;
         opacita = a;
-        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) SetLayeredWindowAttributes(v, 0, (BYTE)std::lround(a * 255), LWA_ALPHA);
+        const BYTE av = alfaVetro(opacita);
+        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) SetLayeredWindowAttributes(v, 0, av, LWA_ALPHA);
         dirty = true;
+    }
+    void impostaStileVetro(int s) {
+        s = std::clamp(s, 0, ::vetro::N_STILI - 1);
+        ::vetro::stile() = s;
+        if (s == stileVetro) return;
+        stileVetro = s;
+        if (!attivo) return;
+        const int tipo = ::vetro::tipoBackdrop(true);
+        for (HWND v : {vetro, vetroStato, vetroOra, vetroPannello, altra.vetroPannello, vetroLauncher})
+            if (v) DwmSetWindowAttribute(v, DWMWA_SYSTEMBACKDROP_TYPE, &tipo, sizeof(tipo));
+        const BYTE av = alfaVetro(opacita);
+        for (HWND v : {vetro, vetroStato, vetroOra})
+            if (v) SetLayeredWindowAttributes(v, 0, av, LWA_ALPHA);
+        dirty = true; pDirty = true; altra.pDirty = true; lDirty = true;
     }
     // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
     std::wstring exeDiApp(const std::wstring& aumid, const std::wstring& nome) const {
@@ -733,6 +748,7 @@ private:
     bool oraNelDock = false;
     bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
     float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
+    int stileVetro = ::vetro::STILE_ACRILICO;   // impostazione: stile del vetro (acrilico, liquido, mica, trasparente)
     int latoIcone = 42;               // impostazione: lato delle icone a riposo, px a 100%
     int distanzaIcone = 6;            // impostazione: distanza fra le icone, px a 100% (GAP)
     static constexpr float INGRANDITE = 66.0f / 42.0f;   // icone ingrandite dalla lente: proporzione fissa con quelle a riposo
@@ -818,13 +834,19 @@ private:
         return scuro;
     }
 
+    BYTE alfaVetro(float a) const {
+        if (stileVetro == ::vetro::STILE_TRASPARENTE) return 0;
+        if (stileVetro == ::vetro::STILE_LIQUIDO) return (BYTE)std::lround(std::clamp(a * 0.82f, 0.0f, 1.0f) * 255);
+        return (BYTE)std::lround(std::clamp(a, 0.0f, 1.0f) * 255);
+    }
+
     HWND creaVetro(HINSTANCE inst) {
         HWND v = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED,
                                  L"FluidWin.DockVetro", L"", WS_POPUP | WS_THICKFRAME, 0, 0, 10, 10, nullptr, nullptr, inst, nullptr);
-        SetLayeredWindowAttributes(v, 0, 255, LWA_ALPHA);
+        SetLayeredWindowAttributes(v, 0, alfaVetro(opacita), LWA_ALPHA);
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(v, &mg);
         BOOL scuro = temaScuro(); DwmSetWindowAttribute(v, DWMWA_USE_IMMERSIVE_DARK_MODE, &scuro, sizeof(scuro));
-        int tipo = 3; DwmSetWindowAttribute(v, DWMWA_SYSTEMBACKDROP_TYPE, &tipo, sizeof(tipo));
+        int tipo = ::vetro::tipoBackdrop(true); DwmSetWindowAttribute(v, DWMWA_SYSTEMBACKDROP_TYPE, &tipo, sizeof(tipo));
         int angoli = 2; DwmSetWindowAttribute(v, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(v, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         return v;
@@ -1507,13 +1529,54 @@ private:
     // fondo di vetro (velo e bordi sopra il vetro acrilico); a: opacita' (quella del dock, impostazione; 1 i pannelli)
     // tinta: colore scelto per il dock (nullptr: chiaro o scuro col tema), piu' coprente perche' si veda
     void disegnaFondo(const D2D1_RECT_F& f, bool scuro, float a = 1, const D2D1_COLOR_F* tinta = nullptr) {
-        pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.62f * a)
-                                 : scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
-        dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
-        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
-        dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
-        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.45f : 0.10f) * a));
-        dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
+        switch (stileVetro) {
+            case ::vetro::STILE_LIQUIDO: {
+                pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.38f * a)
+                                         : scuro ? D2D1::ColorF(0.08f, 0.10f, 0.14f, 0.16f * a) : D2D1::ColorF(1, 1, 1, 0.20f * a));
+                dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
+                dc->PushAxisAlignedClip({f.left, f.top, f.right, f.top + (f.bottom - f.top) * 0.42f}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.12f : 0.34f) * a));
+                dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
+                dc->PopAxisAlignedClip();
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.52f : 0.90f) * a));
+                dc->DrawRoundedRectangle({{f.left + 0.6f, f.top + 0.6f, f.right - 0.6f, f.bottom - 0.6f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.5f);
+                const float m = 2.6f * dpi;
+                if (f.right - f.left > m * 4 && f.bottom - f.top > m * 4) {
+                    pennello->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.18f : 0.45f) * a));
+                    dc->DrawRoundedRectangle({{f.left + m, f.top + m, f.right - m, f.bottom - m}, std::max(2.0f, RAGGIO - m), std::max(2.0f, RAGGIO - m)}, pennello, 1.0f);
+                }
+                pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.52f : 0.16f) * a));
+                dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.2f);
+                break;
+            }
+            case ::vetro::STILE_MICA:
+                pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.72f * a)
+                                         : scuro ? D2D1::ColorF(0.13f, 0.13f, 0.16f, 0.72f * a) : D2D1::ColorF(0.95f, 0.95f, 0.97f, 0.76f * a));
+                dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.09f * a) : D2D1::ColorF(0, 0, 0, 0.08f * a));
+                dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
+                pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.30f : 0.08f) * a));
+                dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
+                break;
+            case ::vetro::STILE_TRASPARENTE:
+                pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.22f * a)
+                                         : scuro ? D2D1::ColorF(0.05f, 0.05f, 0.07f, 0.10f * a) : D2D1::ColorF(1, 1, 1, 0.14f * a));
+                dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.30f * a) : D2D1::ColorF(1, 1, 1, 0.65f * a));
+                dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.2f);
+                pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.40f : 0.15f) * a));
+                dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
+                break;
+            default:
+                pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.62f * a)
+                                         : scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
+                dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
+                dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
+                pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.45f : 0.10f) * a));
+                dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
+                break;
+        }
     }
 
     void disegnaEtichetta(bool scuro) {
