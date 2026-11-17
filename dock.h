@@ -613,6 +613,12 @@ public:
         if (!si) { isola = {}; for (auto& r : rettStato) r = {}; statoSopra = statoPremuto = -1; }
         dirty = true;
     }
+    void impostaGiochi(bool si) {
+        if (si == mostraGiochi) return;
+        mostraGiochi = si;
+        if (!si && lAperto && lModoGiochi) chiudiLauncher();
+        if (attivo) aggiornaApp();
+    }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
     // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
     // vetro e velo, le icone restano piene)
@@ -734,6 +740,7 @@ private:
     // impostazione: ora e data in fondo al dock, dopo il centro di controllo (larghezzaCoda). Per il mouse fa da
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
+    bool mostraGiochi = true;
     bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
     float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
     int latoIcone = 42;               // impostazione: lato delle icone a riposo, px a 100%
@@ -1008,7 +1015,8 @@ private:
         std::vector<Voce> nuove;
         // 0) prima icona: il launcher di tutte le app (disegnata dal dock, senza finestre)
         { Voce l; l.fissata = true; l.avvio = AVVIO_LAUNCHER; l.nome = L"App"; nuove.push_back(std::move(l)); }
-        { Voce g; g.fissata = true; g.avvio = AVVIO_GIOCHI; g.nome = testi::t(L"Giochi", L"Games"); nuove.push_back(std::move(g)); }
+        if (mostraGiochi) { Voce g; g.fissata = true; g.avvio = AVVIO_GIOCHI; g.nome = testi::t(L"Giochi", L"Games"); nuove.push_back(std::move(g)); }
+        const size_t nTesta = nuove.size();
         // 1) aggiunte alla barra, nell'ordine dei collegamenti. Leggerle (ogni .lnk aperto dalla shell) costa: si
         // rileggono solo se la cartella e' cambiata (collegamento aggiunto, tolto o rinominato) o dopo un minuto
         wchar_t cart[MAX_PATH];
@@ -1066,7 +1074,7 @@ private:
                 }
                 nuove.push_back(std::move(v));
             }
-            if (!valida) { fissateCache.assign(nuove.begin() + 2, nuove.end()); fissateOk = letta; }
+            if (!valida) { fissateCache.assign(nuove.begin() + nTesta, nuove.end()); fissateOk = letta; }
         }
         const size_t fissate = nuove.size();
         // 2) finestre aperte: si agganciano all'app fissata corrispondente, o creano una nuova voce
@@ -1129,6 +1137,7 @@ private:
                 else chiediIcona(sorgenteIcona(v), 256);
                 if (!vecchiaTrovata && !primaVolta) v.scala = 0;   // voce nuova: cresce da zero
             }
+            if (!vecchiaTrovata && !primaVolta && v.avvio == AVVIO_GIOCHI) v.scala = 0;
         }
         // le app chiuse restano al loro posto mentre si restringono
         size_t fissateTot = fissate;
