@@ -769,13 +769,37 @@ inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
         const float x = m + (i % 4) * tw, y = top + (i / 4) * th;
         const D2D1_RECT_F r = {x + 2 * dpi, y, x + tw - 2 * dpi, y + th - 6 * dpi};
         const int e = aggiungi(r, A_APP, (int)i);
+        int ex = -1;
+        const D2D1_RECT_F rx = {r.right - 22 * dpi, r.top + 2 * dpi, r.right - 2 * dpi, r.top + 22 * dpi};
+        if (appSfondo[i].avvio != L"*fluidwin") ex = aggiungi(rx, A_APP_CHIUDI, (int)i);
+        const int sopraSalvato = pSopra;
+        if (ex >= 0 && pMouseDentro && pSopra == ex) pSopra = e;
         evidenzia(e, r, scuro, 6 * dpi);
+        pSopra = sopraSalvato;
+        if (ex >= 0 && (int)evidP.size() <= ex) evidP.resize(ex + 1, 0.0);
         const float s = (e == pPremuto) ? 0.9f : 1.0f;   // si "schiaccia" alla pressione
         const float cx = (r.left + r.right) / 2, cy = r.top + 30 * dpi, l = 22 * dpi * s;
         if (appSfondo[i].icona) dc->DrawBitmap(appSfondo[i].icona, D2D1::RectF(cx - l, cy - l, cx + l, cy + l), 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         else { pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f)); dc->FillRoundedRectangle({{cx - l, cy - l, cx + l, cy + l}, 10 * dpi, 10 * dpi}, pennello); }
         pennello->SetColor(ink);
         scrivi(appSfondo[i].nome, fmtNome, {r.left + 3 * dpi, cy + 26 * dpi, r.right - 3 * dpi, cy + 44 * dpi});
+        if (ex >= 0 && pMouseDentro && (pSopra == e || pSopra == ex)) {
+            const double hh = evidenzia(ex, {0, 0, 0, 0}, scuro, 0);
+            const float bx = (rx.left + rx.right) / 2, by = (rx.top + rx.bottom) / 2;
+            if (pSopra == ex) {
+                pennello->SetColor(D2D1::ColorF(0.92f, 0.26f, 0.26f, pPremuto == ex ? 0.95f : 0.85f));
+                dc->FillEllipse({{bx, by}, 8.5f * dpi, 8.5f * dpi}, pennello);
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.98f));
+            } else {
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f + 0.06f * (float)hh) : D2D1::ColorF(0, 0, 0, 0.10f + 0.04f * (float)hh));
+                dc->FillEllipse({{bx, by}, 8.5f * dpi, 8.5f * dpi}, pennello);
+                pennello->SetColor(ink);
+            }
+            linea(-3.0f, -3.0f, 3.0f, 3.0f, bx, by, 1.5f);
+            linea(3.0f, -3.0f, -3.0f, 3.0f, bx, by, 1.5f);
+        } else if (ex >= 0) {
+            evidP[ex] = 0.0;
+        }
     }
     // piede: il pannello di Windows, per i menu col tasto destro delle singole app
     const float py = PH - 46 * dpi;
@@ -1637,6 +1661,58 @@ inline auto Motore::altezzaSfondo() const -> float {
 }
 
 inline auto Motore::elencaAppSfondo() -> std::vector<AppSfondo> {
+    struct TrayIcona { HWND hWnd = nullptr; UINT uid = 0, msg = 0, ver = 0; DWORD stato = 0; };
+    std::unordered_map<std::wstring, std::vector<TrayIcona>> iconeTray;
+    auto scansionaToolbar = [&](HWND tb) {
+        if (!tb) return;
+        DWORD pidExp = 0; GetWindowThreadProcessId(tb, &pidExp);
+        if (!pidExp) return;
+        HANDLE hProc = OpenProcess(PROCESS_VM_READ | PROCESS_VM_OPERATION | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pidExp);
+        if (!hProc) return;
+        void* mem = VirtualAllocEx(hProc, nullptr, 64, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!mem) { CloseHandle(hProc); return; }
+        struct TbBtn64 {
+            int iBitmap;
+            int idCommand;
+            BYTE fsState;
+            BYTE fsStyle;
+            BYTE bReserved[6];
+            ULONG_PTR dwData;
+            LONG_PTR iString;
+        };
+        static_assert(sizeof(TbBtn64) == 32);
+        struct TrayData64 {
+            ULONG_PTR hWnd;
+            UINT uID;
+            UINT uCallbackMessage;
+            DWORD dwState;
+            UINT uVersion;
+        };
+        static_assert(sizeof(TrayData64) == 24);
+        const LRESULT count = SendMessageW(tb, 0x0418 /* TB_BUTTONCOUNT */, 0, 0);
+        for (LRESULT idx = 0; idx < count && idx < 256; idx++) {
+            if (!SendMessageW(tb, 0x0417 /* TB_GETBUTTON */, (WPARAM)idx, (LPARAM)mem)) continue;
+            TbBtn64 tbBtn{}; SIZE_T nr = 0;
+            if (!ReadProcessMemory(hProc, mem, &tbBtn, sizeof(tbBtn), &nr) || nr != sizeof(tbBtn) || !tbBtn.dwData) continue;
+            TrayData64 td{}; SIZE_T nrTd = 0;
+            if (!ReadProcessMemory(hProc, (LPCVOID)tbBtn.dwData, &td, sizeof(td), &nrTd) || nrTd != sizeof(td)) continue;
+            if (!td.hWnd || !IsWindow((HWND)td.hWnd) || td.uCallbackMessage < WM_USER) continue;
+            const std::wstring exe = minuscolo(exeProcesso((HWND)td.hWnd));
+            if (!exe.empty()) iconeTray[exe].push_back(TrayIcona{(HWND)td.hWnd, td.uID, td.uCallbackMessage, td.uVersion, td.dwState});
+        }
+        VirtualFreeEx(hProc, mem, 0, MEM_RELEASE);
+        CloseHandle(hProc);
+    };
+    HWND tray = FindWindowW(L"Shell_TrayWnd", nullptr);
+    HWND trayNotify = tray ? FindWindowExW(tray, nullptr, L"TrayNotifyWnd", nullptr) : nullptr;
+    HWND sysPager = trayNotify ? FindWindowExW(trayNotify, nullptr, L"SysPager", nullptr) : nullptr;
+    HWND tbTray = sysPager ? FindWindowExW(sysPager, nullptr, L"ToolbarWindow32", nullptr) : nullptr;
+    if (!tbTray && trayNotify) tbTray = FindWindowExW(trayNotify, nullptr, L"ToolbarWindow32", nullptr);
+    HWND overflow = FindWindowW(L"NotifyIconOverflowWindow", nullptr);
+    HWND tbOverflow = overflow ? FindWindowExW(overflow, nullptr, L"ToolbarWindow32", nullptr) : nullptr;
+    scansionaToolbar(tbTray);
+    scansionaToolbar(tbOverflow);
+
     std::unordered_set<std::wstring> attivi;
     HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
@@ -1669,6 +1745,24 @@ inline auto Motore::elencaAppSfondo() -> std::vector<AppSfondo> {
             a.nome = exe == proprio ? L"FluidWin" : exe.find(L"securityhealthsystray") != std::wstring::npos ? testi::t(L"Sicurezza di Windows", L"Windows Security") : nomeDaTooltip(tip);
             if (a.nome.empty()) a.nome = nomeExe(exe);
             a.chiaveReg = sub;   // l'icona la chiede poi il thread principale
+            DWORD uidReg = 0, uidSz = sizeof(uidReg);
+            const bool hasUid = RegGetValueW(k, sub, L"UID", RRF_RT_REG_DWORD, nullptr, &uidReg, &uidSz) == ERROR_SUCCESS;
+            if (auto it = iconeTray.find(exe); it != iconeTray.end() && !it->second.empty()) {
+                const TrayIcona* migliore = nullptr;
+                int migliorPunteggio = -1;
+                for (const auto& t : it->second) {
+                    const int p = (hasUid && t.uid == uidReg ? 2 : 0) + (!(t.stato & 1) ? 1 : 0);
+                    if (p > migliorPunteggio) { migliorPunteggio = p; migliore = &t; }
+                }
+                if (migliore) {
+                    a.hWndTray = migliore->hWnd;
+                    a.uidTray = migliore->uid;
+                    a.msgTray = migliore->msg;
+                    a.verTray = migliore->ver;
+                }
+            } else if (hasUid) {
+                a.uidTray = uidReg;
+            }
             // come si apre: rilanciarle e' il modo ufficiale (le app da area di notifica mostrano la loro finestra)
             if (exe == proprio) a.avvio = L"*fluidwin";
             else if (exe.find(L"securityhealthsystray") != std::wstring::npos) a.avvio = L"windowsdefender:";
@@ -1733,22 +1827,175 @@ inline auto Motore::apriPagina(const wchar_t* uri) -> void { ShellExecuteW(nullp
 // il pannello delle icone nascoste di Windows (fa risalire la barra): resta per i menu delle singole app
 inline auto Motore::pannelloWindows() -> void { tastiWin('B'); SetTimer(icone, TIMER_INVIO, 220, nullptr); }
 
-inline auto Motore::apriAppSfondo(const AppSfondo& a) -> void {
+#ifndef NIN_SELECT
+#define NIN_SELECT (WM_USER + 0)
+#endif
+
+inline auto Motore::inviaClicTray(const AppSfondo& a, bool destro, POINT pt) -> bool {
+    if (!a.hWndTray || !IsWindow(a.hWndTray) || a.msgTray < WM_USER) return false;
+    DWORD pid = 0; GetWindowThreadProcessId(a.hWndTray, &pid);
+    if (pid) AllowSetForegroundWindow(pid);
+    SetForegroundWindow(a.hWndTray);
+    if (a.verTray >= 4) {
+        const WPARAM wp = MAKEWPARAM((WORD)pt.x, (WORD)pt.y);
+        if (destro) {
+            for (UINT msg : {(UINT)WM_RBUTTONDOWN, (UINT)WM_RBUTTONUP, (UINT)WM_CONTEXTMENU})
+                PostMessageW(a.hWndTray, a.msgTray, wp, MAKELPARAM(LOWORD(msg), LOWORD(a.uidTray)));
+        } else {
+            for (UINT msg : {(UINT)WM_LBUTTONDOWN, (UINT)WM_LBUTTONUP, (UINT)NIN_SELECT})
+                PostMessageW(a.hWndTray, a.msgTray, wp, MAKELPARAM(LOWORD(msg), LOWORD(a.uidTray)));
+        }
+    } else {
+        if (destro) {
+            PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)WM_RBUTTONDOWN);
+            PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)WM_RBUTTONUP);
+            if (a.verTray == 3) PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)WM_CONTEXTMENU);
+        } else {
+            PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)WM_LBUTTONDOWN);
+            PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)WM_LBUTTONUP);
+            if (a.verTray == 3) PostMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)NIN_SELECT);
+        }
+    }
+    return true;
+}
+
+inline auto Motore::apriAppSfondo(const AppSfondo& a, POINT pt) -> void {
     if (a.avvio == L"*fluidwin") {   // FluidWin stesso: il suo menu (pausa, esci)
         nascondiPannello();   // il menu blocca il disegno finche' resta aperto: niente dissolvenza a meta'
         PostMessageW(FindWindowW(L"FluidWin.Messaggi", nullptr), WM_APP + 1, 1, WM_LBUTTONUP);
-    } else if (a.avvio.empty()) {
-        pannelloWindows();
-    } else {
-        const std::wstring dir = a.avvio.find(L'\\') != std::wstring::npos && a.avvio.rfind(L"shell:", 0) != 0
-                                 ? a.avvio.substr(0, a.avvio.find_last_of(L'\\')) : L"";
-        ShellExecuteW(nullptr, L"open", a.avvio.c_str(), nullptr, dir.empty() ? nullptr : dir.c_str(), SW_SHOWNORMAL);
+        return;
     }
+    if (!pt.x && !pt.y) GetCursorPos(&pt);
+    bool finestraAperta = false;
+    for (const auto& v : voci) {
+        if (!v.uscente && !v.finestre.empty() && stessoExe(v.exe, v.sqPrima, v.sqDopo, a.exe)) {
+            portaDavanti(v.finestre.front());
+            finestraAperta = true;
+            break;
+        }
+    }
+    const bool trayOk = inviaClicTray(a, false, pt);
+    if (!finestraAperta && !trayOk) {
+        struct CercaFinestra { const std::wstring* exe; HWND trovata = nullptr; } cf{&a.exe};
+        if (!a.exe.empty()) {
+            EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+                auto* c = (CercaFinestra*)lp;
+                if (!IsWindow(h) || IsWindowVisible(h)) return TRUE;
+                if (!(GetWindowLongPtrW(h, GWL_STYLE) & WS_OVERLAPPEDWINDOW)) return TRUE;
+                if (GetWindowTextLengthW(h) <= 0) return TRUE;
+                if (minuscolo(exeProcesso(h)) != *c->exe) return TRUE;
+                c->trovata = h;
+                return FALSE;
+            }, (LPARAM)&cf);
+        }
+        if (cf.trovata) {
+            ShowWindowAsync(cf.trovata, SW_SHOW);
+            ShowWindowAsync(cf.trovata, SW_RESTORE);
+            portaDavanti(cf.trovata);
+        } else if (a.avvio.empty()) {
+            pannelloWindows();
+        } else {
+            const std::wstring dir = a.avvio.find(L'\\') != std::wstring::npos && a.avvio.rfind(L"shell:", 0) != 0
+                                     ? a.avvio.substr(0, a.avvio.find_last_of(L'\\')) : L"";
+            ShellExecuteW(nullptr, L"open", a.avvio.c_str(), nullptr, dir.empty() ? nullptr : dir.c_str(), SW_SHOWNORMAL);
+        }
+    }
+}
+
+inline auto Motore::chiudiAppSfondo(int indice, bool forza) -> void {
+    if (indice < 0 || indice >= (int)appSfondo.size()) return;
+    const AppSfondo a = appSfondo[indice];
+    if (a.avvio == L"*fluidwin" || a.exe.empty()) return;
+    appSfondo.erase(appSfondo.begin() + indice);
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_SFONDO && !pChiusura) {
+        const float nuova = altezzaVista(P_SFONDO);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
+    }
+    usa(s);
+    inSottofondo([a, forza] {
+        const DWORD selfPid = GetCurrentProcessId();
+        std::vector<DWORD> pids;
+        HANDLE sn = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+        if (sn != INVALID_HANDLE_VALUE && Process32FirstW(sn, &pe)) do {
+            if (!pe.th32ProcessID || pe.th32ProcessID == selfPid) continue;
+            if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID)) {
+                wchar_t b[MAX_PATH]; DWORD n = MAX_PATH;
+                if (QueryFullProcessImageNameW(p, 0, b, &n) && minuscolo(b) == a.exe) pids.push_back(pe.th32ProcessID);
+                CloseHandle(p);
+            }
+        } while (Process32NextW(sn, &pe));
+        if (sn != INVALID_HANDLE_VALUE) CloseHandle(sn);
+
+        std::vector<DWORD> rimasti;
+        if (!forza && !pids.empty()) {
+            struct RaccogliFinestre {
+                const std::vector<DWORD>* pids;
+                std::vector<HWND> finestre;
+            } rf{&pids};
+            auto aggiungiUnica = [&](HWND h) {
+                if (!h || !IsWindow(h)) return;
+                if (std::find(rf.finestre.begin(), rf.finestre.end(), h) == rf.finestre.end()) rf.finestre.push_back(h);
+            };
+            EnumWindows([](HWND h, LPARAM lp) -> BOOL {
+                auto* r = (RaccogliFinestre*)lp;
+                DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+                if (pid && std::find(r->pids->begin(), r->pids->end(), pid) != r->pids->end()) {
+                    if (std::find(r->finestre.begin(), r->finestre.end(), h) == r->finestre.end()) r->finestre.push_back(h);
+                }
+                return TRUE;
+            }, (LPARAM)&rf);
+            int lim = 0;
+            for (HWND h = FindWindowExW(HWND_MESSAGE, nullptr, nullptr, nullptr); h && lim++ < 4096; h = FindWindowExW(HWND_MESSAGE, h, nullptr, nullptr)) {
+                DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+                if (pid && std::find(pids.begin(), pids.end(), pid) != pids.end()) aggiungiUnica(h);
+            }
+            if (a.hWndTray && IsWindow(a.hWndTray)) {
+                DWORD tpid = 0; GetWindowThreadProcessId(a.hWndTray, &tpid);
+                if (tpid != selfPid) aggiungiUnica(a.hWndTray);
+            }
+            for (HWND h : rf.finestre) PostMessageW(h, WM_CLOSE, 0, 0);
+
+            const ULONGLONG scadenza = GetTickCount64() + 250;
+            for (DWORD pid : pids) {
+                HANDLE hp = OpenProcess(SYNCHRONIZE, FALSE, pid);
+                if (!hp) continue;
+                const ULONGLONG ora = GetTickCount64();
+                const DWORD resta = ora < scadenza ? (DWORD)(scadenza - ora) : 0;
+                if (WaitForSingleObject(hp, resta) != WAIT_OBJECT_0) rimasti.push_back(pid);
+                CloseHandle(hp);
+            }
+        } else {
+            rimasti = pids;
+        }
+        for (DWORD pid : rimasti) {
+            if (HANDLE hp = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) {
+                TerminateProcess(hp, 0);
+                CloseHandle(hp);
+            }
+        }
+        if (a.hWndTray) {
+            NOTIFYICONDATAW nid{}; nid.cbSize = sizeof(nid);
+            nid.hWnd = a.hWndTray; nid.uID = a.uidTray;
+            Shell_NotifyIconW(NIM_DELETE, &nid);
+        }
+    }, [this] { leggiAppSfondo(); });
 }
 
 inline auto Motore::eseguiPannello(const Elemento& e) -> void {
     switch (e.azione) {
-        case A_APP:          chiudiPannello(); if (e.indice < (int)appSfondo.size()) apriAppSfondo(appSfondo[e.indice]); break;
+        case A_APP: {
+            POINT pt{}; GetCursorPos(&pt);
+            chiudiPannello();
+            if (e.indice >= 0 && e.indice < (int)appSfondo.size()) apriAppSfondo(appSfondo[e.indice], pt);
+            break;
+        }
+        case A_APP_CHIUDI:
+            chiudiAppSfondo(e.indice, (GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            break;
         case A_TUTTE:        chiudiPannello(); pannelloWindows(); break;
         // Wi-Fi e Bluetooth: interruttori (se la scheda c'e'); il tasto destro apre comunque le impostazioni
         case A_RETE:
@@ -1932,18 +2179,54 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             const int e = d->elementoIn(x, y);
             if (e >= 0 && d->elementi[e].azione == A_RETE) { d->chiudiPannello(); apriPagina(L"ms-settings:network-status"); return 0; }
             if (e >= 0 && d->elementi[e].azione == A_BLUETOOTH) { d->chiudiPannello(); apriPagina(L"ms-settings:bluetooth"); return 0; }
-            if (e < 0 || d->elementi[e].azione != A_APP) return 0;
-            POINT pt{(LONG)x, (LONG)y}; ClientToScreen(h, &pt);
+            if (e < 0 || (d->elementi[e].azione != A_APP && d->elementi[e].azione != A_APP_CHIUDI)) return 0;
             const int indice = d->elementi[e].indice;
-            const std::wstring exe = indice >= 0 && indice < (int)d->appSfondo.size() ? d->appSfondo[indice].exe : L"";
-            const int s = (int)d->menuScheda({menu::voce(testi::t(L"Apri", L"Open"), 1), menu::separatore(),
-                                               menu::voce(testi::t(L"Altre opzioni (pannello di Windows)", L"More options (Windows panel)"), 2)}, pt, h);
+            if (indice < 0 || indice >= (int)d->appSfondo.size()) return 0;
+            const AppSfondo app = d->appSfondo[indice];
+            POINT pt{(LONG)x, (LONG)y}; ClientToScreen(h, &pt);
+            const bool haTray = app.hWndTray && IsWindow(app.hWndTray) && app.msgTray >= WM_USER;
+            if ((GetKeyState(VK_SHIFT) & 0x8000) && haTray) {
+                d->nascondiPannello();
+                d->inviaClicTray(app, true, pt);
+                return 0;
+            }
+            std::vector<menu::Voce> vv = {
+                menu::titolo(app.nome),
+                menu::voce(testi::t(L"Apri", L"Open"), 1)
+            };
+            if (haTray) vv.push_back(menu::voce(testi::t(L"Menu dell'icona", L"Tray menu"), 6));
+            if (!app.exe.empty() && GetFileAttributesW(app.exe.c_str()) != INVALID_FILE_ATTRIBUTES)
+                vv.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 3));
+            if (app.avvio != L"*fluidwin") {
+                vv.push_back(menu::separatore());
+                vv.push_back(menu::voce(testi::t(L"Chiudi", L"Close"), 4));
+                vv.push_back(menu::voce(testi::t(L"Termina processo", L"End task"), 5));
+            }
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Pannello di Windows", L"Windows panel"), 2));
+            const int s = (int)d->menuScheda(vv, pt, h);
+            auto trova = [&]() -> int {
+                for (size_t k = 0; k < d->appSfondo.size(); k++)
+                    if (d->appSfondo[k].exe == app.exe) return (int)k;
+                return -1;
+            };
             // nel frattempo l'elenco puo' essere stato riletto (in ordine di nome): si ritrova la stessa app
             if (s == 1) {
-                for (size_t k = 0; k < d->appSfondo.size(); k++)
-                    if (d->appSfondo[k].exe == exe) { d->eseguiPannello(Elemento{{}, A_APP, (int)k}); break; }
+                const int k = trova();
+                if (k >= 0) { d->chiudiPannello(); d->apriAppSfondo(d->appSfondo[k], pt); }
+            } else if (s == 6) {
+                d->nascondiPannello();
+                d->inviaClicTray(app, true, pt);
+            } else if (s == 3) {
+                d->chiudiPannello();
+                ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + app.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
+            } else if (s == 4 || s == 5) {
+                const int k = trova();
+                if (k >= 0) d->chiudiAppSfondo(k, s == 5);
+            } else if (s == 2) {
+                d->chiudiPannello();
+                d->pannelloWindows();
             }
-            else if (s == 2) { d->chiudiPannello(); d->pannelloWindows(); }
             return 0;
         }
         case WM_MOUSEWHEEL:

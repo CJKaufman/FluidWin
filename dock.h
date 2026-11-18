@@ -1788,7 +1788,7 @@ private:
     widget::Dati widD;                   // meteo e notizie (scaricati in un thread a parte)
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     IDWriteTextFormat* fmtNotizia = nullptr;
-    enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
+    enum Azione { A_APP, A_APP_CHIUDI, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
@@ -1819,7 +1819,12 @@ private:
     std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeN;   // per AppUserModelID (nullptr = provata, nessuna icona)
     std::unordered_map<std::wstring, std::wstring> iconeNDaExe;   // eseguibile chiesto al posto dell'AppUserModelID -> AppUserModelID
     IDWriteTextFormat* fmtGrande = nullptr;
-    struct AppSfondo { std::wstring nome, exe, avvio, chiaveReg; ID2D1Bitmap* icona = nullptr; };
+    struct AppSfondo {
+        std::wstring nome, exe, avvio, chiaveReg;
+        ID2D1Bitmap* icona = nullptr;
+        HWND hWndTray = nullptr;
+        UINT uidTray = 0, msgTray = 0, verTray = 0;
+    };
     struct Elemento { D2D1_RECT_F r; Azione azione; int indice; };
 
     HWND pannello = nullptr, vetroPannello = nullptr;
@@ -2158,7 +2163,11 @@ private:
 
     void pannelloWindows();
 
-    void apriAppSfondo(const AppSfondo& a);
+    void apriAppSfondo(const AppSfondo& a, POINT pt = {});
+
+    bool inviaClicTray(const AppSfondo& a, bool destro, POINT pt);
+
+    void chiudiAppSfondo(int indice, bool forza);
 
     void eseguiPannello(const Elemento& e);
 
