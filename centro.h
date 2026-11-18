@@ -1681,39 +1681,51 @@ inline auto Motore::elencaAppSfondo() -> std::vector<AppSfondo> {
         auto leggiPtr = [&](ULONG_PTR addr, ULONG_PTR& out) -> bool {
             return leggi(addr, &out, sizeof(out)) && out >= 0x10000;
         };
-        ULONG_PTR trayNotifyObj = 0;
-        if (!leggiPtr(ctray + 0x178, trayNotifyObj)) return;
-        // taskbar.dll 10.0.26300.0: 0x270 primario; 0x280/0x298 per sub-interfacce COM
-        for (ULONG_PTR off : {(ULONG_PTR)0x270, (ULONG_PTR)0x280, (ULONG_PTR)0x298}) {
-            ULONG_PTR r8 = 0, cTrayNotify = 0;
-            if (!leggiPtr(trayNotifyObj + off, r8) || !leggiPtr(r8 + 0x248, cTrayNotify)) continue;
-            ULONG_PTR vec[3]{};
-            if (!leggi(cTrayNotify, vec, sizeof(vec))) continue;
-            const ULONG_PTR vecBegin = vec[0], vecEnd = vec[1], vecCap = vec[2];
-            if (vecBegin < 0x10000 || vecBegin > vecEnd || vecEnd > vecCap) continue;
-            if ((vecEnd - vecBegin) % sizeof(ULONG_PTR) != 0 || vecCap - vecBegin >= 0x10000) continue;
-            const SIZE_T count = (SIZE_T)((vecEnd - vecBegin) / sizeof(ULONG_PTR));
-            if (count < 1 || count > 256) continue;
-            std::vector<ULONG_PTR> ptrs(count);
-            if (!leggi(vecBegin, ptrs.data(), count * sizeof(ULONG_PTR))) continue;
-            bool trovato = false;
-            for (ULONG_PTR itemPtr : ptrs) {
-                alignas(ULONG_PTR) BYTE item[0xC0]{};
-                if (!leggi(itemPtr, item, sizeof(item))) continue;
-                const HWND hWnd = (HWND)(*(const ULONG_PTR*)(item + 0x50));
-                const UINT uid = *(const UINT*)(item + 0x58);
-                const BYTE promoted = *(const BYTE*)(item + 0x90);
-                const UINT ver = *(const UINT*)(item + 0x94);
-                const UINT msg = *(const UINT*)(item + 0x98);
-                const ULONGLONG idReg = *(const ULONGLONG*)(item + 0xB0);
-                if (!hWnd || !IsWindow(hWnd) || ver > 4 || msg < WM_USER) continue;
-                trovato = true;
-                const TrayIcona ti{hWnd, uid, msg, ver, promoted ? 0u : 1u, idReg};
-                if (idReg != 0) iconePerId[idReg] = ti;
-                const std::wstring exeIcona = exeProcesso(hWnd);
-                if (!exeIcona.empty()) iconeTray[exeIcona].push_back(ti);
+        auto leggiOggetto = [&](ULONG_PTR trayNotifyObj) -> bool {
+            // taskbar.dll: 0x270 da TrayNotify+0x28; 0x268..0x298 per gli altri puntatori di sub-interfaccia COM
+            for (ULONG_PTR off : {(ULONG_PTR)0x270, (ULONG_PTR)0x268, (ULONG_PTR)0x278, (ULONG_PTR)0x280, (ULONG_PTR)0x288, (ULONG_PTR)0x290, (ULONG_PTR)0x298}) {
+                ULONG_PTR r8 = 0, cTrayNotify = 0;
+                if (!leggiPtr(trayNotifyObj + off, r8) || !leggiPtr(r8 + 0x248, cTrayNotify)) continue;
+                ULONG_PTR vec[3]{};
+                if (!leggi(cTrayNotify, vec, sizeof(vec))) continue;
+                const ULONG_PTR vecBegin = vec[0], vecEnd = vec[1], vecCap = vec[2];
+                if (vecBegin < 0x10000 || vecBegin > vecEnd || vecEnd > vecCap) continue;
+                if ((vecEnd - vecBegin) % sizeof(ULONG_PTR) != 0 || vecCap - vecBegin >= 0x10000) continue;
+                const SIZE_T count = (SIZE_T)((vecEnd - vecBegin) / sizeof(ULONG_PTR));
+                if (count < 1 || count > 256) continue;
+                std::vector<ULONG_PTR> ptrs(count);
+                if (!leggi(vecBegin, ptrs.data(), count * sizeof(ULONG_PTR))) continue;
+                bool trovato = false;
+                for (ULONG_PTR itemPtr : ptrs) {
+                    alignas(ULONG_PTR) BYTE item[0xC0]{};
+                    if (!leggi(itemPtr, item, sizeof(item))) continue;
+                    const HWND hWnd = (HWND)(*(const ULONG_PTR*)(item + 0x50));
+                    const UINT uid = *(const UINT*)(item + 0x58);
+                    const BYTE promoted = *(const BYTE*)(item + 0x90);
+                    const UINT ver = *(const UINT*)(item + 0x94);
+                    const UINT msg = *(const UINT*)(item + 0x98);
+                    const ULONGLONG idReg = *(const ULONGLONG*)(item + 0xB0);
+                    if (!hWnd || !IsWindow(hWnd) || ver > 4 || msg < WM_USER) continue;
+                    trovato = true;
+                    const TrayIcona ti{hWnd, uid, msg, ver, promoted ? 0u : 1u, idReg};
+                    if (idReg != 0) iconePerId[idReg] = ti;
+                    const std::wstring exeIcona = exeProcesso(hWnd);
+                    if (!exeIcona.empty()) iconeTray[exeIcona].push_back(ti);
+                }
+                if (trovato) return true;
             }
-            if (trovato) break;
+            return false;
+        };
+        // explorer.exe c_tray ha m_pTrayNotify a +0x2690 (Win11 24H2) o +0x178 (taskbar.dll CTray);
+        // se un aggiornamento sposta l'offset, scansiona il blocco c_tray[0..0x3000)
+        for (ULONG_PTR cOff : {(ULONG_PTR)0x2690, (ULONG_PTR)0x178, (ULONG_PTR)0x198, (ULONG_PTR)0x168}) {
+            ULONG_PTR obj = 0;
+            if (leggiPtr(ctray + cOff, obj) && obj < 0x7FF000000000ULL && leggiOggetto(obj)) return;
+        }
+        std::vector<ULONG_PTR> blocco(0x3000 / sizeof(ULONG_PTR));
+        if (!leggi(ctray, blocco.data(), blocco.size() * sizeof(ULONG_PTR))) return;
+        for (ULONG_PTR obj : blocco) {
+            if (obj >= 0x10000 && obj < 0x7FF000000000ULL && leggiOggetto(obj)) return;
         }
     };
     auto scansionaToolbar = [&](HWND tb) {
