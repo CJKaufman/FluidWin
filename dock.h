@@ -476,6 +476,7 @@ public:
         }
         // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
         if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
+        if (pannelloTipo == P_SFONDO && !pChiusura && ++giroSfondo % 4 == 0) leggiAppSfondo();
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
         if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro
                                             || sensori::Sensori::io().versioneTempo != versioneTempoCentro)) {
@@ -493,7 +494,7 @@ public:
             // da' mai o lo toglie subito, e prima si richiudeva da solo dopo 0,6 s. Li' lo chiude un clic fuori, vedi
             // controllaClicFuori, o Esc)
             usa(0);
-            if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso) chiudiTutte();
+            if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso && !pMenuTray) chiudiTutte();
         }
         if (lAperto && !lChiusura && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
     }
@@ -1171,7 +1172,9 @@ private:
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
         const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
-        if (schedaFinestra(WindowFromPoint(pt))) return;
+        HWND hw = WindowFromPoint(pt);
+        if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
+        pMenuTray = false;
         scrivi("centro di controllo: clic fuori, si chiude");
         chiudiTutte();
     }
@@ -1873,6 +1876,10 @@ private:
     // verso il pulsante da cui era nato e il centro di controllo torna avanti
     bool pRipreso = false;                // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
     bool pFuocoAvuto = false;             // il pannello ha avuto il primo piano almeno una volta da quando e' aperto
+    bool pMenuTray = false;               // menu nativo di un'icona di sistema aperto sopra il pannello
+    DWORD pMenuTrayPid = 0;               // processo dell'icona a cui si e' chiesto il menu
+    std::wstring pMenuTrayDir;            // cartella dell'eseguibile (es. Steam -> steamwebhelper)
+    int giroSfondo = 0;
     double phVis = 0, phVel = 0;          // altezza che si vede: va verso PH (quella della vista) con una molla
     int vistaPrima = P_NESSUNO; float phPrima = 0; double tVista = -1; bool vistaAvanti = true;
     D2D1_POINT_2F origineVista{}, origineRitorno{};
@@ -2166,6 +2173,10 @@ private:
     void apriAppSfondo(const AppSfondo& a, POINT pt = {});
 
     bool inviaClicTray(const AppSfondo& a, bool destro, POINT pt);
+
+    bool apriMenuTray(const AppSfondo& a, POINT pt);
+
+    bool finestraMenuTray(HWND h) const;
 
     void chiudiAppSfondo(int indice, bool forza);
 

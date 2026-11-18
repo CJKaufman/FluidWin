@@ -116,6 +116,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     preparaVista(tipo);
     PH = altezzaVista(tipo);
     phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
+    pMenuTray = false; pMenuTrayPid = 0; pMenuTrayDir.clear();
     // sopra l'icona, allineato al suo bordo destro (dentro lo schermo)
     const int x1 = std::clamp(schermo.left + (int)std::round(rc.right + PAD), schermo.left + (int)PW + 8, schermo.right - 8);
     rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
@@ -306,6 +307,7 @@ inline auto Motore::nascondiPannello() -> void {
     pDissolvi = 0; pOpContenuto = 1;
     dirty = true;   // pannello chiuso: il dock puo' tornare giu' (se deve)
     phVis = 0; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO;
+    pMenuTray = false; pMenuTrayPid = 0; pMenuTrayDir.clear();
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
 }
 
@@ -1640,11 +1642,13 @@ inline auto Motore::leggiAppSfondo() -> void {
     inSottofondo([ris] { *ris = elencaAppSfondo(); }, [this, ris] {
         lavoroSfondo = false;
         for (auto& a : *ris) a.icona = iconaSfondo(a.exe, nullptr, a.chiaveReg.c_str());
+        bool cambiato = appSfondo.size() != ris->size();
+        if (!cambiato) for (size_t i = 0; i < appSfondo.size(); i++) if (appSfondo[i].exe != (*ris)[i].exe) { cambiato = true; break; }
         appSfondo = std::move(*ris);
         // pannello aperto: si allunga o si accorcia con le righe di icone (il bordo in basso resta fermo)
         const int s = slotCorrente;
         usa(0);
-        if (pannelloTipo == P_SFONDO && !pChiusura) {
+        if (pannelloTipo == P_SFONDO && !pChiusura && cambiato) {
             const float nuova = altezzaVista(P_SFONDO);
             if (nuova != PH) { PH = nuova; pAnimazione = true; }   // con la molla, dal bordo in basso
             pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
@@ -1952,6 +1956,47 @@ inline auto Motore::inviaClicTray(const AppSfondo& a, bool destro, POINT pt) -> 
             ok |= (SendNotifyMessageW(a.hWndTray, a.msgTray, (WPARAM)a.uidTray, (LPARAM)msgs[i]) != 0);
     }
     return ok;
+}
+
+inline auto Motore::apriMenuTray(const AppSfondo& a, POINT pt) -> bool {
+    const bool prevTray = pMenuTray, prevFuoco = pFuocoAvuto;
+    const DWORD prevPid = pMenuTrayPid;
+    const std::wstring prevDir = pMenuTrayDir;
+    pMenuTray = true;
+    pFuocoAvuto = false;
+    pMenuTrayPid = 0;
+    if (a.hWndTray) GetWindowThreadProcessId(a.hWndTray, &pMenuTrayPid);
+    const size_t sl = a.exe.find_last_of(L"\\/");
+    pMenuTrayDir = sl != std::wstring::npos ? a.exe.substr(0, sl + 1) : L"";
+    if (a.avvio == L"*fluidwin") {
+        HWND msg = FindWindowW(L"FluidWin.Messaggi", nullptr);
+        if (msg) GetWindowThreadProcessId(msg, &pMenuTrayPid);
+        PostMessageW(msg, WM_APP + 1, 1, WM_RBUTTONUP);
+        return true;
+    }
+    if (inviaClicTray(a, true, pt)) return true;
+    pMenuTray = prevTray; pFuocoAvuto = prevFuoco; pMenuTrayPid = prevPid; pMenuTrayDir = prevDir;
+    return false;
+}
+
+inline auto Motore::finestraMenuTray(HWND h) const -> bool {
+    if (!pMenuTray || !h) return false;
+    if (menu::aperti > 0) return true;
+    HWND root = GetAncestor(h, GA_ROOT);
+    if (!root) root = h;
+    wchar_t cls[64] = L"";
+    GetClassNameW(root, cls, 64);
+    if (!wcscmp(cls, L"#32768") || !wcscmp(cls, L"Xaml_WindowedPopupClass") || !wcscmp(cls, L"FluidWin.Menu")) return true;
+    GetClassNameW(h, cls, 64);
+    if (!wcscmp(cls, L"#32768") || !wcscmp(cls, L"Xaml_WindowedPopupClass")) return true;
+    if (!wcscmp(cls, L"Progman") || !wcscmp(cls, L"WorkerW") || !wcscmp(cls, L"Shell_TrayWnd")) return false;
+    DWORD pid = 0; GetWindowThreadProcessId(root, &pid);
+    const std::wstring exe = pid ? exeProcesso(root) : L"";
+    const bool stessaApp = (pid && pid == pMenuTrayPid) || (!pMenuTrayDir.empty() && !exe.empty() && exe.rfind(pMenuTrayDir, 0) == 0);
+    if (!stessaApp) return false;
+    const LONG_PTR st = GetWindowLongPtrW(root, GWL_STYLE), ex = GetWindowLongPtrW(root, GWL_EXSTYLE);
+    if ((st & WS_POPUP) || (ex & (WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) || !(st & WS_THICKFRAME)) return true;
+    return false;
 }
 
 inline auto Motore::apriAppSfondo(const AppSfondo& a, POINT pt) -> void {
@@ -2281,16 +2326,12 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             const AppSfondo app = d->appSfondo[indice];
             POINT pt{(LONG)x, (LONG)y}; ClientToScreen(h, &pt);
             if (app.avvio == L"*fluidwin") {
-                d->nascondiPannello();
-                PostMessageW(FindWindowW(L"FluidWin.Messaggi", nullptr), WM_APP + 1, 1, WM_RBUTTONUP);
+                d->apriMenuTray(app, pt);
                 return 0;
             }
             const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool haTray = app.hWndTray && IsWindow(app.hWndTray) && app.msgTray >= WM_USER;
-            if (!shift && haTray && d->inviaClicTray(app, true, pt)) {
-                d->nascondiPannello();
-                return 0;
-            }
+            if (!shift && haTray && d->apriMenuTray(app, pt)) return 0;
             std::vector<menu::Voce> vv = {
                 menu::titolo(app.nome),
                 menu::voce(testi::t(L"Apri", L"Open"), 1)
@@ -2316,8 +2357,7 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 const int k = trova();
                 if (k >= 0) { const AppSfondo appK = d->appSfondo[k]; d->chiudiPannello(); d->apriAppSfondo(appK, pt); }
             } else if (s == 6) {
-                d->inviaClicTray(app, true, pt);
-                d->nascondiPannello();
+                d->apriMenuTray(app, pt);
             } else if (s == 3) {
                 d->chiudiPannello();
                 ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + app.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
@@ -2340,8 +2380,9 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
         case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
         // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
         case WM_ACTIVATE:
-            if (LOWORD(w) != WA_INACTIVE && h == d->pannello) d->pFuocoAvuto = true;
+            if (LOWORD(w) != WA_INACTIVE && h == d->pannello) { d->pFuocoAvuto = true; d->pMenuTray = false; }
             if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) {
+                if (d->pMenuTray) return 0;
                 // primo piano perso appena aperto e senza nessun clic: e' Windows che lo rimbalza, non l'utente che va altrove
                 // (su alcuni PC succede piu' volte di fila): lo si riprende. Un clic altrove invece chiude, qui o con controllaClicFuori
                 const bool clic = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000) != 0;
