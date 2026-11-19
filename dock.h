@@ -31,6 +31,7 @@
 #include "altrui.h"
 #include "widget.h"
 #include "jumplist.h"
+#include "wifi.h"
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <d3d11.h>
@@ -352,7 +353,8 @@ public:
     bool fermaWidget(DWORD ms) {
         const bool a = widD.ferma(ms);
         const bool b = jumpList.ferma(ms);
-        return a && b;
+        const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
+        return a && b && c;
     }
 
     void chiudi() {
@@ -488,6 +490,20 @@ public:
         }
         // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
         if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
+        // reti Wi-Fi aperte: la copia nuova del thread (l'altezza segue le reti) e una scansione ogni 10 s
+        if (pannelloTipo == P_WIFI && !pChiusura) {
+            if (wlan.pronto.exchange(false)) {
+                copiaWifi();
+                const float nuova = altezzaVista(P_WIFI);
+                if (nuova != PH) { PH = nuova; pAnimazione = true; }
+                // (anche il premuto: le reti possono aver cambiato ordine, e un clic iniziato sulla rete A non deve
+                // collegare la rete B finita nella stessa riga. R20261119-145819-S1. E le zone: fino al ridisegno sono
+                // quelle dell'elenco vecchio, e una pressione in quel momento prenderebbe l'indice di A per la riga dove
+                // ora sta B (R20261119-150434). Senza zone fino al prossimo fotogramma un clic non fa niente)
+                pSopra = pPremuto = -1; elementi.clear(); pDirty = true;
+            }
+            if (adesso() - wlCercataT > 10) { wlCercataT = adesso(); wlan.cerca(); }
+        }
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
         if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro
                                             || sensori::Sensori::io().versioneTempo != versioneTempoCentro)) {
@@ -1796,7 +1812,21 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI };
+    // reti Wi-Fi (vista P_WIFI, wifi.h): ultima copia del thread, per il disegno
+    wifi::Wifi wlan;
+    std::vector<wifi::Rete> wlReti;
+    int wlStato = wifi::S_AVVIO, wlEsito = wifi::E_NIENTE;
+    std::string wlEsitoDi;
+    bool wlCerca = false;
+    double wlCercataT = -100;   // ultima scansione chiesta (la vista aperta ne chiede una ogni 10 s)
+    double wifiK = -1;          // pallina dell'interruttore Wi-Fi della vista: 0 spento .. 1 acceso (animata)
+    void copiaWifi() { wlReti = wlan.reti(wlStato, wlEsito, wlEsitoDi, wlCerca); }
+    float altezzaWifi() const;
+    int righeWifi() const;   // reti che entrano nella vista (stesso numero per altezza, disegno e zone)
+    void disegnaWifi(bool scuro, D2D1_COLOR_F ink);
+    void simboloSegnale(float cx, float cy, int livello, D2D1_COLOR_F c);
+    void simboloLucchetto(float cx, float cy);
     widget::Dati widD;                   // meteo e notizie (scaricati in un thread a parte)
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     jumplist::Indice jumpList;           // comandi delle app (tasto destro sulle icone), letti dai file di Windows
@@ -1806,7 +1836,8 @@ private:
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
-                  A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE };
+                  A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
+                  A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -1991,8 +2022,9 @@ private:
     void disegnaNotifiche(bool scuro, D2D1_COLOR_F ink);
 
     // riquadro con cerchio colorato, titolo e sottotitolo (rete, Bluetooth)
+    // margine: spazio a destra dei testi (la piastrella Wi-Fi lo allarga per la freccia delle reti)
     void piastrella(const D2D1_RECT_F& r, Azione a, bool acceso, const std::wstring& titolo, const std::wstring& sotto,
-                    bool scuro, D2D1_COLOR_F ink) {
+                    bool scuro, D2D1_COLOR_F ink, float margine = 8) {
         const int e = aggiungi(r, a, 0);
         const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;   // concentrica con l'angolo del pannello
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.05f));
@@ -2012,9 +2044,9 @@ private:
         else if (a == A_MICROFONO) simboloMicrofono(cx, cy, acceso);
         else simboloGoccia(cx, cy);
         pennello->SetColor(ink);
-        scrivi(titolo, fmtVoce, {cx + 26 * dpi, cy - 18 * dpi, r.right - 8 * dpi, cy});
+        scrivi(titolo, fmtVoce, {cx + 26 * dpi, cy - 18 * dpi, r.right - margine * dpi, cy});
         pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.62f});
-        scrivi(sotto, fmtSotto, {cx + 26 * dpi, cy, r.right - 8 * dpi, cy + 17 * dpi});
+        scrivi(sotto, fmtSotto, {cx + 26 * dpi, cy, r.right - margine * dpi, cy + 17 * dpi});
     }
 
     void disegnaControllo(bool scuro, D2D1_COLOR_F ink);

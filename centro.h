@@ -142,6 +142,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
+    else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -153,6 +154,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_NOTIFICHE) h = altezzaNotifiche() + testa;
     else if (tipo == P_MIXER) h = altezzaMixer() + testa;
     else if (tipo == P_APPUNTI) h = altezzaAppunti() + testa;
+    else if (tipo == P_WIFI) h = altezzaWifi() + testa;
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -434,6 +436,7 @@ inline auto Motore::renderPannello() -> bool {
                 else if (interna == P_SFONDO) simboloFreccia(c.x, c.y);
                 else if (interna == P_NOTIFICHE) simboloCampana(c.x, c.y);
                 else if (interna == P_APPUNTI) simboloAppunti(c.x, c.y);
+                else if (interna == P_WIFI) simboloSegnale(c.x, c.y, 4, {ink.r, ink.g, ink.b, ink.a * aSimbolo});
                 baseVista = D2D1::Matrix3x2F::Identity();
                 dc->SetTransform(baseVista);
             }
@@ -475,6 +478,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
         else if (tipo == P_WIDGET) disegnaWidget(scuro, ink);
         else if (tipo == P_MIXER) disegnaMixer(scuro, ink);
         else if (tipo == P_APPUNTI) disegnaAppunti(scuro, ink);
+        else if (tipo == P_WIFI) disegnaWifi(scuro, ink);
         for (size_t i = n; i < elementi.size(); i++) { elementi[i].r.top += testa; elementi[i].r.bottom += testa; }
     }
     baseVista = D2D1::Matrix3x2F::Identity(); dc->SetTransform(baseVista);
@@ -498,7 +502,7 @@ inline auto Motore::disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) -> void
     dc->SetTransform(baseVista);
     // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
     const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget"
-                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : tipo == P_APPUNTI ? testi::t(L"Appunti", L"Clipboard")
+                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : tipo == P_APPUNTI ? testi::t(L"Appunti", L"Clipboard") : tipo == P_WIFI ? L"Wi-Fi"
                               : testi::t(L"Notifiche", L"Notifications");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
@@ -659,6 +663,136 @@ inline auto Motore::mixerDaMouse(float x) -> void {
         pDirty = true; dirty = true;
         return;
     }
+}
+
+// ---- reti Wi-Fi (freccia sulla piastrella Wi-Fi; wifi.h). Issue #24 ----
+// Riga dell'interruttore, poi le reti (al massimo WIFI_MAX righe), o un messaggio; in fondo le impostazioni di Windows
+static constexpr float WIFI_TESTA = 48, WIFI_RIGA = 50, WIFI_PIEDE = 52;
+static constexpr int WIFI_MAX = 8;
+
+// Reti da mostrare: quelle che ci sono (al massimo WIFI_MAX) e che entrano nello spazio sopra il dock, tolte testata,
+// interruttore e piede. Lo stesso numero per l'altezza, il disegno e le zone: R20261119-145819-S3, prima su uno schermo
+// basso l'ultima rete finiva sotto "Altre impostazioni Wi-Fi" (e il clic andava a quella). 0: si mostra un messaggio
+inline auto Motore::righeWifi() const -> int {
+    if (sis.wifi != 1 || wlStato != wifi::S_PRONTA || wlReti.empty()) return 0;   // (R20261119-145819-S4: solo S_PRONTA)
+    const float spazio = (altezzaMassimaP() - std::round(TESTA * dpi)) / dpi - 8 - WIFI_TESTA - WIFI_PIEDE;
+    const int entrano = std::max(1, (int)std::floor(spazio / WIFI_RIGA));
+    return std::min({(int)wlReti.size(), WIFI_MAX, entrano});
+}
+
+inline auto Motore::altezzaWifi() const -> float {
+    const int righe = std::max(1, righeWifi());   // (un messaggio occupa una riga)
+    const float h = 8 + WIFI_TESTA + righe * WIFI_RIGA + WIFI_PIEDE;
+    return std::min(altezzaMassimaP() - std::round(TESTA * dpi), std::round(h * dpi));
+}
+
+// segnale: quattro archi (livello 0..4), quelli oltre il livello sbiaditi; c = colore pieno
+inline auto Motore::simboloSegnale(float cx, float cy, int livello, D2D1_COLOR_F c) -> void {
+    const float pi = (float)M_PI, by = cy + 6 * dpi;
+    pennello->SetColor(c);
+    dc->FillEllipse({{cx, by - 0.5f * dpi}, 1.6f * dpi, 1.6f * dpi}, pennello);
+    const float raggi[3] = {5.5f, 9.5f, 13.5f};
+    for (int i = 0; i < 3; i++) {
+        pennello->SetColor(i + 2 <= std::max(livello, 1) ? c : D2D1_COLOR_F{c.r, c.g, c.b, c.a * 0.28f});
+        arco(cx, by, raggi[i], -pi * 0.75f, -pi * 0.25f, 2.0f);
+    }
+    pennello->SetColor(c);
+}
+
+inline auto Motore::simboloLucchetto(float cx, float cy) -> void {
+    dc->FillRoundedRectangle({{cx - 4 * dpi, cy - 1 * dpi, cx + 4 * dpi, cy + 5 * dpi}, 1.5f * dpi, 1.5f * dpi}, pennello);
+    arco(cx, cy - 1 * dpi, 2.6f, (float)M_PI, (float)(2 * M_PI) - 0.02f, 1.4f);   // l'archetto sopra il corpo (poco meno di mezzo giro: con 180 gradi esatti la direzione e' ambigua)
+}
+
+inline auto Motore::disegnaWifi(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+    float y = 8 * dpi;
+    // interruttore del Wi-Fi (la stessa radio della piastrella)
+    {
+        const bool acceso = sis.wifi == 1;
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_TESTA * dpi};
+        evidenzia(aggiungi(r, A_WIFI_RADIO, 0), r, scuro, 10 * dpi);
+        pennello->SetColor(ink);
+        scrivi(L"Wi-Fi", fmtVoce, {m, y, PW - 80 * dpi, y + WIFI_TESTA * dpi});
+        // capsula dell'interruttore; la pallina scorre verso la posizione vera (wifiK, animata)
+        const float cw = 40 * dpi, ch = 24 * dpi, cx = PW - m - cw, cy = y + (WIFI_TESTA * dpi - ch) / 2;
+        const double obj = acceso ? 1.0 : 0.0;
+        if (wifiK < 0) wifiK = obj;
+        if (wifiK != obj) { wifiK += (obj - wifiK) * (1 - std::exp(-dtFotogramma / 0.05)); if (std::abs(wifiK - obj) < 0.004) wifiK = obj; else pAnimazione = true; }
+        const float k = (float)wifiK;
+        // dal grigio (spento) al blu di sistema (acceso)
+        const D2D1_COLOR_F spento = scuro ? D2D1::ColorF(0.30f, 0.30f, 0.32f, 1) : D2D1::ColorF(0.78f, 0.78f, 0.80f, 1);
+        const D2D1_COLOR_F accesoC = D2D1::ColorF(0.0f, 0.478f, 1.0f, 1);
+        pennello->SetColor({spento.r + (accesoC.r - spento.r) * k, spento.g + (accesoC.g - spento.g) * k, spento.b + (accesoC.b - spento.b) * k, 1});
+        dc->FillRoundedRectangle({{cx, cy, cx + cw, cy + ch}, ch / 2, ch / 2}, pennello);
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 1));
+        const float px = cx + ch / 2 + (cw - ch) * k;
+        dc->FillEllipse({{px, cy + ch / 2}, ch / 2 - 2 * dpi, ch / 2 - 2 * dpi}, pennello);
+        y += WIFI_TESTA * dpi;
+    }
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, y - 0.5f}, {PW - m, y - 0.5f}, pennello, 1.0f);
+    // contenuto: un messaggio, o le reti
+    auto messaggio = [&](const wchar_t* t, Azione a) {
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_RIGA * dpi};
+        if (a != A_WIFI_RETE) evidenzia(aggiungi(r, a, 0), r, scuro, 10 * dpi);
+        pennello->SetColor(a != A_WIFI_RETE ? blu : tenue);
+        scrivi(t, fmtSotto, {m, y, PW - m, y + WIFI_RIGA * dpi});
+        y += WIFI_RIGA * dpi;
+    };
+    if (sis.wifi != 1) messaggio(testi::t(L"Il Wi-Fi è spento", L"Wi-Fi is off"), A_WIFI_RETE);
+    else if (wlStato == wifi::S_NESSUNA) messaggio(testi::t(L"Nessuna scheda Wi-Fi disponibile", L"No Wi-Fi adapter available"), A_WIFI_RETE);
+    else if (wlStato == wifi::S_PERMESSO)   // Windows 11 24H2: senza la posizione i programmi non vedono le reti
+        messaggio(testi::t(L"Per vedere le reti consenti la posizione alle app desktop…", L"To see networks, allow location for desktop apps…"), A_WIFI_PRIVACY);
+    else if (wlStato == wifi::S_ERRORE) messaggio(testi::t(L"Non riesco a leggere le reti: riprovo…", L"Can't read networks: retrying…"), A_WIFI_RETE);
+    else if (righeWifi() == 0) messaggio(wlCerca || wlStato == wifi::S_AVVIO ? testi::t(L"Cerco le reti…", L"Looking for networks…") : testi::t(L"Nessuna rete trovata", L"No networks found"), A_WIFI_RETE);
+    else {
+        const int righe = righeWifi();
+        for (size_t i = 0; i < wlReti.size() && (int)i < righe; i++) {
+            const wifi::Rete& n = wlReti[i];
+            const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_RIGA * dpi};
+            evidenzia(aggiungi(r, A_WIFI_RETE, (int)i), r, scuro, 10 * dpi);
+            const float cy = y + WIFI_RIGA * dpi / 2;
+            simboloSegnale(m + 12 * dpi, cy - 2 * dpi, n.segnale >= 75 ? 4 : n.segnale >= 50 ? 3 : n.segnale >= 25 ? 2 : 1, n.connessa ? blu : ink);
+            const bool inCorso = wlEsito == wifi::E_IN_CORSO && wlEsitoDi == n.ssid;
+            const bool fallito = wlEsito == wifi::E_FALLITO && wlEsitoDi == n.ssid;
+            const std::wstring sotto = n.connessa ? testi::t(L"Collegata", L"Connected")
+                                     : inCorso ? testi::t(L"Collegamento…", L"Connecting…")
+                                     : fallito ? testi::t(L"Collegamento non riuscito", L"Couldn't connect")
+                                     : n.profilo ? testi::t(L"Salvata", L"Saved")
+                                     : n.aperta ? testi::t(L"Aperta", L"Open") : testi::t(L"Protetta", L"Secured");
+            float destra = PW - m;
+            if (n.connessa) {   // pulsante "Scollega"
+                const std::wstring s = testi::t(L"Scollega", L"Disconnect");
+                const float ls = larghezzaTesto(s, fmtSotto) + 20 * dpi;
+                const D2D1_RECT_F rs = {PW - m - ls, cy - 13 * dpi, PW - m, cy + 13 * dpi};
+                const int es = aggiungi(rs, A_WIFI_SCOLLEGA, (int)i);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+                dc->FillRoundedRectangle({rs, 13 * dpi, 13 * dpi}, pennello);
+                evidenzia(es, rs, scuro, 13 * dpi);
+                pennello->SetColor(ink);
+                scrivi(s, fmtNome, rs);
+                destra = rs.left - 8 * dpi;
+            } else if (n.protetta && !n.profilo) {
+                pennello->SetColor(tenue);
+                simboloLucchetto(PW - m - 8 * dpi, cy);
+                destra = PW - m - 20 * dpi;
+            }
+            pennello->SetColor(ink);
+            scrivi(n.nome, fmtVoce, {m + 32 * dpi, y + 7 * dpi, destra, y + 27 * dpi});
+            pennello->SetColor(fallito ? D2D1::ColorF(0.95f, 0.30f, 0.25f, 1) : n.connessa || inCorso ? blu : tenue);
+            scrivi(sotto, fmtSotto, {m + 32 * dpi, y + 26 * dpi, destra, y + 43 * dpi});
+            y += WIFI_RIGA * dpi;
+        }
+    }
+    // in fondo: le impostazioni Wi-Fi di Windows (reti nuove protette, nascoste, aziendali)
+    const D2D1_RECT_F rp = {m - 6 * dpi, PH - WIFI_PIEDE * dpi + 6 * dpi, PW - m + 6 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rp, A_WIFI_IMPOSTAZIONI, 0), rp, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Altre impostazioni Wi-Fi", L"More Wi-Fi settings"), fmtVoce, {m, rp.top, PW - m - 16 * dpi, rp.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
 }
 
 // le uscite in un menu (si sceglie la predefinita) e le impostazioni audio
@@ -1036,9 +1170,18 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // Wi-Fi: interruttore vero se c'e' la scheda; senza (PC col cavo) lo stato della rete, e il clic apre le impostazioni
     const int wf = sis.wifi, bt = sis.bluetooth;
     if (wf >= 0) piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, wf == 1, L"Wi-Fi",
-                            wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink);
+                            wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink, 34);   // (34: spazio per la freccia)
     else piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : testi::t(L"Rete", L"Network"),
                     rete ? testi::t(L"Connessa", L"Connected") : testi::t(L"Non connessa", L"Not connected"), scuro, ink);
+    // Con la scheda Wi-Fi: la parte destra della piastrella e' una freccia che apre l'elenco delle reti (come in
+    // Windows 11; issue #24). Aggiunta dopo la piastrella: nelle zone vince (elementoIn parte dall'ultima)
+    if (wf >= 0) {
+        const D2D1_RECT_F rf = {16 * dpi + mezzo - 30 * dpi, y + 6 * dpi, 16 * dpi + mezzo - 2 * dpi, y + th - 6 * dpi};
+        const int ef = aggiungi(rf, A_WIFI_RETI, 0);
+        evidenzia(ef, rf, scuro, 8 * dpi);
+        pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.55f});
+        chevronDestra((rf.left + rf.right) / 2 + 1 * dpi, (rf.top + rf.bottom) / 2);
+    }
     piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_BLUETOOTH, bt == 1, L"Bluetooth",
                bt < 0 ? testi::t(L"Non disponibile", L"Unavailable") : bt == 1 ? testi::t(L"Acceso", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
     y += th + tg;
@@ -2088,6 +2231,23 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_W_LUOGO:      scegliLuogo(e.indice); break;
         case A_W_UNITA:      widD.impostaUnita(e.indice); pDirty = true; if (registro) { char b[48]; snprintf(b, 48, "widget: unita' %d", e.indice); scrivi(b); } break;
         case A_W_FONTE:      menuFonte(e.r); break;
+        // reti Wi-Fi (wifi.h; issue #24)
+        case A_WIFI_RETI:    cambiaVista(P_WIFI, {(e.r.left + e.r.right) / 2, (e.r.top + e.r.bottom) / 2}); break;
+        case A_WIFI_RADIO:   sis.impostaRadio(1, sis.wifi != 1); wlCercataT = adesso() - 8; pDirty = true; break;   // (riacceso: si cerca fra 2 s)
+        case A_WIFI_RETE:
+            if (e.indice >= 0 && e.indice < (int)wlReti.size()) {
+                const wifi::Rete n = wlReti[e.indice];
+                if (n.connessa) break;
+                // gia' usata (Windows ha la password) o aperta: ci si collega da qui; nuova protetta: le impostazioni di
+                // Windows, che chiedono la password (FluidWin non ne tocca: scelta dell'utente)
+                if (n.profilo || n.aperta) { wlan.collega(n.ssid); copiaWifi(); scrivi(n.profilo ? "wifi: collegamento a una rete salvata" : "wifi: collegamento a una rete aperta"); }
+                else { scrivi("wifi: rete nuova protetta, impostazioni di Windows"); chiudiPannello(); apriPagina(L"ms-settings:network-wifi"); }
+                pDirty = true;
+            }
+            break;
+        case A_WIFI_SCOLLEGA: wlan.scollega(); scrivi("wifi: scollega"); pDirty = true; break;
+        case A_WIFI_IMPOSTAZIONI: chiudiPannello(); apriPagina(L"ms-settings:network-wifi"); break;
+        case A_WIFI_PRIVACY: chiudiPannello(); apriPagina(L"ms-settings:privacy-location"); break;
         case A_LUMINOSITA:   break;
         case A_MIXER_VOL:    break;   // si trascina (procPannello)
         // la riga dell'uscita apre il mixer (volume per uscita e per app)
