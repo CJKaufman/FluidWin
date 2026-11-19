@@ -21,6 +21,7 @@
 #include <functional>
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace menu {
 
@@ -47,6 +48,11 @@ struct Voce {
     int pulsante = 0;        // != 0: pulsante con icona nella riga in cima (vedi Icona), come nel menu di Windows 11
     bool extra = false;      // nascosta finche' non si passa sulla freccia in fondo (le "altre opzioni")
     int simbolo = 0;         // icona piccola a sinistra del testo (Icona), 0 nessuna
+    // icona a colori a sinistra del testo (comandi delle app nel dock: jumplist.h): pixel BGRA premoltiplicati,
+    // latoPixel x latoPixel, di chi chiama mostra() (devono restare validi finche' il menu e' aperto); il menu ne fa una
+    // bitmap di Direct2D. Pixel e non HICON: arrivano gia' pronti dal thread che legge le jump list
+    const uint32_t* pixel = nullptr;
+    int latoPixel = 0;
 };
 enum Icona { I_NIENTE, I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA,
              I_APRI, I_APRI_CON, I_ADMIN, I_PREFERITI, I_START, I_BARRA, I_PERCORSO, I_PROPRIETA, I_TERMINALE, I_COPILOT,
@@ -148,8 +154,24 @@ private:
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
+        for (ID2D1Bitmap* b : immagini) if (b) b->Release();
         for (IUnknown* o : std::initializer_list<IUnknown*>{pen, rt, fmt, fmtTitolo}) if (o) o->Release();
         if (fin) DestroyWindow(fin);
+    }
+
+    // Icone a colori (Voce::pixel) come bitmap di Direct2D, fatte la prima volta che servono con il render target di
+    // questo menu. Una che non si crea resta vuota: niente icona
+    std::vector<ID2D1Bitmap*> immagini;
+    std::vector<bool> immaginiProvate;
+    ID2D1Bitmap* immagine(size_t i) {
+        if (i >= voci.size() || !voci[i].pixel || voci[i].latoPixel <= 0 || voci[i].latoPixel > 256 || !rt) return nullptr;
+        if (immagini.size() != voci.size()) { immagini.assign(voci.size(), nullptr); immaginiProvate.assign(voci.size(), false); }
+        if (immaginiProvate[i]) return immagini[i];
+        immaginiProvate[i] = true;
+        const UINT32 l = (UINT32)voci[i].latoPixel;
+        rt->CreateBitmap(D2D1::SizeU(l, l), voci[i].pixel, l * 4,
+                         D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &immagini[i]);
+        return immagini[i];
     }
 
     // Fabbriche di Direct2D e DirectWrite: una sola per tutti i menu (crearle a ogni menu lasciava indietro un paio di
@@ -224,7 +246,7 @@ private:
         }
         if (pulsanti) { largo = std::max(largo, (pulsanti * (LATO_PULSANTE + 4) + 12) * dpi); }
         conFreccia = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.extra; });
-        conSimboli = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.simbolo != 0; });
+        conSimboli = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.simbolo != 0 || v.pixel; });
         if (conSimboli) largo += 14 * dpi;
         W = (int)std::ceil(std::min(largo, 420 * dpi));
         // rettangoli: pulsanti in riga in cima, poi le voci, poi la freccia, poi le voci extra
@@ -400,6 +422,11 @@ private:
                 pen->SetColor(ci);
                 icona(v.simbolo, r.left + 18 * dpi, (r.top + r.bottom) / 2, 0.82f);
                 pen->SetColor(c);
+            } else if (v.pixel && !v.titolo) {   // icona a colori, 16 punti, al posto del simbolo
+                if (ID2D1Bitmap* b = immagine((size_t)i)) {
+                    const float cx = r.left + 18 * dpi, cy = (r.top + r.bottom) / 2, m = 8 * dpi;
+                    rt->DrawBitmap(b, {cx - m, cy - m, cx + m, cy + m}, v.disattivata ? 0.4f : 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                }
             }
             rt->DrawText(v.testo.c_str(), (UINT32)v.testo.size(), v.titolo ? fmtTitolo : fmt, v.titolo ? D2D1_RECT_F{r.left + 10 * dpi, r.top, r.right, r.bottom} : rtxt,
                          pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);

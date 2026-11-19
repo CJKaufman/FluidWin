@@ -30,6 +30,7 @@
 #include "pool.h"
 #include "altrui.h"
 #include "widget.h"
+#include "jumplist.h"
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <d3d11.h>
@@ -341,11 +342,18 @@ public:
         notch.posto(schermo, dpi);
         notch.mostra(true);
         dirty = true;
+        // comandi delle app (jump list): il thread li legge subito, cosi' sono pronti al primo tasto destro
+        if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
         return true;
     }
 
-    // all'uscita, dopo chiudi: aspetta i thread del widget (vedi widget::Dati::ferma)
-    bool fermaWidget(DWORD ms) { return widD.ferma(ms); }
+    // all'uscita, dopo chiudi: aspetta i thread del widget (vedi widget::Dati::ferma) e quello delle jump list
+    // (jumplist::Indice::ferma), ognuno al massimo ms. false: almeno uno non ha finito
+    bool fermaWidget(DWORD ms) {
+        const bool a = widD.ferma(ms);
+        const bool b = jumpList.ferma(ms);
+        return a && b;
+    }
 
     void chiudi() {
         fermaIcone();
@@ -1791,6 +1799,7 @@ private:
     enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI };
     widget::Dati widD;                   // meteo e notizie (scaricati in un thread a parte)
     widget::Istantanea wid;              // l'ultima copia, per il disegno
+    jumplist::Indice jumpList;           // comandi delle app (tasto destro sulle icone), letti dai file di Windows
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
@@ -2559,6 +2568,48 @@ private:
             }
             voci.push_back(menu::separatore());
         }
+        // Comandi dell'app (jump list), come nel tasto destro della barra di Windows: le sue categorie ("Recenti" di
+        // Steam...) e poi i suoi compiti ("Nuova finestra in incognito"...). Issue #24: prima mancavano. Il file si
+        // trova con l'AppUserModelID (collegamento fissato, pacchetto, finestre aperte) o, se l'app non lo espone, con
+        // l'eseguibile; vedi jumplist.h. Gli id dei comandi partono da 1000
+        std::vector<const jumplist::Comando*> comandi;
+        jumplist::Elenco jl;   // (copia: i pixel delle icone che il menu usa restano validi fino alla fine di menu)
+        {
+            Cronometro cr(this, "comandi dell'app (jump list)");
+            std::vector<std::wstring> ids = {v.aumid};
+            if (v.pacchetto.size() > 17) ids.push_back(v.pacchetto.substr(17));   // dopo "shell:AppsFolder\"
+            for (HWND h : v.finestre) if (IsWindow(h)) ids.push_back(aumidFinestra(h));
+            std::vector<std::wstring> altri;
+            for (const auto& x : this->voci) {
+                if (x.uscente || chiave(x) == chiave(v)) continue;
+                altri.push_back(x.aumid);
+                if (x.pacchetto.size() > 17) altri.push_back(x.pacchetto.substr(17));
+            }
+            const char* come = "";
+            jl = jumpList.per(ids, v.exe, altri, &come);   // (copia gia' pronta dal thread: niente file letti qui)
+            jumpList.richiedi();                            // (e il thread ricontrolla, per la prossima volta)
+            for (const auto& c : jl.categorie) {
+                const size_t prima = voci.size();
+                // (categoria senza nome, per esempio scartato perche' in rete: niente intestazione vuota, le voci restano;
+                // R20261119-141543-S1)
+                if (c.compiti || !c.nome.empty()) voci.push_back(menu::titolo(c.compiti ? testi::t(L"Attività", L"Tasks") : c.nome));
+                else if (voci.size() > 1 && !voci.back().separatore) voci.push_back(menu::separatore());
+                size_t n = 0;
+                for (const auto& x : c.voci) {
+                    if (x.separatore) { if (!voci.back().separatore && !voci.back().titolo) voci.push_back(menu::separatore()); continue; }
+                    if (!c.compiti && ++n > 10) break;   // (le categorie come "Recenti" possono essere lunghe: come Windows, 10)
+                    std::wstring t = x.titolo;
+                    if (t.size() > 60) t = t.substr(0, 59) + L"…";
+                    auto mv = menu::voce(t, 1000 + (UINT)comandi.size());
+                    if (!x.pixel.empty()) { mv.pixel = x.pixel.data(); mv.latoPixel = jumplist::LATO_ICONA; }
+                    comandi.push_back(&x);
+                    voci.push_back(mv);
+                }
+                while (voci.size() > prima && (voci.back().separatore || voci.back().titolo)) voci.pop_back();   // categoria vuota o separatore in fondo
+            }
+            if (!comandi.empty()) voci.push_back(menu::separatore());
+            if (registro) { char b[120]; snprintf(b, 120, "dock: %zu comandi dell'app nel menu (trovati con %s)", comandi.size(), comandi.empty() ? "niente" : come); scrivi(b); }
+        }
         voci.push_back(menu::voce(testi::t(L"Apri nuova finestra", L"Open new window"), 1));
         if (!store || exeVero) voci.push_back(menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), 3));
         if (exeVero) voci.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 4));
@@ -2571,6 +2622,13 @@ private:
         SetForegroundWindow(icone);   // cosi' la tastiera (Esc, frecce) arriva al menu
         // sopra il dock, centrato sull'icona (il punto e' quello del clic)
         const int s = (int)menu::mostra(voci, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+        if (s >= 1000 && s - 1000 < (int)comandi.size()) {
+            // come dalla barra di Windows; la finestra che ne nasce e' un lancio dell'app (rimbalzo, animazione d'apertura)
+            segnaLancio(v);
+            const bool ok = jumplist::avvia(*comandi[s - 1000]);
+            if (registro) { char b[80]; snprintf(b, 80, "dock: comando dell'app %d avviato: %d", s - 1000, (int)ok); scrivi(b); }
+            return;
+        }
         if (s == 1) {
             segnaLancio(v); ShellExecuteW(nullptr, L"open", v.avvio.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             for (auto& x : this->voci) if (!x.uscente && chiave(x) == chiave(v)) x.rimbalzoT0 = ultimoT;   // la voce di adesso
