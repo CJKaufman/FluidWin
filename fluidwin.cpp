@@ -4420,6 +4420,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         ReleaseMutex(mutex);
         TerminateProcess(GetCurrentProcess(), 0);
     }
+    // thread del widget (meteo, notizie, ricerca della citta'): stessa regola, i loro dati stanno in gDock
+    if (!gDock.fermaWidget(3000)) {
+        logf("widget: un thread di rete non finisce, chiusura senza aspettarlo");
+        ReleaseMutex(mutex);
+        TerminateProcess(GetCurrentProcess(), 0);
+    }
     if (gAggThread && WaitForSingleObject(gAggThread, 5000) != WAIT_OBJECT_0) {
         logf("aggiornamenti: il thread non finisce, chiusura senza aspettarlo");
         ReleaseMutex(mutex);

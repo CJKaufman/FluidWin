@@ -89,6 +89,7 @@ static void togliAppbarRimasta() {
 static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Win+B
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
+static const UINT_PTR TIMER_CITTA = 10;  // (finestra del pannello) ricerca della citta' del meteo: attesa dopo l'ultimo tasto e risultati
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
@@ -342,6 +343,9 @@ public:
         dirty = true;
         return true;
     }
+
+    // all'uscita, dopo chiudi: aspetta i thread del widget (vedi widget::Dati::ferma)
+    bool fermaWidget(DWORD ms) { return widD.ferma(ms); }
 
     void chiudi() {
         fermaIcone();
@@ -1792,7 +1796,25 @@ private:
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
-                  A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA };
+                  A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
+                  A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE };
+    // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
+    // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
+    // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
+    // dalle schede (scambiaScheda): il widget vive solo nella scheda 0
+    bool wCitta = false;
+    double wK = 0, wCambiato = 0, wUnitaPos = -1;
+    std::wstring wTesto, wCercato;
+    std::vector<widget::Luogo> wLuoghi;
+    int wStato = widget::R_VUOTA, wSel = 0;
+    int wRighe = 6;   // risultati che entrano nel pannello (schermi bassi: meno di 6; vedi disegnaWidget)
+    void apriRicercaCitta();
+    void chiudiRicercaCitta();
+    void passoCitta();
+    void cercaCitta();
+    void carattereCitta(wchar_t c);
+    void scegliLuogo(int i);
+    void menuFonte(const D2D1_RECT_F& r);
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
