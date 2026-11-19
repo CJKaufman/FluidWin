@@ -1174,7 +1174,7 @@ private:
         const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
         HWND hw = WindowFromPoint(pt);
         if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
-        pMenuTray = false;
+        if (pMenuTray) { pMenuTray = false; return; }
         scrivi("centro di controllo: clic fuori, si chiude");
         chiudiTutte();
     }
