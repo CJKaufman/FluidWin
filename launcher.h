@@ -420,12 +420,12 @@ inline auto Motore::salvaGiochiAggiunti(const std::vector<std::pair<std::wstring
     RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiAggiunti", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
 }
 
-inline auto Motore::leggiIconeGiochi() -> std::unordered_map<std::wstring, std::wstring> {
+inline auto Motore::leggiMappaGiochi(const wchar_t* valore) -> std::unordered_map<std::wstring, std::wstring> {
     std::unordered_map<std::wstring, std::wstring> m;
     DWORD cb = 0;
-    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return m;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, valore, RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return m;
     std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
-    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return m;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, valore, RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return m;
     for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
         const std::wstring r = p;
         const size_t tab = r.find(L'\t');
@@ -435,19 +435,40 @@ inline auto Motore::leggiIconeGiochi() -> std::unordered_map<std::wstring, std::
     return m;
 }
 
-inline auto Motore::salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m) -> void {
+inline auto Motore::salvaMappaGiochi(const wchar_t* valore, const std::unordered_map<std::wstring, std::wstring>& m) -> void {
     std::vector<wchar_t> buf;
-    for (const auto& [chiave, percorso] : m) {
-        if (chiave.empty() || percorso.empty()) continue;
+    for (const auto& [chiave, dato] : m) {
+        std::wstring pulito;
+        pulito.reserve(dato.size());
+        for (wchar_t ch : dato) {
+            if (ch != L'\t' && ch != L'\r' && ch != L'\n') pulito.push_back(ch);
+        }
+        if (chiave.empty() || pulito.empty()) continue;
         const std::wstring k = minuscolo(chiave);
         buf.insert(buf.end(), k.begin(), k.end());
         buf.push_back(L'\t');
-        buf.insert(buf.end(), percorso.begin(), percorso.end());
+        buf.insert(buf.end(), pulito.begin(), pulito.end());
         buf.push_back(L'\0');
     }
-    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi"); return; }
+    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, valore); return; }
     buf.push_back(L'\0');
-    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"IconeGiochi", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, valore, REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+}
+
+inline auto Motore::leggiIconeGiochi() -> std::unordered_map<std::wstring, std::wstring> {
+    return leggiMappaGiochi(L"IconeGiochi");
+}
+
+inline auto Motore::salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m) -> void {
+    salvaMappaGiochi(L"IconeGiochi", m);
+}
+
+inline auto Motore::leggiNomiGiochi() -> std::unordered_map<std::wstring, std::wstring> {
+    return leggiMappaGiochi(L"NomiGiochi");
+}
+
+inline auto Motore::salvaNomiGiochi(const std::unordered_map<std::wstring, std::wstring>& m) -> void {
+    salvaMappaGiochi(L"NomiGiochi", m);
 }
 
 inline auto Motore::leggiTuttiGiochi(bool subito) -> void {
@@ -677,12 +698,20 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
     }), nuove.end());
 
     const auto iconePers = leggiIconeGiochi();
+    const auto nomiPers = leggiNomiGiochi();
     for (AppL& a : nuove) {
-        auto it = iconePers.find(minuscolo(a.avvio));
+        const std::wstring avvioMin = minuscolo(a.avvio);
+        auto it = iconePers.find(avvioMin);
         if (it == iconePers.end()) it = iconePers.find(a.minuscolo);
         if (it != iconePers.end() && esisteFile(it->second)) {
             a.iconaFile = it->second;
             a.iconaPers = true;
+        }
+        auto itN = nomiPers.find(avvioMin);
+        if (itN != nomiPers.end() && !itN->second.empty()) {
+            a.nome = itN->second;
+            a.minuscolo = minuscolo(a.nome);
+            a.nomePers = true;
         }
     }
 
@@ -1093,6 +1122,148 @@ inline auto Motore::cambiaIconaGioco(const AppL& a) -> void {
     lDirty = true;
 }
 
+inline auto Motore::rinominaGioco(const AppL& a) -> void {
+    if (lDialogoAperto) return;
+    lDialogoAperto = true;
+
+    struct StatoRinomina {
+        bool finito = false;
+        bool confermato = false;
+    } st;
+
+    const wchar_t* clsName = L"FluidWinRinominaGioco";
+    HINSTANCE hInst = GetModuleHandleW(nullptr);
+    static ATOM clsAtom = 0;
+    if (!clsAtom) {
+        WNDCLASSEXW wc{};
+        wc.cbSize = sizeof(wc);
+        wc.hInstance = hInst;
+        wc.lpszClassName = clsName;
+        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+        wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
+            if (msg == WM_NCCREATE) {
+                auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
+                return TRUE;
+            }
+            auto* s = reinterpret_cast<StatoRinomina*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+            if (s) {
+                if (msg == WM_COMMAND) {
+                    const WORD id = LOWORD(wParam);
+                    if (id == IDOK) { s->confermato = true; s->finito = true; return 0; }
+                    if (id == IDCANCEL) { s->finito = true; return 0; }
+                } else if (msg == WM_CLOSE) {
+                    s->finito = true;
+                    return 0;
+                }
+            }
+            return DefWindowProcW(hwnd, msg, wParam, lParam);
+        };
+        clsAtom = RegisterClassExW(&wc);
+    }
+
+    auto sc = [&](int v) { return (int)std::lround(v * dpi); };
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    const DWORD exStyle = WS_EX_TOPMOST;
+    const int cw = sc(340), ch = sc(96);
+    RECT rc{ 0, 0, cw, ch };
+    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
+    const int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
+
+    RECT rl{};
+    GetWindowRect(launcher, &rl);
+    int wx = rl.left + ((rl.right - rl.left) - ww) / 2;
+    int wy = rl.top + ((rl.bottom - rl.top) - wh) / 2;
+    MONITORINFO mi{ sizeof(mi) };
+    if (GetMonitorInfoW(MonitorFromWindow(launcher, MONITOR_DEFAULTTONEAREST), &mi)) {
+        wx = std::clamp(wx, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - ww));
+        wy = std::clamp(wy, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - wh));
+    }
+
+    HWND dlg = CreateWindowExW(exStyle, clsName, testi::t(L"Rinomina gioco", L"Rename game"),
+        style, wx, wy, ww, wh, launcher, nullptr, hInst, &st);
+    std::wstring nuovoNome;
+    if (dlg) {
+        if (temaScuro()) {
+            BOOL scuro = TRUE;
+            DwmSetWindowAttribute(dlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &scuro, sizeof(scuro));
+        }
+
+        HFONT font = CreateFontW(-sc(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+
+        const int pad = sc(14), editH = sc(26), btnW = sc(84), btnH = sc(28), gap = sc(8);
+        HWND edit = CreateWindowExW(0, L"EDIT", a.nome.c_str(),
+            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
+            pad, pad, cw - 2 * pad, editH, dlg, (HMENU)101, hInst, nullptr);
+        HWND btnOk = CreateWindowExW(0, L"BUTTON", testi::t(L"Salva", L"Save"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
+            cw - pad - 2 * btnW - gap, pad + editH + sc(14), btnW, btnH, dlg, (HMENU)(INT_PTR)IDOK, hInst, nullptr);
+        HWND btnCancel = CreateWindowExW(0, L"BUTTON", testi::t(L"Annulla", L"Cancel"),
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+            cw - pad - btnW, pad + editH + sc(14), btnW, btnH, dlg, (HMENU)(INT_PTR)IDCANCEL, hInst, nullptr);
+
+        if (font) {
+            SendMessageW(edit, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(btnOk, WM_SETFONT, (WPARAM)font, TRUE);
+            SendMessageW(btnCancel, WM_SETFONT, (WPARAM)font, TRUE);
+        }
+
+        EnableWindow(launcher, FALSE);
+        ShowWindow(dlg, SW_SHOW);
+        SetFocus(edit);
+        SendMessageW(edit, EM_SETSEL, 0, -1);
+
+        MSG msg{};
+        while (!st.finito && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            if (!IsDialogMessageW(dlg, &msg)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        if (st.confermato) {
+            const int len = GetWindowTextLengthW(edit);
+            if (len > 0) {
+                std::wstring raw(len + 1, L'\0');
+                const int n = GetWindowTextW(edit, raw.data(), len + 1);
+                raw.resize(n > 0 ? n : 0);
+                for (wchar_t ch : raw) {
+                    if (ch != L'\t' && ch != L'\r' && ch != L'\n') nuovoNome.push_back(ch);
+                }
+                const size_t ini = nuovoNome.find_first_not_of(L" \t\r\n");
+                if (ini == std::wstring::npos) {
+                    nuovoNome.clear();
+                } else {
+                    const size_t fin = nuovoNome.find_last_not_of(L" \t\r\n");
+                    nuovoNome = nuovoNome.substr(ini, fin - ini + 1);
+                }
+            }
+        }
+
+        EnableWindow(launcher, TRUE);
+        DestroyWindow(dlg);
+        if (font) DeleteObject(font);
+    }
+
+    lDialogoAperto = false;
+    if (lAperto && !lChiusura) prendiFuoco(launcher);
+
+    if (st.confermato && !nuovoNome.empty()) {
+        auto nm = leggiNomiGiochi();
+        nm[minuscolo(a.avvio)] = nuovoNome;
+        salvaNomiGiochi(nm);
+        leggiTuttiGiochi(true);
+        lDirty = true;
+    }
+}
+
 inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (i < 0 || i >= (int)filtrate.size()) return;
     const AppL a = tuttiGiochi[filtrate[i]];
@@ -1113,6 +1284,9 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     vv.push_back(menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 6));
     if (a.iconaPers)
         vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 7));
+    vv.push_back(menu::voce(testi::t(L"Rinomina…", L"Rename…"), 8));
+    if (a.nomePers)
+        vv.push_back(menu::voce(testi::t(L"Ripristina nome", L"Reset name"), 9));
     vv.push_back(menu::separatore());
     if (a.manuale)
         vv.push_back(menu::voce(testi::t(L"Rimuovi dai giochi", L"Remove from Games"), 4));
@@ -1171,6 +1345,8 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
             return false;
         }), el.end());
         salvaGiochiAggiunti(el);
+        auto nm = leggiNomiGiochi();
+        if (nm.erase(avvioMin) > 0) salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
     } else if (cmd == 5) {
         auto n = leggiGiochiNascosti();
@@ -1190,6 +1366,13 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
                 g.provata = false;
             }
         }
+        leggiTuttiGiochi(true);
+    } else if (cmd == 8) {
+        rinominaGioco(a);
+    } else if (cmd == 9) {
+        auto nm = leggiNomiGiochi();
+        nm.erase(minuscolo(a.avvio));
+        salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
     }
 }

@@ -2271,6 +2271,7 @@ private:
         std::wstring nome, avvio, minuscolo, iconaFile, cartella;
         bool manuale = false;
         bool iconaPers = false;
+        bool nomePers = false;
         ID2D1Bitmap1* icona = nullptr;
         bool provata = false;
     };
@@ -2355,8 +2356,12 @@ private:
     static void salvaGiochiNascosti(const std::unordered_set<std::wstring>& s);
     static std::vector<std::pair<std::wstring, std::wstring>> leggiGiochiAggiunti();
     static void salvaGiochiAggiunti(const std::vector<std::pair<std::wstring, std::wstring>>& el);
+    static std::unordered_map<std::wstring, std::wstring> leggiMappaGiochi(const wchar_t* valore);
+    static void salvaMappaGiochi(const wchar_t* valore, const std::unordered_map<std::wstring, std::wstring>& m);
     static std::unordered_map<std::wstring, std::wstring> leggiIconeGiochi();
     static void salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
+    static std::unordered_map<std::wstring, std::wstring> leggiNomiGiochi();
+    static void salvaNomiGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
     bool appartieneAiGiochi(const AppL& a) const;
 
     static bool iniziali(const std::wstring& nome, const std::wstring& q);
@@ -2433,6 +2438,8 @@ private:
     void aggiungiGiocoFile(const std::wstring& percorso);
 
     void cambiaIconaGioco(const AppL& a);
+
+    void rinominaGioco(const AppL& a);
 
     void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"");
 
