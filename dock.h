@@ -32,6 +32,7 @@
 #include "widget.h"
 #include "jumplist.h"
 #include "wifi.h"
+#include "indice.h"
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
 #include <d3d11.h>
@@ -92,6 +93,7 @@ static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Wi
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
 static const UINT_PTR TIMER_CITTA = 10;  // (finestra del pannello) ricerca della citta' del meteo: attesa dopo l'ultimo tasto e risultati
+static const UINT_PTR TIMER_FILE_L = 11; // (finestra del launcher) file e cartelle: la ricerca parte 0,2 s dopo l'ultimo tasto
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
@@ -2277,6 +2279,28 @@ private:
     float lPresaY = 0; double lPresaScroll = 0;
     int lSel = 0, lSopra = -1;
     bool lSopraEnergia = false;
+    // File e cartelle nel launcher (indice.h; issue #14: "la ricerca mostra solo le app"). Mentre si scrive, 0,2 s dopo
+    // l'ultimo tasto, un thread chiede all'indice di Windows; sotto la griglia compare la sezione con i risultati del
+    // testo lFileTesto e, in fondo, "Cerca in Esplora file". lFileGen scarta i risultati di un testo vecchio; lFileH e'
+    // l'altezza della sezione, animata (la griglia si accorcia); lSelFile la riga scelta con le frecce (-1: nella
+    // griglia; lFileRighe() = la riga di Esplora file); iconeFile per percorso (lato 48 nel thread delle icone)
+    std::vector<indice::File> lFile;
+    std::wstring lFileTesto;
+    unsigned lFileGen = 0;
+    double lFileH = 0;
+    int lSelFile = -1, lSopraFile = -1;
+    std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeFile;
+    static constexpr float LF_TESTA = 32, LF_RIGA = 44, LF_ESPLORA = 40;
+    static constexpr int LF_MAX = 6;
+    int lFileRighe() const;
+    float lFileAlto() const;
+    int lFileIn(float x, float y) const;
+    void cercaFileLauncher();
+    void apriFile(int k);
+    void menuFile(int k, POINT pt);
+    bool disegnaFileLauncher(bool scuro, D2D1_COLOR_F ink);
+    double lFileOp = 1;   // opacita' delle righe dei file: 1 se sono del testo scritto, 0,45 se di uno vecchio (animata)
+    bool lSelTastiera = false;   // l'app scelta l'ha scelta la tastiera (si tiene in vista); rotella, barra e testo nuovo no
     IContextMenu2* menuShell2 = nullptr; IContextMenu3* menuShell3 = nullptr;   // durante il menu di Windows di un'app
     // Icone: le prepara un thread a parte (ognuna costa decine di ms), il disegno non le aspetta mai: intanto si
     // vede un segnaposto. Le chiedono il dock (256 px), le app in background (128), il launcher (96) e le notifiche

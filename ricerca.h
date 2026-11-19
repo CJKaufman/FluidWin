@@ -4,6 +4,7 @@
 #pragma once
 #include "vetro.h"
 #include "onda.h"
+#include "indice.h"
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -365,7 +366,16 @@ private:
                 if (n >= 3) break;
                 if (punteggio(s.titolo, ql) > 0 || minuscolo(s.sotto).find(ql) != std::wstring::npos) { Risultato r = s; r.sotto = testi::t(L"Impostazioni", L"Settings"); risultati.push_back(r); n++; }
             }
-            for (const auto& f : file) risultati.push_back(f);
+            // i file che entrano: la barra resta dentro tre quarti dello schermo (con 8 file, piu' app, impostazioni e
+            // web, su uno schermo basso usciva di sotto). Una riga resta per la ricerca sul web
+            {
+                MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+                const bool ok = GetMonitorInfoW(MonitorFromWindow(v.fin, MONITOR_DEFAULTTONEAREST), &mi);
+                const float alto = ok ? (mi.rcWork.bottom - mi.rcWork.top) / v.dpi * 0.75f : 1000;
+                const int righe = std::max(0, (int)((alto - ALTO_BARRA - 18) / ALTO_RIGA));
+                const int posto = std::max(0, righe - (int)risultati.size() - 1);
+                for (size_t i = 0; i < file.size() && (int)i < posto; i++) risultati.push_back(file[i]);
+            }
             risultati.push_back({T_WEB, testi::t(L"Cerca “", L"Search “") + q + testi::t(L"” sul web", L"” on the web"),
                                  testi::t(L"Nel browser predefinito", L"In the default browser"), q, L""});
         }
@@ -583,7 +593,8 @@ private:
                 else if (!r->iconeDaFare.empty()) { ic = r->iconeDaFare.front(); r->iconeDaFare.pop_front(); r->iconeInCorso++; }
                 LeaveCriticalSection(&r->cs);
                 if (g >= 0) {
-                    auto* lista = new std::vector<Risultato>(cercaFile(q, 5));   // al massimo 5, dopo aver saltato quelli di sistema
+                    // al massimo 8 (prima 5), dopo aver saltato quelli di sistema; quanti se ne vedono lo decide componi
+                    auto* lista = new std::vector<Risultato>(cercaFile(q, 8));
                     if (g != r->generazione || !PostMessageW(r->v.fin, WM_APP + 1, (WPARAM)g, (LPARAM)lista)) delete lista;
                 } else if (!ic.empty()) {
                     Pixel px; px.chiave = ic;
@@ -595,56 +606,11 @@ private:
         return 0;
     }
 
+    // file e cartelle dall'indice di Windows (indice.h, condiviso con il launcher): tutti i luoghi indicizzati, senza
+    // AppData, cartelle nascoste e menu Start. Prima solo la cartella dell'utente
     static std::vector<Risultato> cercaFile(const std::wstring& q, int quanti) {
         std::vector<Risultato> out;
-        static const CLSID CLSID_Fabbrica = {0x14010e02, 0xbbbd, 0x41f0, {0x88, 0xe3, 0xed, 0xa3, 0x71, 0x21, 0x65, 0x84}};   // SearchFolderItemFactory
-        static const IID IID_Fabbrica = {0xa0ffbc28, 0x5482, 0x4366, {0xbe, 0x27, 0x3e, 0x81, 0xe7, 0x8e, 0x06, 0xc2}};
-        static const CLSID CLSID_Condizioni = {0xe03e85b0, 0x7be3, 0x4000, {0xba, 0x98, 0x6c, 0x13, 0xde, 0x9f, 0xa4, 0x86}};   // ConditionFactory
-        static const IID IID_Condizioni2 = {0x71d222e1, 0x432f, 0x429e, {0x8c, 0x13, 0xb6, 0xda, 0xfd, 0xe5, 0x07, 0x7a}};
-        static const IID IID_Condizione = {0x0fc988d4, 0xc935, 0x4b97, {0xa9, 0x73, 0x46, 0x28, 0x2e, 0xa1, 0x75, 0xc8}};
-        static const PROPERTYKEY NOME = {{0xb725f130, 0x47ef, 0x101a, {0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac}}, 10};   // ItemNameDisplay
-        ISearchFolderItemFactory* sf = nullptr; IUnknown* cf = nullptr; ICondition* cond = nullptr;
-        if (FAILED(CoCreateInstance(CLSID_Fabbrica, nullptr, CLSCTX_INPROC_SERVER, IID_Fabbrica, (void**)&sf))) return out;
-        if (SUCCEEDED(CoCreateInstance(CLSID_Condizioni, nullptr, CLSCTX_INPROC_SERVER, IID_Condizioni2, (void**)&cf)) &&
-            // IConditionFactory2::CreateStringLeaf (MinGW non ha structuredquery.h: si chiama per posizione, IUnknown 3 +
-            // IConditionFactory 4 + CreateTrueFalse, CreateNegation, CreateCompoundFromObjectArray, CreateCompoundFromArray)
-            SUCCEEDED(((HRESULT (STDMETHODCALLTYPE*)(void*, const PROPERTYKEY&, CONDITION_OPERATION, LPCWSTR, LPCWSTR, int, REFIID, void**))(*(void***)cf)[11])(
-                cf, NOME, COP_VALUE_CONTAINS, q.c_str(), nullptr, 0 /* CONDITION_CREATION_DEFAULT */, IID_Condizione, (void**)&cond)) && cond) {
-            sf->SetDisplayName(L"FluidWin");
-            sf->SetCondition(cond);
-            PIDLIST_ABSOLUTE profilo = nullptr;
-            if (SUCCEEDED(SHGetKnownFolderIDList(FOLDERID_Profile, 0, nullptr, &profilo))) {
-                IShellItemArray* scopo = nullptr;
-                if (SUCCEEDED(SHCreateShellItemArrayFromIDLists(1, (PCIDLIST_ABSOLUTE_ARRAY)&profilo, &scopo))) { sf->SetScope(scopo); scopo->Release(); }
-                CoTaskMemFree(profilo);
-            }
-            IShellItem* ris = nullptr;
-            if (SUCCEEDED(sf->GetShellItem(IID_PPV_ARGS(&ris)))) {
-                IEnumShellItems* en = nullptr;
-                if (SUCCEEDED(ris->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&en)))) {
-                    IShellItem* it = nullptr;
-                    while ((int)out.size() < quanti && en->Next(1, &it, nullptr) == S_OK) {
-                        LPWSTR n = nullptr, perc = nullptr;
-                        if (SUCCEEDED(it->GetDisplayName(SIGDN_NORMALDISPLAY, &n)) && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &perc)) && n && perc) {
-                            std::wstring p = perc, cartella = p.substr(0, p.find_last_of(L'\\'));
-                            // cartelle di sistema e nascoste (AppData, .cache, .vscode...): non sono cose che si cercano
-                            std::wstring pl = p; for (auto& ch : pl) ch = (wchar_t)towlower(ch);
-                            const bool sistema = pl.find(L"\\appdata\\") != std::wstring::npos || pl.find(L"\\.") != std::wstring::npos;
-                            if (sistema) { CoTaskMemFree(n); CoTaskMemFree(perc); it->Release(); continue; }
-                            wchar_t prof[MAX_PATH] = L""; ExpandEnvironmentStringsW(L"%USERPROFILE%", prof, MAX_PATH);
-                            if (_wcsnicmp(cartella.c_str(), prof, wcslen(prof)) == 0) cartella = L"~" + cartella.substr(wcslen(prof));
-                            out.push_back({T_FILE, n, cartella, p, p});
-                        }
-                        CoTaskMemFree(n); CoTaskMemFree(perc); it->Release();
-                    }
-                    en->Release();
-                }
-                ris->Release();
-            }
-        }
-        if (cond) cond->Release();
-        if (cf) cf->Release();
-        sf->Release();
+        for (auto& f : indice::cerca(q, quanti, true)) out.push_back({T_FILE, f.nome, f.cartella, f.percorso, f.percorso});
         return out;
     }
 
