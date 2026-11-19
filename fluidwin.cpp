@@ -3269,7 +3269,7 @@ static const ULONG_PTR FIRMA_PROVA_TASTI = 0x464C5054;   // "FLPT": tasti delle 
 static DWORD gFrecciaPresa = 0;   // Win+Su/Giu trattenuto: ripetizioni e rilascio di quella freccia restano qui
 static const UINT WM_VOLUME = WM_APP + 6, WM_PANORAMICA = WM_APP + 7, WM_RICERCA = WM_APP + 8, WM_IMPOSTAZIONI = WM_APP + 9, WM_PANNELLO = WM_APP + 10, WM_CHIUDI_FG = WM_APP + 11;
 // scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Alt+Tab (panoramica), Win+Tab (ricerca)
-static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false};
+static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false}, gTastoWin{true};
 
 // Battito del thread principale: lo aggiorna un timer ogni 250 ms (e ogni fotogramma). Se e' fermo da piu' di un
 // secondo (FluidWin bloccato) l'hook non si tiene piu' i tasti: volume, Win, Alt+Tab e Alt+F4 tornano a Windows,
@@ -3556,7 +3556,7 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                     return 1;
                 }
                 // (anche con un gioco o un video a tutto schermo: Win apre il launcher di FluidWin, non lo Start)
-                if (solo && gDockOk && viva) {
+                if (solo && gTastoWin && gDockOk && viva) {
                     // Windows apre lo Start al rilascio di Win se nel frattempo non e' stato premuto altro: prima del
                     // rilascio (trattenuto qui e reinviato) si inserisce un tasto "maschera" che non fa nulla (0xE8)
                     INPUT in[3]{};
@@ -3669,8 +3669,8 @@ static std::wstring diagnostica() {
     riga(L"Angoli: Windhawk %d px", raggio::windhawk());
     riga(L"Giochi riconosciuti: %zu", giochiNoti().size());
     const impostazioni::Valori& v = impostazioni::valori();
-    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
-         v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
+    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
+         v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
     riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d", v.dockAuto, v.dockOpacita, v.dockSpazio,
          v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi);
     riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
@@ -3708,6 +3708,7 @@ static void applicaImpostazioni() {
     gTastiVolume = v.volume && gOsdOk;
     gTastoPanoramica = v.winTab;
     gTastoRicerca = v.winS;
+    gTastoWin = v.tastoWin;
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
     if (gDockOk) { gDock.impostaNotch(v.notch); gDock.impostaOraNelDock(v.oraDock); }
