@@ -31,6 +31,7 @@
 #include "altrui.h"
 #include "widget.h"
 #include "jumplist.h"
+#include "anteprime.h"
 #include "wifi.h"
 #include "indice.h"
 #include <mmdeviceapi.h>
@@ -94,6 +95,8 @@ static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
 static const UINT_PTR TIMER_CITTA = 10;  // (finestra del pannello) ricerca della citta' del meteo: attesa dopo l'ultimo tasto e risultati
 static const UINT_PTR TIMER_FILE_L = 11; // (finestra del launcher) file e cartelle: la ricerca parte 0,2 s dopo l'ultimo tasto
+static const UINT_PTR TIMER_DESKTOP = 12; // "Mostra il desktop" / "Ripristina le finestre": una finestra ogni 45 ms
+static const UINT_PTR TIMER_ANTEPRIME = 13; // anteprime delle finestre: quando aprirle e chiuderle (ogni 80 ms, solo col mouse sul dock o aperte)
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
@@ -349,6 +352,9 @@ public:
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
         return true;
     }
+
+    // anteprime delle finestre sulle icone (impostazione "Anteprime delle finestre"; spenta: chiude quelle aperte)
+    void impostaAnteprime(bool a) { anteprimeAccese = a; if (!a) ant.chiudi(); }
 
     // all'uscita, dopo chiudi: aspetta i thread del widget (vedi widget::Dati::ferma) e quello delle jump list
     // (jumplist::Indice::ferma), ognuno al massimo ms. false: almeno uno non ha finito
@@ -1237,7 +1243,9 @@ private:
             // "sopra al dock" dalla posizione vera del mouse (mouseDentro puo' restare vero se Windows non avvisa dell'uscita)
             const bool sopraIcone = WindowFromPoint(pt) == icone;
             const bool vicino = (sopraIcone && mouseSulDock) || (alto && x >= zonaDockL - 40 * dpi && x <= zonaDockR + 40 * dpi);
-            if (vicino || lAperto || !nessunaScheda() || dockSu) fuoriDal = -1;   // (pannello o impostazioni aperti: il dock resta su)
+            // (pannello, impostazioni o anteprime delle finestre aperti: il dock resta su; le anteprime senza il dock
+            // sotto restavano sospese a mezz'aria)
+            if (vicino || lAperto || !nessunaScheda() || dockSu || ant.aperta()) fuoriDal = -1;
             else if (fuoriDal < 0) fuoriDal = adesso();
             else if (adesso() - fuoriDal > 0.35) { rivelato = false; fuoriDal = -1; dirty = true; }
         }
@@ -1498,7 +1506,8 @@ private:
 
         // etichetta: nome dell'app, oppure descrizione dell'elemento di stato
         bool etichettaVoluta = false;
-        if (sopra >= 0 && premuta < 0) {
+        // (non con le anteprime aperte: le coprirebbe, e il nome e' gia' nei loro titoli)
+        if (sopra >= 0 && premuta < 0 && !ant.aperta()) {
             const Voce& v = voci[sopra];
             etichettaTesto = v.nome; etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
             etichettaVoluta = true;
@@ -2574,7 +2583,119 @@ private:
         } else if (!SetForegroundWindow(h)) SwitchToThisWindow(h, TRUE);
     }
 
+    // ---- anteprime delle finestre sopra le icone (anteprime.h; issue #24) ----
+    // Mouse fermo 0,5 s su un'icona con finestre aperte: le anteprime si aprono; spostandosi su un'altra icona con
+    // finestre passano a quella (0,15 s); uscendo da icona e anteprime si chiudono dopo 0,3 s. Niente anteprime con un
+    // tasto premuto, un menu aperto, il launcher o il centro di controllo aperti. Il controllo gira solo mentre serve
+    anteprime::Anteprime ant;
+    bool anteprimeAccese = true, antTimer = false;
+    int antCandidata = -1;
+    double antSopraT = 0, antFuoriT = -1;
+
+    // finestre di un'icona dalla piu' in alto (come l'elenco del menu)
+    std::vector<HWND> finestreInOrdine(const Voce& v) const {
+        std::vector<HWND> r;
+        for (HWND h = GetTopWindow(nullptr); h && r.size() < v.finestre.size(); h = GetWindow(h, GW_HWNDNEXT))
+            if (std::find(v.finestre.begin(), v.finestre.end(), h) != v.finestre.end()) r.push_back(h);
+        return r;
+    }
+
+    void apriAnteprime(int i) {
+        if (i < 0 || i >= (int)voci.size()) return;
+        const Voce& v = voci[i];
+        if (!ant.scegli) {
+            ant.scegli = [this](HWND h) { if (IsWindow(h)) portaDavanti(h); };
+            ant.chiudiFinestra = [this](HWND h) {
+                if (!IsWindow(h)) return;
+                if (preparaChiusura) preparaChiusura(h);   // (foto per l'animazione di chiusura, come "Chiudi" del menu)
+                PostMessageW(h, WM_SYSCOMMAND, SC_CLOSE, 0);
+            };
+        }
+        // sopra l'icona a riposo (il punto in cui il dock la disegna adesso, in coordinate dello schermo)
+        const POINT ancora = {schermo.left + (LONG)((v.rett.left + v.rett.right) / 2), schermo.bottom - H + (LONG)v.rett.top};
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoW(MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        ant.apri(finestreInOrdine(v), ancora, mi.rcWork, i);
+        antFuoriT = -1;
+        if (registro) { char b[64]; snprintf(b, 64, "dock: anteprime di %zu finestre", v.finestre.size()); scrivi(b); }
+    }
+
+    void controllaAnteprime() {
+        const double ora = adesso();
+        const bool libero = premuta < 0 && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
+        const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
+        const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO;
+        if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
+        if (ant.aperta()) {
+            ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
+            if (!ant.aperta()) return;
+            if (!libero) { ant.chiudi(); return; }
+            if (ant.mouseSopra() || s == ant.icona()) { antFuoriT = -1; return; }
+            if (conFinestre && ora - antSopraT > 0.15) { apriAnteprime(s); return; }   // un'altra icona: passa a quella
+            if (antFuoriT < 0) antFuoriT = ora;
+            else if (ora - antFuoriT > 0.3) { ant.chiudi(); antFuoriT = -1; }
+            return;
+        }
+        if (anteprimeAccese && conFinestre && ora - antSopraT >= 0.5) { apriAnteprime(s); return; }
+        if (!mouseDentro) { KillTimer(icone, TIMER_ANTEPRIME); antTimer = false; }   // (mouse via e niente aperto: basta controlli)
+    }
+
+    // ---- "Mostra il desktop" (issue #24: "non trovo come ridurre tutte le finestre") ----
+    // Le finestre delle app del dock visibili e non ridotte, dalla piu' in alto: si riducono in quest'ordine come con
+    // il clic sull'icona dell'app in primo piano (riduci: copia preparata, poi il genio), una ogni 45 ms perche' si veda una
+    // cascata e non dieci animazioni insieme. desktopRidotte le ricorda per "Ripristina le finestre", che le riapre
+    // dall'ultima (la piu' in fondo) alla prima, cosi' quella che era davanti torna davanti. Comandi postati: un'app
+    // bloccata non ferma il dock. Le finestre di app elevate non si riducono (UIPI), come con il dock in generale
+    std::vector<HWND> desktopRidotte, desktopCoda;
+    bool desktopRiduce = true;
+
+    std::vector<HWND> finestreDelDock() const {
+        std::vector<HWND> tutte;
+        for (const auto& v : voci) if (!v.uscente) tutte.insert(tutte.end(), v.finestre.begin(), v.finestre.end());
+        std::vector<HWND> r;   // in ordine di z, dalla piu' in alto
+        for (HWND h = GetTopWindow(nullptr); h && r.size() < 200; h = GetWindow(h, GW_HWNDNEXT))
+            if (std::find(tutte.begin(), tutte.end(), h) != tutte.end() && IsWindowVisible(h) && !IsIconic(h)) r.push_back(h);
+        return r;
+    }
+    bool desktopRipristinabile() const {
+        for (HWND h : desktopRidotte) if (IsWindow(h) && IsIconic(h)) return true;
+        return false;
+    }
+    void mostraDesktop() {
+        desktopRidotte = finestreDelDock();
+        if (desktopRidotte.empty()) return;
+        desktopCoda = desktopRidotte; desktopRiduce = true;
+        SetTimer(icone, TIMER_DESKTOP, 45, nullptr);
+        passoDesktop();   // (la prima subito)
+        if (registro) { char b[64]; snprintf(b, 64, "dock: mostra il desktop, %zu finestre", desktopRidotte.size()); scrivi(b); }
+    }
+    void ripristinaDesktop() {
+        desktopCoda.assign(desktopRidotte.rbegin(), desktopRidotte.rend());
+        desktopRidotte.clear();
+        desktopRiduce = false;
+        if (registro) { char b[64]; snprintf(b, 64, "dock: ripristina le finestre, %zu", desktopCoda.size()); scrivi(b); }
+        SetTimer(icone, TIMER_DESKTOP, 45, nullptr);
+        passoDesktop();
+    }
+    void passoDesktop() {
+        while (!desktopCoda.empty()) {
+            const HWND h = desktopCoda.front();
+            desktopCoda.erase(desktopCoda.begin());
+            // (chiuse o gia' nello stato giusto nel frattempo: si passa alla prossima senza aspettare)
+            if (!IsWindow(h) || (desktopRiduce ? IsIconic(h) : !IsIconic(h))) continue;
+            // riduzione: con la copia preparata come per il clic sull'icona (riduci = riduciDalDock), altrimenti
+            // SC_MINIMIZE postato arrivava senza niente di pronto e la riduzione era quella nativa, senza genio
+            // (R20261119-205727-S3); se la copia non si puo' fare (genio spento, pausa), il comando normale
+            if (!desktopRiduce) PostMessageW(h, WM_SYSCOMMAND, SC_RESTORE, 0);
+            else if (!riduci || !riduci(h)) PostMessageW(h, WM_SYSCOMMAND, SC_MINIMIZE, 0);
+            break;
+        }
+        if (desktopCoda.empty()) KillTimer(icone, TIMER_DESKTOP);
+    }
+
     void menu(int i, POINT pt) {
+        ant.chiudi();   // (il menu prende il posto delle anteprime)
         // Spazio vuoto del dock, launcher e centro di controllo: le impostazioni di FluidWin. Prima il tasto destro li'
         // non faceva niente, e le impostazioni si aprivano solo dal centro di controllo, dalla ricerca o dall'icona
         // nell'area di notifica (nascosta con la barra di Windows): difficili da trovare
@@ -2582,9 +2703,18 @@ private:
         if (!suApp) {
             if (i >= 0 && i < (int)voci.size() && voci[i].uscente) return;
             SetForegroundWindow(icone);
-            const int s = (int)menu::mostra({menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1)},
-                                            {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            // "Mostra il desktop" con finestre da ridurre; "Ripristina le finestre" se quelle ridotte cosi' sono ancora
+            // ridotte e non ce ne sono altre aperte (issue #24)
+            std::vector<menu::Voce> vv = {menu::titolo(L"FluidWin")};
+            const bool aperte = !finestreDelDock().empty();
+            if (desktopRipristinabile() && !aperte) vv.push_back(menu::voce(testi::t(L"Ripristina le finestre", L"Restore windows"), 3));
+            else if (aperte) vv.push_back(menu::voce(testi::t(L"Mostra il desktop", L"Show desktop"), 2));
+            if (vv.size() > 1) vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
+            const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
             if (s == 1 && impostazioni) impostazioni(nullptr);
+            else if (s == 2) mostraDesktop();
+            else if (s == 3) ripristinaDesktop();
             return;
         }
         if (voci[i].uscente) return;
@@ -2735,6 +2865,8 @@ private:
                 d->statoSopra = isola ? d->statoInPunto(d->mouseX, d->mouseY) : -1;
                 // mouse arrivato sull'ora: le notifiche si cominciano a leggere, cosi' al clic sono quasi pronte
                 if (d->statoSopra == ORA && statoPrima != ORA && GetTickCount64() - d->chiestaN > 3000) d->chiediNotifiche();
+                // anteprime delle finestre: il controllo gira mentre il mouse e' sul dock (vedi controllaAnteprime)
+                if (d->anteprimeAccese && !d->antTimer) { SetTimer(h, TIMER_ANTEPRIME, 80, nullptr); d->antTimer = true; }
                 d->dirty = true;
                 return 0;
             }
@@ -2746,6 +2878,7 @@ private:
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
                 if (d->sullIsola(x, y)) d->statoPremuto = d->statoInPunto(x, y);
                 else d->premuta = d->iconaInPunto(x, y);
+                d->ant.chiudi();   // (clic su un'icona: le anteprime se ne vanno)
                 d->dirty = true; return 0;
             }
             case WM_LBUTTONUP: {
@@ -2770,6 +2903,8 @@ private:
             case WM_TIMER:
                 if (w == TIMER_BORDO) { d->controllaBordo(); return 0; }
                 if (w == TIMER_DOPO) { d->suTimerDopo(); return 0; }
+                if (w == TIMER_DESKTOP) { d->passoDesktop(); return 0; }
+                if (w == TIMER_ANTEPRIME) { d->controllaAnteprime(); return 0; }
                 if (w == TIMER_INVIO) {
                     KillTimer(h, TIMER_INVIO);
                     // solo se il fuoco e' davvero sulla barra di Windows: l'Invio non deve finire in un'altra app

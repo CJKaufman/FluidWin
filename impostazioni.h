@@ -37,6 +37,7 @@ struct Valori {
     DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
+    bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
@@ -123,6 +124,7 @@ inline void carica() {
     v.dockColore = leggiDword(L"DockColore", 0) & (COLORE_SCELTO | 0xFFFFFF);
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
+    v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
@@ -144,7 +146,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -339,7 +341,16 @@ public:
                 return true;
             case WM_CLOSE: chiudi(); return true;
             case WM_MOUSEWHEEL:   // sezione Cursore: l'elenco dei pacchetti scorre (non ci stanno tutti: R20261114-141207-S7)
-                if (sezione == S_CURSORE && !morph) {
+                if (sezione != S_CURSORE && !morph) {   // le altre: tutta la sezione, una riga (60 px) per scatto
+                    const float prima = scorriSez;
+                    scorriSez = std::min(std::max(scorriSez - GET_WHEEL_DELTA_WPARAM(w) * 60.0f * v.dpi / WHEEL_DELTA, 0.0f), massimoSez);
+                    if (scorriSez != prima) {
+                        disegna();   // (rifa' le zone allo scorrimento nuovo)
+                        POINT pm; GetCursorPos(&pm); ScreenToClient(v.fin, &pm);
+                        const int s = dentro ? zonaIn((float)pm.x, (float)pm.y) : -1;
+                        if (s != sopra) { sopra = s; disegna(); }   // sotto il mouse ora c'e' un'altra riga
+                    }
+                } else if (sezione == S_CURSORE && !morph) {
                     // (si sommano: ogni WHEEL_DELTA una riga; prima un delta di 60 per volta non scorreva mai, R20261114-142613)
                     rotella += GET_WHEEL_DELTA_WPARAM(w);
                     scorriCursori -= rotella / WHEEL_DELTA; rotella %= WHEEL_DELTA;
@@ -398,6 +409,8 @@ private:
         {L"Segue il mouse sugli altri schermi", L"Follows the mouse to other screens",
          L"Mouse in basso su un altro schermo. Spento: solo sul principale",
          L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
+        {L"Anteprime delle finestre", L"Window previews",
+         L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
@@ -509,6 +522,10 @@ private:
     bool installando = false, erroreCursori = false;
     int scorriCursori = 0;   // prima riga mostrata dell'elenco (0 = "Cursori di Windows"): rotella del mouse
     int rotella = 0;         // scatti piccoli della rotella (touchpad, rotelle ad alta precisione) messi da parte
+    // le altre sezioni scorrono intere quando non ci stanno (Dock: 4 interruttori, 3 cursori e il colore; con
+    // l'interruttore delle anteprime l'ultima riga usciva dalla finestra). Pixel scrollati e quanti se ne possono
+    // scrollare, misurati all'ultimo disegno della sezione
+    float scorriSez = 0, massimoSez = 0;
     std::wstring statoCursori;
 
     void liberaAnteprime() { for (auto* b : anteprime) if (b) b->Release(); anteprime.clear(); }
@@ -595,7 +612,7 @@ private:
 
     void vaiASezione(int s) {
         if (s == sezione) return;
-        sezione = s; kSez = 0; tSez = vetro::ms();
+        sezione = s; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -796,7 +813,13 @@ private:
         const D2D1_COLOR_F inkS = {ink.r, ink.g, ink.b, ink.a * (float)e}, tenueS = {tenue.r, tenue.g, tenue.b, tenue.a * (float)e};
         const float L = B + 28 * d + sx, R = W - 28 * d + sx;
         v.testo(nomeSezione(sezione), fTitolo, {L, 20 * d, R - 50 * d, 54 * d}, inkS);
-        float y = 72 * d;
+        // le righe scorrono sotto il titolo: ritaglio da qui in giu', e le zone tagliate allo stesso modo (piu' sotto).
+        // (la sezione Cursore ha il suo scorrimento, a righe dell'elenco dei pacchetti)
+        const bool scorre = sezione != S_CURSORE;
+        const float cimaSez = 62 * d, y0 = 72 * d;
+        const size_t zona0 = zone.size();
+        if (scorre) v.rt->PushAxisAlignedClip({B, cimaSez, W, H}, D2D1_ANTIALIAS_MODE_ALIASED);
+        float y = y0 - (scorre ? scorriSez : 0);
         auto riquadro = [&](const D2D1_RECT_F& r, bool evid) {
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
@@ -936,6 +959,26 @@ private:
             riga(testi::t(L"Maiusc+clic destro", L"Shift+right-click"), testi::t(L"Il menu di Windows, anche con il menu di FluidWin acceso", L"The Windows menu, even with the FluidWin menu on"));
         }
         if (sezione == S_CURSORE) disegnaCursori(L, R, y, e, ink, tenue, blu, rr, H);
+        if (scorre) {
+            v.rt->PopAxisAlignedClip();
+            // quanto si puo' scorrere: l'altezza del contenuto (y senza lo scorrimento) meno lo spazio visibile, con un
+            // margine sul fondo. Se la finestra e' cresciuta (o la sezione accorciata) lo scorrimento rientra al
+            // prossimo scatto; qui si disegna comunque con quello che c'e'
+            const float alto = y + scorriSez - y0, visibile = H - 12 * d - y0;
+            massimoSez = std::max(0.0f, alto - visibile);
+            scorriSez = std::min(scorriSez, massimoSez);   // (vale dal prossimo disegno)
+            // zone della sezione: solo la parte visibile (sotto il titolo e dentro la finestra); le altre via
+            for (size_t k = zona0; k < zone.size();) {
+                D2D1_RECT_F& z = zone[k].r;
+                z.top = std::max(z.top, cimaSez); z.bottom = std::min(z.bottom, H);
+                if (z.bottom <= z.top) zone.erase(zone.begin() + (std::ptrdiff_t)k); else k++;
+            }
+            if (massimoSez > 0) {   // barretta a destra: dove si e' e quanto c'e'
+                const float hb = visibile * visibile / alto, yb = y0 + (visibile - hb) * std::min(scorriSez / massimoSez, 1.0f);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(0, 0, 0, 0.18f * (float)e));
+                v.rt->FillRoundedRectangle({{W - 10 * d, yb, W - 6 * d, yb + hb}, 2 * d, 2 * d}, v.pen);
+            }
+        }
         if (strato) { v.rt->PopLayer(); v.rt->SetTransform(D2D1::Matrix3x2F::Identity()); }
         v.finisci();
     }
