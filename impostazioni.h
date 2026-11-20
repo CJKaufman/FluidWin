@@ -18,7 +18,8 @@ namespace impostazioni {
 struct Valori {
     bool avvio = false;           // FluidWin si apre all'accesso a Windows (sta nel registro di Windows, vedi avvioAttivo)
     bool gelatina = true;         // finestre "di gelatina" quando si trascinano
-    bool genio = true;            // riduzione e ripristino con l'effetto genio
+    bool genio = true;            // riduzione e ripristino animati (con il genio o con la caduta, vedi riduzione)
+    int riduzione = 0;            // 0 genio (la finestra si deforma), 1 caduta nel dock (riquadro che cade dietro le icone)
     bool chiusura = true;         // finestre che si rimpiccioliscono e svaniscono quando si chiudono
     bool apertura = true;         // finestre aperte fuori dal dock (Start, ricerca...) che crescono dal centro
     bool onda = true;             // onda di luce multicolore sui bordi dello schermo quando si apre la ricerca
@@ -115,6 +116,7 @@ inline void carica() {
     if (v.avvio && comandoRegistrato() != comandoAvvio()) impostaAvvio(true);
     v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
+    v.riduzione = leggiDword(L"Riduzione", 0) == 1 ? 1 : 0;
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
@@ -140,7 +142,7 @@ inline void carica() {
 inline void salva() {
     const Valori& v = valori();
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
-    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
+    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda); scriviDword(L"Riduzione", (DWORD)v.riduzione);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
@@ -421,8 +423,8 @@ private:
          L"FluidWin si apre da solo quando accedi", L"FluidWin opens by itself when you sign in", &Valori::avvio, S_GENERALE},
         {L"Cerca aggiornamenti", L"Check for updates",
          L"All'avvio chiede a GitHub se c'è una versione nuova", L"At startup it asks GitHub for a new version", &Valori::aggiornamenti, S_GENERALE},
-        {L"Effetto genio", L"Genie effect",
-         L"Riduzione e ripristino che entrano ed escono dal dock", L"Minimize into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
+        {L"Riduzione a icona animata", L"Animated minimize",
+         L"Le finestre entrano nel dock ed escono da lì", L"Windows go into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
         {L"Animazione di apertura", L"Open animation",
          L"Le finestre aperte da Start o dalla ricerca crescono dal centro", L"Windows opened from Start or search grow from the center", &Valori::apertura, S_ANIMAZIONI},
         {L"Animazione di chiusura", L"Close animation",
@@ -676,7 +678,8 @@ private:
             return;
         }
         if (id >= 300 && id < 300 + SEZIONI) { vaiASezione(id - 300); return; }
-        if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
+        if (id == 120 || id == 121) valori().riduzione = id - 120;   // stile della riduzione a icona (1.3.0)
+        else if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
             if (voci[id].campo == &Valori::avvio) impostaAvvio(b);   // (sta nel registro di Windows, non in salva)
@@ -867,6 +870,32 @@ private:
             v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
             levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i], (float)e);
             y += 60 * d;
+        }
+        if (sezione == S_ANIMAZIONI) {
+            // stile della riduzione a icona (1.3.0): il genio, o il riquadro che cade dietro le icone del dock. Con la
+            // riduzione animata spenta la scelta resta, un po' spenta, per quando la si riaccende
+            const D2D1_RECT_F rl = {L, y, R, y + 64 * d};
+            riquadro(rl, false);
+            const float ks = valori().genio ? 1.0f : 0.45f;
+            const D2D1_COLOR_F inkK = {inkS.r, inkS.g, inkS.b, inkS.a * ks};
+            v.testo(testi::t(L"Stile della riduzione", L"Minimize style"), fVoce, {rl.left + 16 * d, rl.top, rl.left + 200 * d, rl.bottom}, inkK);
+            const float x0 = rl.left + 210 * d, larg = rl.right - 16 * d - x0, h = 34 * d, yl = rl.top + 15 * d;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+            v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+            const wchar_t* nomi[2] = {testi::t(L"Genio", L"Genie"), testi::t(L"Caduta nel dock", L"Drop into the dock")};
+            for (int i = 0; i < 2; i++) {
+                const D2D1_RECT_F r = {x0 + larg * i / 2 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 2 - 3 * d, yl + h - 3 * d};
+                zone.push_back({r, 120 + i});
+                if (valori().riduzione == i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e * ks) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e * ks));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                } else if (sopra == 120 + i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                }
+                v.testo(nomi[i], fCentro, r, inkK);
+            }
+            y += 70 * d;
         }
         if (sezione == S_GENERALE) {
             // lingua: due scelte (i nomi restano ciascuno nella sua lingua)

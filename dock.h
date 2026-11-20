@@ -128,6 +128,9 @@ struct Voce {
     ID2D1Bitmap1* icona = nullptr;
     std::vector<HWND> finestre;
     double rimbalzoT0 = -1;    // istante di inizio del rimbalzo (avvio), -1 = fermo
+    double sobbalzoT0 = -1;    // piccolo sobbalzo (una finestra caduta nel dock la' sopra, 1.3.0), -1 = fermo
+    double sobbalzoDopo = -1;  // ... chiesto: parte al prossimo fotogramma del dock, dopo questi secondi (-1 = niente)
+    float sobbalzoAmp = 0;     // ... quanto (1 l'icona dell'app, meno le vicine)
     double scala = 1;          // 0..1: le icone nuove crescono, quelle delle app chiuse si restringono (niente scatti)
     bool uscente = false;      // app chiusa: si restringe e poi sparisce
     D2D1_RECT_F rett{};        // ultima posizione disegnata (coordinate della finestra delle icone)
@@ -539,6 +542,25 @@ public:
     }
 
     // Dove deve entrare il genio per questa finestra: l'icona della sua app nel dock (coordinate schermo)
+    // Riduzione "caduta nel dock" (1.3.0): il riquadro della finestra ha toccato le icone. Quella dell'app sobbalza un
+    // poco, le due vicine per parte meno; le icone di fondo e App no (non sono "colpite" dalle finestre)
+    void sobbalza(HWND h) {
+        const Voce* v = voceDi(h);
+        if (!v) return;
+        int k = -1;
+        for (size_t i = 0; i < voci.size(); i++) if (&voci[i] == v) k = (int)i;
+        if (k < 0) return;
+        static const float AMP[3] = {1.0f, 0.5f, 0.22f};
+        for (int d = -2; d <= 2; d++) {
+            const int j = k + d;
+            if (j < 1 || j >= (int)primaFine || voci[j].uscente) continue;
+            // (il tempo lo da' render, l'orologio dei fotogrammi del dock: il dock puo' essere fermo da un pezzo)
+            voci[j].sobbalzoDopo = std::abs(d) * 0.035;   // (le vicine un attimo dopo: l'onda si allarga)
+            voci[j].sobbalzoAmp = AMP[std::abs(d)];
+        }
+        dirty = true;
+    }
+
     bool iconaPer(HWND h, RECT& out) {
         if (!attivo || nascostoSchermoIntero) return false;
         // l'elenco si rifa' solo se la finestra non c'e' ancora: si chiama mentre una finestra si sta riducendo,
@@ -1248,6 +1270,7 @@ private:
                 if (vecchia.avvio == v.avvio || (!v.exe.empty() && vecchia.exe == v.exe)) {
                     v.icona = vecchia.icona; vecchia.icona = nullptr;
                     v.rimbalzoT0 = v.finestre.empty() ? vecchia.rimbalzoT0 : -1;   // l'app si e' aperta: fine del rimbalzo
+                    v.sobbalzoT0 = vecchia.sobbalzoT0; v.sobbalzoDopo = vecchia.sobbalzoDopo; v.sobbalzoAmp = vecchia.sobbalzoAmp;
                     v.scala = vecchia.scala; v.dx = vecchia.dx;
                     ritrovata[j] = true; vecchiaTrovata = true;
                     break;
@@ -1644,6 +1667,12 @@ private:
                 if (e > 3.0) v.rimbalzoT0 = -1;
                 else { salto = (float)(std::abs(std::sin(e * M_PI / 0.55)) * S * 0.45 * std::exp(-e * 0.35)); movimento = true; }
             }
+            if (v.sobbalzoDopo >= 0) { v.sobbalzoT0 = t + v.sobbalzoDopo; v.sobbalzoDopo = -1; }
+            if (v.sobbalzoT0 >= 0 && t >= v.sobbalzoT0) {   // sobbalzo: un saltello che si smorza in ~0,6 s
+                const double e = t - v.sobbalzoT0;
+                if (e > 0.6) v.sobbalzoT0 = -1;
+                else { salto += (float)(std::abs(std::sin(e * M_PI / 0.2)) * S * 0.14 * v.sobbalzoAmp * std::exp(-e * 5.5)); movimento = true; }
+            } else if (v.sobbalzoT0 >= 0) movimento = true;   // (le vicine aspettano il loro turno)
             if (presa_) salto = 6 * dpi;   // trascinata: un poco sollevata
             const float premuto = (premuta == (int)i) ? 0.86f : 1.0f;   // un attimo piu' scura e piccola mentre la premi
             const float dd = d * premuto;

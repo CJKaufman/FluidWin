@@ -83,10 +83,15 @@ struct Molla {
 static const Molla  MOLLA_RIDUCI     {0.36, 1.00, 0.0};
 // tragitti lunghi: quasi senza rimbalzo (strisciando al pixel si vedrebbe); parte gia' lanciata per non sembrare in ritardo
 static const Molla  MOLLA_RIPRISTINA {0.36, 0.94, 3.0};
-// ingrandisci e ripristina: l'angolo in alto a destra (quello della capsula) va subito al suo posto, il resto della
-// finestra lo segue piu' lento e arriva molleggiando, come una gelatina tirata da quell'angolo
-static const Molla  MOLLA_ANGOLO     {0.14, 1.00, 3.0};
-static const Molla  MOLLA_RESTO      {0.46, 0.62, 0.0};
+// Ingrandisci, ripristina dall'ingrandita e caselle dell'affiancamento (1.3.0, richiesta dell'utente): niente piu'
+// molle (prima l'angolo in alto a destra con una molla veloce e il resto gelatinoso, con un rimbalzo all'arrivo). Tutta
+// la foto insieme, lineare e morbida come l'ingrandimento di Windows ma che parte lenta e accelera fino all'arrivo
+// (due fotogrammi chiave "easy ease" con la velocita' alla fine): 1 - cos, velocita' 0 all'inizio e massima alla fine
+static const double DURATA_INGRANDIMENTO = 0.30;   // s
+static double curvaIngrandimento(double dt) {
+    const double x = std::clamp(dt / DURATA_INGRANDIMENTO, 0.0, 1.0);
+    return 1.0 - std::cos(x * M_PI / 2);
+}
 static const int    LARGHEZZA_BARRA  = 72;     // px: dimensione della finestra quando "entra" nella barra
 static const double SFUMA_OMBRA      = 0.080;  // s: mentre il pulsante e' premuto l'ombra vera sfuma sotto la copia
 static const double ANNULLA_DOPO     = 0.150;  // s: pulsante rilasciato senza riduzione = clic annullato
@@ -130,6 +135,8 @@ struct Anim {
     bool       genio = false;
     int        fotogrammiGenio = 0;  // la miniatura resta sotto i primi fotogrammi del genio, finche' e' sicuramente a schermo
     double     pGenio = 0;           // punto raggiunto dal genio (0 finestra, 1 icona): un nuovo clic lo inverte da qui
+    bool       sobbalzo = false;     // caduta nel dock: il riquadro ha gia' toccato le icone (sobbalzo dato, una volta)
+    std::vector<genio::Vertice> magliaC;   // caduta nel dock: il riquadro (2x2 vertici), tagliato dove entra dietro le icone
     bool       cresce = false;       // apertura fuori dal dock: la foto cresce dal centro della finestra (senza icona)
     RECT       fin{};                // Pronta: GetWindowRect alla pressione (se cambia, la finestra si e' mossa davvero)
     bool       zoom = false;         // ingrandimento o ripristino: la copia va dal vecchio rettangolo al nuovo, con la capsula
@@ -2112,6 +2119,61 @@ static void rileggiFotoZoom(Anim& a, double t) {
 // a che punto del volo e' il genio del ripristino (0 partenza, 1 arrivo)
 static double x0Genio(const Anim& a, double t) { return std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0); }
 
+// Riduzione e ripristino (1.3.0): lo stesso avanzamento p del genio (0 finestra, 1 dentro il dock), con i suoi tempi,
+// interruzioni e inversioni; cambia solo il disegno. Genio: la finestra si deforma verso l'icona. Caduta nel dock: nella
+// prima parte (p fino a CADUTA_P) la finestra si rimpicciolisce in un riquadro grande come l'icona sopra di lei, poi cade
+// (accelerando, come un oggetto) dietro le icone: la parte che entra nel dock non si disegna, e quando tocca le icone
+// quella dell'app e le vicine fanno un piccolo sobbalzo. Il ripristino e' lo stesso percorso all'indietro
+static const double CADUTA_P = 0.55;
+static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, double alfa, std::vector<genio::Elemento>& el) {
+    if (impostazioni::valori().riduzione != 1 || a.a.right <= a.a.left || p <= 0.0) {
+        el.push_back({img, a.da, a.a, p, alfa});
+        return;
+    }
+    const double iw = a.a.right - a.a.left, ih = a.a.bottom - a.a.top;
+    const double icx = (a.a.left + a.a.right) / 2.0;
+    // riquadro: grande come l'icona, con le proporzioni della finestra (almeno 2,6 raggi degli angoli: piu' piccolo
+    // diventa un dischetto con gli angoli molto tondi)
+    const double fw = std::max(1L, a.da.right - a.da.left), fh = std::max(1L, a.da.bottom - a.da.top);
+    const double lato = std::max(iw, 2.6 * raggioDi(a.hwnd));
+    const double s = lato / std::max(fw, fh), qw = fw * s, qh = fh * s;
+    const double sopraY = a.a.top - ih * 0.2 - qh;   // in cima: poco sopra l'icona
+    alfa = 1.0;   // (il genio sfuma alla fine; qui il riquadro sparisce dietro le icone)
+    double l, t, r, b;
+    if (p < CADUTA_P) {
+        const double k = std::clamp(p / CADUTA_P, 0.0, 1.0), m = k * k * (3 - 2 * k);
+        l = a.da.left + (icx - qw / 2 - a.da.left) * m;  r = a.da.right + (icx + qw / 2 - a.da.right) * m;
+        t = a.da.top + (sopraY - a.da.top) * m;           b = a.da.bottom + (sopraY + qh - a.da.bottom) * m;
+    } else {
+        const double k = (p - CADUTA_P) / (1.0 - CADUTA_P), g = k * k;   // accelera cadendo
+        l = icx - qw / 2; r = icx + qw / 2;
+        t = sopraY + (a.a.top + ih * 0.15 - sopraY) * g;   // fino a sparire sotto il bordo alto delle icone
+        b = t + qh;
+    }
+    // dietro le icone: niente sotto questa linea (un poco piu' giu' del bordo alto, dove l'icona e' gia' piena)
+    const double taglio = a.a.top + ih * 0.15;
+    if (a.tipo != Tipo::Riduci) a.sobbalzo = false;   // (ripristino: se torna a ridursi, sobbalza di nuovo)
+    // taglio e contatto solo cadendo: rimpicciolendosi la foto e' sempre intera, anche quando la finestra arriva sotto
+    // la linea delle icone (alta o ingrandita: ne spariva subito il fondo e il sobbalzo partiva in anticipo, e al
+    // ripristino il fondo ricompariva di colpo a p = 0; R20261120-030534-S1)
+    const bool cade = p >= CADUTA_P;
+    if (cade && t >= taglio) return;
+    if (cade && !a.sobbalzo && b > taglio && a.tipo == Tipo::Riduci) {
+        a.sobbalzo = true;
+        if (gDockOk) gDock.sobbalza(a.hwnd);
+        logf("caduta nel dock %p: tocca le icone (p=%.2f)", a.hwnd, p);
+    }
+    const double v = cade ? std::min(1.0, (taglio - t) / std::max(1.0, b - t)) : 1.0;
+    if (cade && b > taglio) b = taglio;
+    a.magliaC = {{(float)l, (float)t, 0, 0}, {(float)r, (float)t, 1, 0}, {(float)l, (float)b, 0, (float)v}, {(float)r, (float)b, 1, (float)v}};
+    const RECT rr = {(LONG)std::lround(l), (LONG)std::lround(t), (LONG)std::lround(r), (LONG)std::lround(b)};
+    genio::Elemento e{img, rr, rr, 0.0, alfa};
+    e.maglia = a.magliaC.data(); e.colonne = 2; e.righe = 2; e.finV = v;
+    // angoli in proporzione: la foto e' rimpicciolita (il raggio e' in pixel della foto)
+    e.raggio = raggioDi(a.hwnd) * std::max(1.0, fw / std::max(1.0, r - l));
+    el.push_back(e);
+}
+
 static void passo(double t) {
     std::vector<genio::Elemento> elementi;
     elementiCoperture(elementi);   // sotto a tutto il resto: sono solo lo sfondo dietro finestre appena nate
@@ -2143,13 +2205,13 @@ static void passo(double t) {
                 finita = true;
             } else if (a.tipo == Tipo::Pronta) {
                 // ripristino interrotto da un clic per ridurre: la foto resta ferma dov'era finche' arriva la riduzione
-                elementi.push_back({&foto->second, a.da, a.a, a.pGenio, 1.0 - morbido((a.pGenio - 0.92) / 0.08)});
+                elementoRiduzione(a, &foto->second, a.pGenio, 1.0 - morbido((a.pGenio - 0.92) / 0.08), elementi);
                 if (a.fase == 1 && t - a.tFase > ANNULLA_DOPO) annullaPronta(a, t);
                 else if (t - a.t0 > 5.0) annullaPronta(a, t);
             } else if (a.tipo == Tipo::Riduci) {
                 const double x = (t - a.t0) / DURATA_GENIO_RIDUCI, p = curvaGenio(x);
                 a.pGenio = p;
-                elementi.push_back({&foto->second, a.da, a.a, p, 1.0 - morbido((p - 0.85) / 0.15)});
+                elementoRiduzione(a, &foto->second, p, 1.0 - morbido((p - 0.85) / 0.15), elementi);
                 if (++a.fotogrammiGenio > 3) chiudiMiniatura(a);
                 if (x >= 1.0) finita = true;
             } else if (a.cresce && a.fase == 0) {
@@ -2187,7 +2249,7 @@ static void passo(double t) {
                 const double x = std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0);
                 const double p = std::pow(1.0 - x, 3);
                 a.pGenio = p;
-                elementi.push_back({&foto->second, a.da, a.a, p, 1.0 - morbido((p - 0.92) / 0.08)});
+                elementoRiduzione(a, &foto->second, p, 1.0 - morbido((p - 0.92) / 0.08), elementi);
                 if (gLog && ++a.fotogrammiGenio <= 6) logf("genio ripristino: fotogramma per t=%.3f p=%.3f", t, p);
                 if (x >= 1.0) { a.fase = 1; a.tFase = t; }
             } else if (a.fase == 1 || a.fase == 2) {
@@ -2301,16 +2363,13 @@ static void passo(double t) {
             if (++a.passiZ == 3) { chiudiMiniatura(a); a.t0 = t; }
         } else if (a.zoom && a.fase == 0) {
             rileggiFotoZoom(a, t);
-            // l'angolo in alto a destra con la molla veloce, il resto della foto sempre piu' gelatinoso
+            // tutta la foto con la stessa curva (vedi curvaIngrandimento)
             const double dt = std::max(0.0, t - a.t0);
-            const double pv = MOLLA_ANGOLO.valore(dt), pl = MOLLA_RESTO.valore(dt);
-            auto mix = [](LONG x, LONG y, double p) { return (LONG)std::lround(x + (y - x) * p); };
-            a.attuale = {mix(a.da.left, a.a.left, pl), mix(a.da.top, a.a.top, pv), mix(a.da.right, a.a.right, pv), mix(a.da.bottom, a.a.bottom, pl)};
-            // "Arrivata" quando manca poco (6 punti), non quando la molla e' ferma al pixel: l'ultimo tratto del rimbalzo
-            // durava ~0,3 s in cui sullo schermo c'era ancora una foto ferma (contenuto bloccato). La foto finisce il suo
-            // movimento mentre sfuma sopra la finestra vera (fase 2)
-            const bool ferma = std::max(MOLLA_ANGOLO.residuo(dt), MOLLA_RESTO.residuo(dt)) * a.ampiezza < 6.0 * scalaFinestra(a.hwnd) || dt > 1.5;
-            elementiZoom(a, pv, pl, 1.0, elementi);
+            const double p = curvaIngrandimento(dt);
+            a.attuale = interpola(a.da, a.a, p);
+            // arrivata: la curva e' finita (accelera fino alla fine, quindi niente coda lenta da tagliare)
+            const bool ferma = dt >= DURATA_INGRANDIMENTO;
+            elementiZoom(a, p, p, 1.0, elementi);
             if (ferma) {
                 // arrivata: la finestra vera torna subito normale (non layered: angoli suoi) sotto la foto, che sfuma
                 rendiVisibileFinestra(a.hwnd);
@@ -2322,8 +2381,7 @@ static void passo(double t) {
             }
         } else if (a.zoom && a.fase == 2) {
             const double k = morbido((t - a.tFase) / (DISSOLVENZA_MINI * 2));
-            const double dt = std::max(0.0, t - a.t0);   // la foto continua il suo movimento mentre sfuma
-            elementiZoom(a, MOLLA_ANGOLO.valore(dt), MOLLA_RESTO.valore(dt), 1.0 - k, elementi);
+            elementiZoom(a, 1.0, 1.0, 1.0 - k, elementi);   // (arrivata: sfuma ferma sopra la finestra vera)
             if (k >= 1.0) {
                 a.fase = 3; a.tFase = t;
             }
