@@ -9,6 +9,9 @@
 // fermo sopra per un attimo (senza tasti premuti) o mentre mostra una notifica. Un clic sull'ora apre le notifiche.
 // Con un'app a schermo intero (video, presentazioni, giochi) non c'e' (vedi modo()): il volume lo mostra allora
 // l'indicatore di vetro.
+// Notch spento nelle impostazioni (1.3.0, "a scomparsa"): a riposo (ora, musica, timer) sta sopra il bordo dello schermo;
+// per volume, notifiche, avvisi, sveglia del timer e scaffale scende dall'alto e poi risale. Musica e timer li mostra il
+// dock (una capsula a sinistra), che col clic fa scendere qui il pannello aperto della musica o del timer (apri()).
 //
 // Disegno: una finestra a strati di misura fissa (la piu' grande che serve), la forma disegnata al centro con
 // Direct2D software in un DIB tenuto da parte; ogni fotogramma e' un UpdateLayeredWindow. La trasparenza col mouse
@@ -105,19 +108,36 @@ public:
     void modo(int m) {
         if (m == modoAtt) return;
         modoAtt = m;
-        if (m != NORMALE) { sopra = false; attesa = 0; finisciNotifica(); }   // sopra un'app a schermo intero niente notifiche
+        if (m != NORMALE) { sopra = false; daDock = false; attesa = 0; finisciNotifica(); }   // sopra un'app a schermo intero niente notifiche
         visibilita();
         cliccabile(false);
         bersagli(); ridisegna();
     }
 
-    // notch acceso o spento dalle impostazioni. Spento non si vede mai: volume, notifiche e avvisi rispondono false
-    // (volume e notifiche li mostrano allora l'indicatore e il banner di vetro)
+    // notch acceso (sempre visibile) o spento dalle impostazioni: spento e' "a scomparsa", compare solo quando ha
+    // qualcosa da mostrare (vedi l'inizio del file). Prima spento non si vedeva mai e volume e notifiche passavano al vetro
+    // (indicatore e banner): ora il vetro resta solo sopra le app a schermo intero (modo NASCOSTO)
     void abilita(bool si) {
         if (si == abilitato) return;
         abilitato = si;
-        visibilita();
+        if (si) daDock = false;
+        else if (!daDock) sopra = false;
+        bersagli(true); ridisegna();
     }
+    bool fisso() const { return abilitato; }
+
+    // musica e timer per la capsula del dock (notch a scomparsa)
+    const musica::Brano& musicaOra() const { return brano; }
+    // clic sulla capsula del dock: scende il pannello della musica (0) o del timer (1); un secondo clic lo richiude.
+    // Resta giu' finche' il mouse non ci passa sopra e poi esce, o 4 s se non ci arriva mai
+    void apri(int cosa) {
+        if (!visibile || modoAtt != NORMALE) return;
+        if (sopra && daDock && richiesta == cosa) { sopra = false; daDock = false; }
+        else { sopra = true; daDock = true; richiesta = cosa; entrato = false; fuori = 0; tenutoFino = adesso() + 4.0; }
+        bersagli(); anima();
+    }
+    // pannello del dock aperto (per l'evidenza della capsula)
+    bool apertoDalDock(int cosa) const { return sopra && daDock && richiesta == cosa; }
 
     // volume 0..1 dai tasti; false se il notch non si vede (allora lo mostra l'indicatore di vetro)
     bool volume(float liv, bool muto) {
@@ -185,9 +205,11 @@ private:
         }
     };
     Molla mw, mh, mr;
+    Molla my;   // a scomparsa: quanto la forma e' salita sopra il bordo dello schermo (0 = giu', tutta visibile)
     int scena = ORA, scenaPrima = ORA;
     double tScena = 0, tPrec = 0;
     bool animando = false;
+    D2D1_MATRIX_3X2_F base = D2D1::Matrix3x2F::Identity();   // a scomparsa: la salita sopra il bordo (contenuti)
     float alfa = 1;   // alfa della finestra (sempre piena: UpdateLayeredWindow la usa a ogni fotogramma)
 
     // contenuti
@@ -209,13 +231,20 @@ private:
     int attesa = 0, fuori = 0, pulsanteSopra = -1;
     bool sopraX = false, mouseDentro = false;
     ULONGLONG tCima = 0;
+    // a scomparsa: aperto dal clic sulla capsula del dock (richiesta: 0 musica, 1 timer). Finche' il mouse non ci e'
+    // entrato resta giu' fino a tenutoFino (il mouse e' ancora sul dock, in fondo allo schermo)
+    bool daDock = false, entrato = false; int richiesta = 0; double tenutoFino = 0;
+    // il mouse sopra conta: sempre col notch fisso; a scomparsa solo se l'ha aperto il dock (a riposo non c'e' niente
+    // da toccare, e passare sopra una notifica non deve lasciare aperta la musica quando la notifica finisce)
+    bool sopraVale() const { return sopra && (abilitato || daDock); }
+    static bool aRiposo(int s) { return s == ORA || s == MUSICA || s == TIMER; }
 
     std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero, fGrande}; }
 
     static double adesso() { return vetro::secondi(); }
 
     void visibilita() {
-        const bool si = acceso && abilitato && modoAtt != NASCOSTO && fin;
+        const bool si = acceso && modoAtt != NASCOSTO && fin;   // (spento: a scomparsa, la finestra c'e' lo stesso)
         if (si == visibile) return;
         visibile = si;
         if (si) {
@@ -225,7 +254,7 @@ private:
             SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         } else {
             KillTimer(fin, 2); vetro::fermaBattito(fin, 1); animando = false;
-            sopra = false; attesa = 0; cliccabile(false);
+            sopra = false; daDock = false; attesa = 0; cliccabile(false);
             finisciNotifica(); fineVolume = 0; fineAvviso = 0;
             ShowWindow(fin, SW_HIDE);
         }
@@ -253,9 +282,12 @@ private:
         if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
         if (trascinoSopra || t < fineScaffale) return SCAFFALE;
-        if (sopra && comodita::timerAttivo()) return TIMER_APERTO;   // col mouse sopra: il timer grande, +1 min e stop
-        if (sopra && !scaffale.empty()) return SCAFFALE;
-        if (sopra && brano.c) return APERTO;
+        // col mouse sopra: il timer grande (+1 min e stop), lo scaffale, la musica aperta. A scomparsa li apre solo il
+        // dock, quello che ha chiesto (lo scaffale no: a riposo non c'e' un notch su cui trascinare i file)
+        const bool sv = sopraVale(), libero = abilitato || !daDock;
+        if (sv && comodita::timerAttivo() && (libero || richiesta == 1)) return TIMER_APERTO;
+        if (sv && !scaffale.empty() && abilitato) return SCAFFALE;
+        if (sv && brano.c && (libero || richiesta == 0)) return APERTO;
         if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
         return ORA;
@@ -279,22 +311,30 @@ private:
                                const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = segnoSilenzio ? 22 * d : 0;
                                w += 2 * std::max(sx, dx);
                            }
-                           if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
+                           if (sopraVale()) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
     }
 
     // aggiorna scena e misure da raggiungere; 'subito' salta l'animazione
+    // A scomparsa: verso una scena di riposo il notch prima risale mostrando ancora quella di prima, e solo quando e' tutto
+    // sopra il bordo passa (di colpo, non si vede) a quella di riposo; verso un evento scende cambiando forma
     void bersagli(bool subito = false) {
-        const int s = scenaVoluta();
+        int s = scenaVoluta();
+        const bool via = !abilitato && aRiposo(s);
+        const bool salito = my.obj > 0 && my.x >= my.obj - 0.5 && my.v == 0;   // gia' tutto sopra il bordo, fermo
+        if (via && !aRiposo(scena) && !subito && visibile && mw.x != 0 && !salito) s = scena;
+        const bool scatto = via && salito && s != scena;   // (dietro il bordo: niente dissolvenza ne' molla)
         if (s != scena) { scenaPrima = scena; scena = s; tScena = adesso(); }
         float w, h, R; misura(scena, w, h, R);
         mw.obj = w; mh.obj = h; mr.obj = R;
-        if (subito || !visibile || mw.x == 0) {
+        my.obj = via ? h + std::round(8 * dpi) : 0;   // (anche i raccordi, alti 6 px)
+        if (subito || scatto || !visibile || mw.x == 0) {
             mw.x = w; mh.x = h; mr.x = R; mw.v = mh.v = mr.v = 0; scenaPrima = scena;
+            my.x = my.obj; my.v = 0;
             return;
         }
-        if (mw.x != w || mh.x != h || mr.x != R || scenaPrima != scena) anima();
+        if (mw.x != w || mh.x != h || mr.x != R || my.x != my.obj || scenaPrima != scena) anima();
     }
 
     void anima() {
@@ -307,7 +347,7 @@ private:
         const double t = adesso(), dt = std::clamp(t - tPrec, 0.001, 0.034);
         tPrec = t;
         bool ancora = false;
-        for (Molla* m : {&mw, &mh, &mr}) ancora |= m->passo(dt);
+        for (Molla* m : {&mw, &mh, &mr, &my}) ancora |= m->passo(dt);
         if (std::fabs(livelloVis - livello) > 0.002f) { livelloVis += (livello - livelloVis) * (float)std::min(1.0, dt * 18); ancora = true; }
         else livelloVis = livello;
         if (scenaPrima != scena) { if (t - tScena < 0.32) ancora = true; else scenaPrima = scena; }   // (dissolvenza: 0,06 + 0,24)
@@ -321,8 +361,10 @@ private:
 
     RECT corpo() const {   // la forma sullo schermo (coordinate dello schermo)
         const int x = posX() + (int)((W2 - mw.x) / 2);
-        return {x, schermo.top, x + (int)mw.x, schermo.top + (int)mh.x};
+        const int b = schermo.top + (int)(mh.x - salita());   // (a scomparsa la parte salita sopra il bordo non c'e')
+        return {x, schermo.top, x + (int)mw.x, std::max<int>(schermo.top, b)};
     }
+    double salita() const { return std::max(0.0, my.x); }   // (la molla puo' scendere un poco sotto lo 0: niente stacco)
     int posX() const { return schermo.left + (schermo.right - schermo.left - W2) / 2; }
 
     void controlla() {
@@ -354,15 +396,18 @@ private:
         RECT c = corpo();
         const int m = (int)(4 * dpi);
         RECT largo = {c.left - m, c.top, c.right + m, c.bottom + m};
-        const bool dentro = PtInRect(&largo, p) != FALSE;
+        const bool dentro = c.bottom > c.top + 2 && PtInRect(&largo, p) != FALSE;   // (salito sopra il bordo: mai)
         const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
         // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
         if (!sopra) {
             attesa = dentro && !tasti ? attesa + 1 : 0;
-            if (attesa >= 6) { sopra = true; fuori = 0; bersagli(); }
+            if (attesa >= 6) { sopra = true; daDock = false; fuori = 0; bersagli(); }   // (aperto dal mouse, non dal dock: R20261120-141156-S1)
         } else {
-            fuori = dentro ? 0 : fuori + 1;
-            if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
+            if (dentro) entrato = true;
+            // aperto dal dock: il mouse e' ancora giu', sul dock; non si chiude finche' non ci arriva (o per 4 s)
+            const bool tenuto = daDock && !entrato && t < tenutoFino;
+            fuori = dentro || tenuto ? 0 : fuori + 1;
+            if (fuori >= 5) { sopra = false; daDock = false; attesa = 0; bersagli(); }
         }
         // tasto sotto il mouse (aperto) e x della notifica
         const POINT pc = {p.x - posX(), p.y - schermo.top};
@@ -373,13 +418,15 @@ private:
         if (notificaAttiva && t >= fineNotifica) { if (dentro) fineNotifica = t + 1.5; else finisciNotifica(); }
         // con il tasto premuto e il mouse sul notch (un file trascinato da Esplora file) il notch si fa trovare dal
         // trascinamento: trasparente al mouse, Windows non glielo darebbe mai
-        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro) || scena == SUONA || scena == SCAFFALE || (tasti && dentro)));
+        // (a scomparsa, salito sopra il bordo: mai cliccabile, la cima dello schermo resta alle finestre)
+        const bool giu = c.bottom > c.top + 2;
+        cliccabile(modoAtt == NORMALE && giu && (sopraVale() || (scena == NOTIFICA && dentro) || scena == SUONA || scena == SCAFFALE || (tasti && dentro)));
         const int prima = scena;
         bersagli();
         if (scena != prima) ridisegnare = false;   // ci pensa l'animazione
         if (ridisegnare && !animando) ridisegna();
         // le barrette della musica si muovono: si ridisegna solo il loro rettangolino (tutto il notch costava ~3% di CPU)
-        else if (brano.suona && (scena == MUSICA || scena == APERTO) && !animando) ridisegnaBarrette();
+        else if (brano.suona && (scena == MUSICA || scena == APERTO) && !animando && salita() < 0.5) ridisegnaBarrette();
         // ogni 2 s di nuovo in cima (un'app sempre in primo piano aperta dopo poteva coprirlo)
         if (GetTickCount64() - tCima > 2000) { tCima = GetTickCount64(); SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
     }
@@ -431,7 +478,7 @@ private:
         if (scena == TIMER_APERTO) {   // +1 min o stop; altrove sul timer non succede niente (prima apriva le notifiche)
             const int b = tastoTimerIn(x, y);
             if (b == 0) comodita::aggiungiTimer(60000);
-            else if (b == 1) { comodita::fermaTimer(); sopra = false; }
+            else if (b == 1) { comodita::fermaTimer(); sopra = false; daDock = false; }
             bersagli(); ridisegna();
             return;
         }
@@ -573,8 +620,13 @@ private:
         const float w = (float)std::max(2.0, mw.x), h = (float)std::max((double)f + 2, mh.x);
         const float R = std::clamp((float)mr.x, 0.0f, std::min(w / 2, h - f));
         const float x0 = (W2 - w) / 2, x1 = x0 + w;
+        // a scomparsa: forma e contenuti salgono insieme sopra il bordo (tutto sopra: niente da disegnare)
+        const float su = (float)salita();
+        const bool tutta = su < h + 1;
+        base = su > 0 ? D2D1::Matrix3x2F::Translation(0, -su) : D2D1::Matrix3x2F::Identity();
+        rt->SetTransform(base);
         ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
-        if (f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+        if (tutta && f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
             s->BeginFigure({x0 - f, 0}, D2D1_FIGURE_BEGIN_FILLED);
             s->AddArc({{x0, f}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
             s->AddLine({x0, h - R});
@@ -602,7 +654,11 @@ private:
                 rt->PopLayer();
                 strato->Release();
             }
-            // pallini fuori dal notch, a destra, come su iPhone: arancione il microfono, verde la webcam
+        }
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        {
+            // pallini fuori dal notch, a destra, come su iPhone: arancione il microfono, verde la webcam (fermi sul
+            // bordo anche col notch salito: dicono chi sta usando microfono e webcam)
             const sensori::Sensori& se = sensori::Sensori::io();
             if (w < 330 * dpi) {
                 float px = x1 + f + 7 * dpi;
@@ -664,15 +720,15 @@ private:
                     const float Lv = (W2 - (float)mw.x) / 2, Rv = Lv + (float)mw.x;
                     if (as > 0.01f) {
                         const D2D1_POINT_2F c = {Lv + (scaffale.empty() ? 17 : 46) * d, h / 2};
-                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c));
+                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c) * base);
                         tazzina(c.x, c.y, 0.8f * a * as);
-                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                        rt->SetTransform(base);
                     }
                     if (al > 0.01f) {
                         const D2D1_POINT_2F c = {Rv - 17 * d, h / 2};
-                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c));
+                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c) * base);
                         lunetta(c.x, c.y, 0.8f * a * al);
-                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                        rt->SetTransform(base);
                     }
                 }
                 break;

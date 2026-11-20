@@ -30,7 +30,7 @@ struct Valori {
     bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
-    bool notch = true;            // il notch in alto al centro (spento: volume e notifiche col vetro, niente musica e timer)
+    bool notch = true;            // il notch in alto al centro sempre visibile (spento: a scomparsa, scende solo per volume, notifiche e avvisi; musica e timer nel dock)
     bool oraDock = false;         // ora e data in fondo al dock, dopo il centro di controllo
     bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
     int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
@@ -434,7 +434,7 @@ private:
         {L"Onda di luce della ricerca", L"Search light wave",
          L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda, S_ANIMAZIONI},
         {L"Notch", L"Notch",
-         L"In alto al centro: ora, volume, notifiche, musica e timer", L"At the top center: time, volume, notifications, music, timer", &Valori::notch, S_NOTCH},
+         L"Sempre visibile. Spento: compare solo quando serve", L"Always visible. Off: it appears only when needed", &Valori::notch, S_NOTCH},
         {L"Ora e data nel dock", L"Time and date in the dock",
          L"In fondo al dock, dopo il centro di controllo", L"At the end of the dock, after the control center", &Valori::oraDock, S_NOTCH},
         {L"Notifiche di FluidWin", L"FluidWin notifications",
