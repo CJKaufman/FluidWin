@@ -11,6 +11,7 @@
 #include <vector>
 #include <functional>
 #include <string>
+#include <utility>
 
 namespace impostazioni {
 
@@ -163,6 +164,8 @@ public:
     std::function<void()> tornaAlCentro;      // aperte dal centro di controllo e richiuse nel suo rettangolo: lo riapre
     std::function<void(bool)> dockSu;         // aperte dal centro di controllo: il dock resta su finche' ci sono
     std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
+    std::function<std::vector<std::pair<std::wstring, std::wstring>>()> elencoNascoste;
+    std::function<void(const std::wstring&)> mostraNascosta;
 
     // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
@@ -514,6 +517,9 @@ private:
 
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
+    // app nascoste dal dock (PR #20): "Mostra tutte", poi una riga per app da Z_MOSTRA_APP in su, senza limite (prima 651..699,
+    // e dalla cinquantesima le righe non c'erano: R20261120-022133-S4)
+    static constexpr int Z_MOSTRA_TUTTE = 650, Z_MOSTRA_APP = 10000;
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
     static constexpr int Z_PACCHETTO = 700, Z_WINDOWS = 710, Z_SCEGLI = 720, Z_RIMUOVI = 760, MAX_PACCHETTI = 30;
@@ -626,6 +632,20 @@ private:
             scegliColore(id);
             salva();
             if (cambiato) cambiato();
+            disegna();
+            return;
+        }
+        if (id == Z_MOSTRA_TUTTE) {
+            if (mostraNascosta) mostraNascosta(L"");
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_MOSTRA_APP) {
+            const auto nasc = elencoNascoste ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
+            const size_t k = (size_t)(id - Z_MOSTRA_APP);
+            if (k < nasc.size() && mostraNascosta) mostraNascosta(nasc[k].first);
+            vetro::battito(v.fin, 1);
             disegna();
             return;
         }
@@ -822,6 +842,10 @@ private:
         const size_t zona0 = zone.size();
         if (scorre) v.rt->PushAxisAlignedClip({B, cimaSez, W, H}, D2D1_ANTIALIAS_MODE_ALIASED);
         float y = y0 - (scorre ? scorriSez : 0);
+        // app nascoste dal dock (PR #20): il loro elenco in fondo alla sezione Dock
+        const auto nascDock = (sezione == S_DOCK && elencoNascoste) ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
+        const int nNascVis = (int)nascDock.size();
+        auto aggiungiZona = [&](D2D1_RECT_F r, int id) { zone.push_back({r, id}); };   // (le taglia lo scorrimento, piu' sotto)
         auto riquadro = [&](const D2D1_RECT_F& r, bool evid) {
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
@@ -837,7 +861,7 @@ private:
         for (size_t i = 0; i < voci.size(); i++) {
             if (voci[i].sezione != sezione) continue;
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
-            zone.push_back({r, (int)i});
+            aggiungiZona(r, (int)i);
             riquadro(r, sopra == (int)i);
             v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 74 * d, r.top + 29 * d}, inkS);
             v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
@@ -912,7 +936,7 @@ private:
             v.testo(testi::t(c.nome, c.name), fVoce, {r.left + 16 * d, r.top + 7 * d, x0 - 16 * d, r.top + 29 * d}, inkS);
             v.testo(testi::t(c.spiega, c.explain), fSotto, {r.left + 16 * d, r.top + 28 * d, x0 - 16 * d, r.top + 48 * d}, tenueS);
             binari[i] = {x0, cy - 12 * d, x1, cy + 12 * d};
-            zone.push_back({{x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id});
+            aggiungiZona({x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id);
             const int val = valori().*(c.campo);
             const float p = (val - c.min) / (float)(c.max - c.min), xm = x0 + (x1 - x0) * p;
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
@@ -942,7 +966,7 @@ private:
                 const int id = Z_COLORE + k;
                 const float cx = xInizio + passo * k;
                 const D2D1_ELLIPSE el = {{cx, cy}, rc, rc};
-                zone.push_back({{cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id});
+                aggiungiZona({cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id);
                 const bool attivo = k == 0 ? !(scelto & COLORE_SCELTO)
                                   : k <= N_COLORI ? scelto == (COLORE_SCELTO | COLORI[k - 1])
                                                   : ((scelto & COLORE_SCELTO) && !pronto);
@@ -969,6 +993,45 @@ private:
                 }
             }
             y += 60 * d;
+            if (nascDock.empty()) {
+                riga(testi::t(L"App nascoste dal dock", L"Hidden dock apps"),
+                     testi::t(L"Nessuna. Clic destro su un'app aperta nel dock per nasconderla", L"None. Right-click an open app in the dock to hide it"));
+            } else {
+                const std::wstring subTit = std::to_wstring(nascDock.size()) + testi::t(nascDock.size() == 1 ? L" app nascosta" : L" app nascoste",
+                                                                                        nascDock.size() == 1 ? L" hidden app" : L" hidden apps");
+                const D2D1_RECT_F rh = {L, y, R, y + 54 * d};
+                riquadro(rh, false);
+                float limTit = rh.right - 16 * d;
+                if (nascDock.size() > 1) {
+                    const std::wstring tb = testi::t(L"Mostra tutte", L"Show all");
+                    const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                    const D2D1_RECT_F rb = {R - 16 * d - lw, y + 12 * d, R - 16 * d, y + 42 * d};
+                    aggiungiZona(rb, Z_MOSTRA_TUTTE);
+                    v.pen->SetColor(D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == Z_MOSTRA_TUTTE ? 1.0f : 0.88f) * (float)e));
+                    v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                    v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
+                    limTit = rb.left - 12 * d;
+                }
+                v.testo(testi::t(L"App nascoste dal dock", L"Hidden dock apps"), fVoce, {rh.left + 16 * d, rh.top + 7 * d, limTit, rh.top + 29 * d}, inkS);
+                v.testo(subTit, fSotto, {rh.left + 16 * d, rh.top + 28 * d, limTit, rh.top + 48 * d}, tenueS);
+                y += 60 * d;
+                for (int k = 0; k < nNascVis; k++) {
+                    const D2D1_RECT_F ra = {L, y, R, y + 54 * d};
+                    const int id = Z_MOSTRA_APP + k;
+                    riquadro(ra, false);
+                    const std::wstring tb = testi::t(L"Mostra", L"Show");
+                    const float lw = v.larghezza(tb, fCentro) + 24 * d;
+                    const D2D1_RECT_F rb = {ra.right - 16 * d - lw, y + 12 * d, ra.right - 16 * d, y + 42 * d};
+                    aggiungiZona(rb, id);
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == id ? 0.16f : 0.08f) * (float)e)
+                                            : D2D1::ColorF(0, 0, 0, (sopra == id ? 0.10f : 0.05f) * (float)e));
+                    v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                    v.testo(tb, fCentro, rb, inkS);
+                    v.testo(nascDock[k].second, fVoce, {ra.left + 16 * d, ra.top + 7 * d, rb.left - 12 * d, ra.top + 29 * d}, inkS);
+                    v.testo(testi::t(L"Nascosta nel dock", L"Hidden in dock"), fSotto, {ra.left + 16 * d, ra.top + 28 * d, rb.left - 12 * d, ra.top + 48 * d}, tenueS);
+                    y += 60 * d;
+                }
+            }
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),

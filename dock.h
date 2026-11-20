@@ -343,6 +343,7 @@ public:
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
         leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
+        caricaNascoste();       // (le app nascoste dal dock, PR #20)
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -728,6 +729,33 @@ public:
     // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
     void numeriNotificheNuovi(const std::unordered_map<std::wstring, int>& c) { if (c != numeriNotifiche) { numeriNotifiche = c; dirty = true; } }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
+    std::vector<std::pair<std::wstring, std::wstring>> elencoNascoste() const {
+        std::vector<std::pair<std::wstring, std::wstring>> r;
+        r.reserve(appNascoste.size());
+        for (const auto& x : appNascoste) r.emplace_back(x.chiave, x.nome);
+        return r;
+    }
+    void nascondiApp(const std::wstring& exe, const std::wstring& aumid, const std::wstring& nome) {
+        const std::wstring c = chiaveNascosta(exe, aumid);
+        if (c == L"exe:") return;
+        for (const auto& x : appNascoste) if (x.chiave == c) return;
+        appNascoste.push_back({c, nome.empty() ? c : nome});
+        salvaNascoste();
+        appDaAggiornare = true; dirty = true;
+        aggiornaApp();
+    }
+    // (chiave per valore: dal sottomenu arriva appNascoste[k].chiave, e remove_if, spostando gli elementi, cambiava il
+    // termine del confronto a meta' strada, R20261120-022133-S3)
+    void mostraAppNascosta(const std::wstring chiave) {
+        if (chiave.empty()) appNascoste.clear();
+        else appNascoste.erase(std::remove_if(appNascoste.begin(), appNascoste.end(),
+                                              [&](const AppNascosta& x) { return x.chiave == chiave; }),
+                               appNascoste.end());
+        salvaNascoste();
+        appDaAggiornare = true; dirty = true;
+        aggiornaApp();
+    }
+
 private:
     static Motore*& gIstanza() { static Motore* m = nullptr; return m; }
 
@@ -758,6 +786,53 @@ private:
     size_t primaNonFissata = 0;      // indice della prima app aperta ma non aggiunta alla barra (separatore)
     size_t primaFine = 0;            // indice della prima voce di fondo (pila, cestino, centro di controllo): altro separatore
     std::vector<std::wstring> ordineAperte;   // le app aperte restano nel posto in cui sono comparse la prima volta
+    struct AppNascosta { std::wstring chiave, nome; };
+    std::vector<HWND> finestreNascoste;   // finestre delle app nascoste dal dock (ultimo aggiornaApp): per "Mostra il desktop"
+    std::vector<AppNascosta> appNascoste;
+
+    static std::wstring chiaveNascosta(const std::wstring& exe, const std::wstring& aumid) {
+        if (!aumid.empty()) return L"aumid:" + minuscolo(aumid);
+        return L"exe:" + minuscolo(exe);
+    }
+    bool eNascosta(const std::wstring& exe, const std::wstring& aumid) const {
+        const std::wstring c = chiaveNascosta(exe, aumid);
+        const std::wstring ce = !exe.empty() ? L"exe:" + minuscolo(exe) : std::wstring();
+        for (const auto& x : appNascoste)
+            if (x.chiave == c || (!ce.empty() && x.chiave == ce)) return true;
+        return false;
+    }
+    void caricaNascoste() {
+        appNascoste.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < sizeof(wchar_t)) return;
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, 0);
+        DWORD sz = n;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &sz) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); *p; p += wcslen(p) + 1) {
+            const std::wstring s(p);
+            const size_t t = s.find(L'\t');
+            if (t == std::wstring::npos || t == 0) continue;
+            const std::wstring k = s.substr(0, t), nm = s.substr(t + 1);
+            if (k.empty() || nm.empty()) continue;
+            if (std::any_of(appNascoste.begin(), appNascoste.end(), [&](const AppNascosta& x) { return x.chiave == k; })) continue;   // (doppioni)
+            appNascoste.push_back({k, nm});
+        }
+    }
+    void salvaNascoste() const {
+        if (appNascoste.empty()) {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste");
+            return;
+        }
+        std::vector<wchar_t> b;
+        for (const auto& x : appNascoste) {
+            const std::wstring s = x.chiave + L"\t" + x.nome;
+            b.insert(b.end(), s.begin(), s.end());
+            b.push_back(L'\0');
+        }
+        b.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", REG_MULTI_SZ,
+                        b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
+    }
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
     bool mouseDentro = false, mouseSulDock = false; float mouseX = 0, mouseY = 0;
@@ -1123,6 +1198,7 @@ private:
         // eseguibile di ogni finestra: si chiede al sistema una volta sola per finestra (stesso processo)
         for (auto it = exeFinestre.begin(); it != exeFinestre.end();)
             it = std::find(ctxF.v.begin(), ctxF.v.end(), it->first) == ctxF.v.end() ? exeFinestre.erase(it) : std::next(it);
+        finestreNascoste.clear();
         for (HWND h : ctxF.v) {
             DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
             auto ef = exeFinestre.find(h);
@@ -1131,9 +1207,15 @@ private:
             const std::wstring id = aumidFinestra(h);
             if (exe.empty()) continue;
             Voce* trovata = nullptr;
+            // app nascosta (PR #20): si aggancia solo a un'app aggiunta alla barra (quelle non si nascondono). Prima il
+            // filtro veniva dopo la ricerca, e una nascosta che condivide l'exe con un'altra aperta ci finiva dentro,
+            // a seconda dell'ordine delle finestre (R20261120-022133-S1). Le sue finestre restano per "Mostra il desktop"
+            const bool nascosta = eNascosta(exe, id);
             for (auto& v : nuove) {
+                if (nascosta && !v.fissata) continue;
                 if ((!id.empty() && !v.aumid.empty() && id == v.aumid) || stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
             }
+            if (!trovata && nascosta) { finestreNascoste.push_back(h); continue; }
             if (!trovata) {
                 Voce v; v.exe = exe; v.aumid = id;
                 auto nm = nomiExe.find(exe);   // il nome leggibile si legge dal file una volta sola
@@ -2811,6 +2893,8 @@ private:
     std::vector<HWND> finestreDelDock() const {
         std::vector<HWND> tutte;
         for (const auto& v : voci) if (!v.uscente) tutte.insert(tutte.end(), v.finestre.begin(), v.finestre.end());
+        // anche quelle delle app nascoste dal dock: l'icona non c'e', ma le finestre sono sullo schermo (R20261120-022133-S2)
+        tutte.insert(tutte.end(), finestreNascoste.begin(), finestreNascoste.end());
         std::vector<HWND> r;   // in ordine di z, dalla piu' in alto
         for (HWND h = GetTopWindow(nullptr); h && r.size() < 200; h = GetWindow(h, GW_HWNDNEXT))
             if (std::find(tutte.begin(), tutte.end(), h) != tutte.end() && IsWindowVisible(h) && !IsIconic(h)) r.push_back(h);
@@ -2867,15 +2951,35 @@ private:
             const bool aperte = !finestreDelDock().empty();
             if (desktopRipristinabile() && !aperte) vv.push_back(menu::voce(testi::t(L"Ripristina le finestre", L"Restore windows"), 3));
             else if (aperte) vv.push_back(menu::voce(testi::t(L"Mostra il desktop", L"Show desktop"), 2));
+            // app nascoste dal dock (PR #20): un sottomenu per rimetterle, una per una o tutte
+            HMENU sub = nullptr;
+            if (!appNascoste.empty()) {
+                sub = CreatePopupMenu();
+                for (size_t k = 0; k < appNascoste.size(); k++) {
+                    std::wstring et;
+                    for (wchar_t c : appNascoste[k].nome) { if (c == L'&') et += L"&&"; et += c; }
+                    AppendMenuW(sub, MF_STRING, 1000 + (UINT)k, et.c_str());
+                }
+                if (appNascoste.size() > 1) {
+                    AppendMenuW(sub, MF_SEPARATOR, 0, nullptr);
+                    AppendMenuW(sub, MF_STRING, 999, testi::t(L"Mostra tutte", L"Show all"));
+                }
+                menu::Voce vn = menu::voce(testi::t(L"App nascoste", L"Hidden apps"), 0);
+                vn.sotto = sub;
+                vv.push_back(vn);
+            }
             if (vv.size() > 1) vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
             // (con la barra di Windows nascosta l'icona nell'area di notifica non si vede: qui l'uscita si trova, #16)
             if (esci) vv.push_back(menu::voce(testi::t(L"Esci da FluidWin", L"Quit FluidWin"), 4));
             const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            if (sub) DestroyMenu(sub);
             if (s == 1 && impostazioni) impostazioni(nullptr);
             else if (s == 4 && esci) esci();
             else if (s == 2) mostraDesktop();
             else if (s == 3) ripristinaDesktop();
+            else if (s == 999) mostraAppNascosta(L"");
+            else if (s >= 1000 && s - 1000 < (int)appNascoste.size()) mostraAppNascosta(appNascoste[s - 1000].chiave);
             return;
         }
         if (voci[i].uscente) return;
@@ -2961,7 +3065,11 @@ private:
         if (!store || exeVero) voci.push_back(menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), 3));
         if (exeVero) voci.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 4));
         if (collegamento) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Rimuovi dal dock", L"Remove from dock"), 5)); }
-        else if (!v.fissata) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6)); }
+        else if (!v.fissata) {
+            voci.push_back(menu::separatore());
+            voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6));
+            voci.push_back(menu::voce(testi::t(L"Nascondi dal dock", L"Hide from dock"), 7));
+        }
         if (!v.finestre.empty()) {
             voci.push_back(menu::separatore());
             voci.push_back(menu::voce(v.finestre.size() > 1 ? testi::t(L"Chiudi tutte le finestre", L"Close all windows") : testi::t(L"Chiudi", L"Close"), 2));
@@ -2996,6 +3104,7 @@ private:
         else if (s == 4) ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + v.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         else if (s == 5) { DeleteFileW(v.avvio.c_str()); appDaAggiornare = true; dirty = true; }   // come "Rimuovi dalla barra"
         else if (s == 6) aggiungiAlDock(v.nome, exeVero ? v.exe : L"", v.aumid, v.avvio);
+        else if (s == 7) nascondiApp(v.exe, v.aumid, v.nome);
         else if (s >= 100 && s - 100 < (int)elenco.size() && IsWindow(elenco[s - 100])) portaDavanti(elenco[s - 100]);
     }
 
