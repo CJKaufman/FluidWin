@@ -661,7 +661,10 @@ public:
         const bool si = tipo != 0;
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
-        for (HWND h : {icone, vetro}) ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
+        for (HWND h : {icone, vetro}) {
+            if (!si && h == vetro && GetPropW(h, VETRO_FUORI)) continue;   // (fuori dallo schermo: lo rimette aggiornaVetro)
+            ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
+        }
         if (si) { nascondiSchede(); nascondiLauncher(); }
         if (!si) dirty = true;
     }
@@ -3104,12 +3107,30 @@ private:
 
     bool sullIsola(float x, float y) const { return isola.right > isola.left && x >= isola.left - 2 && x <= isola.right + 2 && y >= isola.top - 2; }
 
-    // il vetro acrilico segue il fondo, con la stessa forma
+    // il vetro acrilico segue il fondo, con la stessa forma. Tagliato sullo schermo del dock: scendendo il fondo esce
+    // dal bordo, e ai lati oltre il bordo c'e' spesso l'altro schermo (dock a destra del secondario, a sinistra del
+    // principale): il vetro ci finiva sopra come una striscia staccata. Tutto fuori: nascosto, segnato con
+    // VETRO_FUORI, e rimesso quando rientra (con WS_THICKFRAME Windows non lo farebbe piu' piccolo della misura minima
+    // di una finestra). Solo quelli nascosti cosi' si rimostrano: vetroStato e vetroOra non sono mai visibili
+    static constexpr const wchar_t* VETRO_FUORI = L"FluidWin.VetroFuori";
     void aggiornaVetro(HWND h, RECT& ultimo, float l, float t, float r, float b) {
-        RECT nuovo = aSchermo({l, t, r, b});   // (sul lato del dock)
-        if (!EqualRect(&nuovo, &ultimo)) {
+        const RECT pieno = aSchermo({l, t, r, b});   // (sul lato del dock)
+        RECT nuovo{};
+        // (sotto i 16 px Windows lo allarga alla sua misura minima, 14 px misurati, verso l'altro schermo: nascosto)
+        if (!IntersectRect(&nuovo, &pieno, &schermo) || nuovo.right - nuovo.left < 16 || nuovo.bottom - nuovo.top < 16) {
+            ultimo = {};
+            if (IsWindowVisible(h)) {
+                SetPropW(h, VETRO_FUORI, (HANDLE)1);
+                SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_HIDEWINDOW);
+            }
+            return;
+        }
+        const bool rimetti = GetPropW(h, VETRO_FUORI) && attivo && !nascostoSchermoIntero;
+        if (!EqualRect(&nuovo, &ultimo) || rimetti) {
             ultimo = nuovo;
-            SetWindowPos(h, icone, nuovo.left, nuovo.top, nuovo.right - nuovo.left, nuovo.bottom - nuovo.top, SWP_NOACTIVATE | SWP_NOREDRAW);
+            SetWindowPos(h, icone, nuovo.left, nuovo.top, nuovo.right - nuovo.left, nuovo.bottom - nuovo.top,
+                         SWP_NOACTIVATE | SWP_NOREDRAW | (rimetti ? SWP_SHOWWINDOW : 0));
+            if (rimetti) RemovePropW(h, VETRO_FUORI);
             vetroDaRiposizionare = true;   // al prossimo timer si rimette in ordine anche la finestra delle icone
         }
     }

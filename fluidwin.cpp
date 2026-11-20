@@ -92,6 +92,23 @@ static double curvaIngrandimento(double dt) {
     const double x = std::clamp(dt / DURATA_INGRANDIMENTO, 0.0, 1.0);
     return 1.0 - std::cos(x * M_PI / 2);
 }
+// Solo l'ingrandimento ha una preparazione; il ripristino arriva direttamente alla misura normale.
+struct PassoZoom { double viaggio, contrazione; };
+static constexpr double PREPARAZIONE_ZOOM = 0.110;
+static constexpr double TRAGITTO_ZOOM = 0.130;
+static constexpr double durataZoomMolla(bool ingrandisce) {
+    return ingrandisce ? PREPARAZIONE_ZOOM + TRAGITTO_ZOOM : TRAGITTO_ZOOM;
+}
+static PassoZoom passoZoomMolla(double t, bool ingrandisce) {
+    auto raccordo = [](double x) {
+        x = std::clamp(x, 0.0, 1.0);
+        return x * x * (3.0 - 2.0 * x);
+    };
+    if (!ingrandisce) return {raccordo(t / TRAGITTO_ZOOM), 0.0};
+    const double viaggio = raccordo((t - PREPARAZIONE_ZOOM) / TRAGITTO_ZOOM);
+    const double carica = 0.12 * raccordo(t / PREPARAZIONE_ZOOM) * (1.0 - viaggio);
+    return {viaggio, carica};
+}
 static const int    LARGHEZZA_BARRA  = 72;     // px: dimensione della finestra quando "entra" nella barra
 static const double SFUMA_OMBRA      = 0.080;  // s: mentre il pulsante e' premuto l'ombra vera sfuma sotto la copia
 static const double ANNULLA_DOPO     = 0.150;  // s: pulsante rilasciato senza riduzione = clic annullato
@@ -149,6 +166,7 @@ struct Anim {
     // annulla. attesa: 0 foto in corso (thread), 1 foto pronta (si copre solo se 'coprire'), 2 foto a schermo da
     // qualche fotogramma, 3 finestra coperta (alfa 1 sotto la foto: invisibile ma ancora cliccabile)
     bool       zoomAtteso = false;
+    bool       zoomMolla = false;     // solo passaggi fra normale e ingrandita
     int        attesa = 0;
     bool       coprire = false;          // false: solo la foto (primo clic sulla barra), si copre al secondo clic
     bool       zoomAllaPressione = false;  // IsZoomed alla pressione: se cambia, e' l'ingrandimento (o il ripristino)
@@ -2120,7 +2138,7 @@ static void passoChiusure(double t, std::vector<genio::Elemento>& elementi) {
     }
 }
 
-static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector<genio::Elemento>& el);
+static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector<genio::Elemento>& el, double contrazione = 0);
 static void avviaZoom(HWND h, InfoFinestra& i);
 
 // Pochi pixel campione (una griglia 48 x 27 della parte visibile) per capire se due foto sono uguali
@@ -2490,14 +2508,22 @@ static void passo(double t) {
             elementiZoom(a, 0, 0, 1.0, elementi);
             if (++a.passiZ == 3) { chiudiMiniatura(a); a.t0 = t; }
         } else if (a.zoom && a.fase == 0) {
+            if (a.passiZ == 3 && a.zoomMolla) {
+                // Il tempo speso nella cattura precedente non deve accorciare la contrazione.
+                a.t0 = t;
+                a.passiZ = 4;
+            }
             rileggiFotoZoom(a, t);
             // tutta la foto con la stessa curva (vedi curvaIngrandimento)
             const double dt = std::max(0.0, t - a.t0);
-            const double p = curvaIngrandimento(dt);
+            const PassoZoom passo = a.zoomMolla ? passoZoomMolla(dt, !a.zoomAllaPressione) : PassoZoom{curvaIngrandimento(dt), 0.0};
+            const double p = passo.viaggio;
             a.attuale = interpola(a.da, a.a, p);
-            // arrivata: la curva e' finita (accelera fino alla fine, quindi niente coda lenta da tagliare)
-            const bool ferma = dt >= DURATA_INGRANDIMENTO;
-            elementiZoom(a, p, p, 1.0, elementi);
+            const LONG dx = std::lround((a.attuale.right - a.attuale.left) * passo.contrazione * 0.5);
+            const LONG dy = std::lround((a.attuale.bottom - a.attuale.top) * passo.contrazione * 0.5);
+            InflateRect(&a.attuale, -dx, -dy);
+            const bool ferma = dt >= (a.zoomMolla ? durataZoomMolla(!a.zoomAllaPressione) : DURATA_INGRANDIMENTO);
+            elementiZoom(a, p, p, 1.0, elementi, passo.contrazione);
             if (ferma) {
                 // arrivata: la finestra vera torna subito normale (non layered: angoli suoi) sotto la foto, che sfuma
                 rendiVisibileFinestra(a.hwnd);
@@ -3146,7 +3172,7 @@ static void suRipristina(HWND h) {
 // mescolando le due molle secondo la distanza dall'angolo in alto a destra: l'angolo segue la molla veloce, quello
 // opposto la gelatinosa, e in mezzo i bordi si curvano. pv/pl = molla veloce/lenta (0 partenza, 1 arrivo)
 static const int ZOOM_C = 12, ZOOM_R = 9;
-static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector<genio::Elemento>& el) {
+static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector<genio::Elemento>& el, double contrazione) {
     const double dw = a.da.right - a.da.left, dh = a.da.bottom - a.da.top, aw = a.a.right - a.a.left, ah = a.a.bottom - a.a.top;
     a.magliaZ.resize(ZOOM_C * ZOOM_R);
     for (int r = 0; r < ZOOM_R; r++) for (int c = 0; c < ZOOM_C; c++) {
@@ -3156,7 +3182,9 @@ static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector
         const double wx = std::min(1.0, (1.0 - u) * 0.88 + v * 0.12), wy = std::min(1.0, v * 0.88 + (1.0 - u) * 0.12);
         const double qx = pv + (pl - pv) * wx, qy = pv + (pl - pv) * wy;
         const double x0 = a.da.left + u * dw, y0 = a.da.top + v * dh, x1 = a.a.left + u * aw, y1 = a.a.top + v * ah;
-        a.magliaZ[r * ZOOM_C + c] = {(float)(x0 + (x1 - x0) * qx), (float)(y0 + (y1 - y0) * qy), (float)u, (float)v};
+        const double x = x0 + (x1 - x0) * qx + (0.5 - u) * (dw + (aw - dw) * qx) * contrazione;
+        const double y = y0 + (y1 - y0) * qy + (0.5 - v) * (dh + (ah - dh) * qy) * contrazione;
+        a.magliaZ[r * ZOOM_C + c] = {(float)x, (float)y, (float)u, (float)v};
     }
     // ombra: un anello attorno alla griglia, come per la gelatina
     const int OC = ZOOM_C + 2, OR = ZOOM_R + 2;
@@ -3176,7 +3204,7 @@ static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector
     // solo quanto basta a coprirlo, uguale nei due versi; quelle che sfumano sopra restano alla loro misura e fuori
     // non c'e' niente (si vede la nuova): ingrandita per coprire, la foto di una meta' schermo che diventa intera
     // raddoppiava (scritte enormi a inizio ingrandimento, provato).
-    const double pm = (pv + pl) / 2, larg = std::max(1.0, dw + (aw - dw) * pm), alt = std::max(1.0, dh + (ah - dh) * pm);
+    const double pm = (pv + pl) / 2, larg = std::max(1.0, (dw + (aw - dw) * pm) * (1.0 - contrazione)), alt = std::max(1.0, (dh + (ah - dh) * pm) * (1.0 - contrazione));
     const double R = raggioDi(a.hwnd);
     // nw x nh: misura a schermo della foto quando e' al naturale (la finestra da cui e' presa)
     auto elementoFoto = [&](const genio::Immagine& img, double nw, double nh, double alfaFoto, bool copre,
@@ -3229,6 +3257,7 @@ static void avviaZoom(HWND h, InfoFinestra& i) {
         alfaFinestra(h, ALFA_INVISIBILE);
         p->zoomAtteso = false; p->fase = 0; p->passiZ = 0; p->fotogrammiGenio = 0;
         p->a = i.visibile;   // (p->da e' il rettangolo alla pressione)
+        p->zoomMolla = p->zoomAllaPressione != i.zoom;
         p->t0 = p->tFase = tempoProssimoFotogramma();
         p->ampiezza = (double)distanzaMassima(p->da, i.visibile);
         logf("ingrandimento animato %p (%s, preparato)", h, i.zoom ? "ingrandita" : "ripristinata");
@@ -4106,6 +4135,9 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         // (prove, solo col registro acceso: timer di w ms che finisce senza suono)
         case WM_APP + 17: if (gLog) { comodita::avviaTimer(w); comodita::stato().senzaSuono = true; logf("prova: timer di %llu ms", (unsigned long long)w); } return 0;
+        // (prove, solo col registro: notch acceso o spento senza salvarlo; non disturbare e tieni sveglio, w e l 0/1)
+        case WM_APP + 62: if (gLog && gDockOk) { gDock.impostaNotch(w != 0); logf("prova: notch %s", w ? "acceso" : "spento"); } return 0;
+        case WM_APP + 63: if (gLog) { comodita::nonDisturbare(w ? comodita::SEMPRE : 0); comodita::tieniSveglio(l ? comodita::SEMPRE : 0); logf("prova: non disturbare %d, tieni sveglio %d", (int)(w != 0), (int)(l != 0)); } return 0;
         case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
         case WM_TASTO_DESTRO: {
             // un menu e' gia' aperto (questo clic arriva dal suo ciclo dei messaggi): si chiude, e il clic si rimanda a
@@ -4515,6 +4547,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.riduci = riduciDalDock;
     gDock.preparaChiusura = preparaChiusura;
     gDock.registro = [](const char* s) { logf("dock: %s", s); };
+    if (gLog) notch::Notch::registroScaffale = [](const char* fase, unsigned long esito) { logf("scaffale: %s [0x%lx]", fase, esito); };
     cursori::registro = [](const char* s) { logf("%s", s); };
     cursori::pulisciAvanzi();   // installazioni di cursori interrotte: recupero (prima di leggere quale pacchetto e' scelto)
     impostazioni::carica();   // prima di tutto: la lingua dei testi (dock compreso)
