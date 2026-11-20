@@ -29,10 +29,13 @@ public:
     bool mouseSopra() const { for (const auto& s : schede) if (s->dentro) return true; return false; }
     int icona() const { return iconaDi; }        // indice dell'icona del dock per cui sono aperte (-1 nessuna)
 
-    // Apre (o rifa' per un'altra icona) sopra il punto ancora (centro, in alto, dell'icona; coordinate dello schermo),
-    // dentro l'area di lavoro, con le finestre nell'ordine dato (al massimo quelle che entrano in larghezza)
-    void apri(const std::vector<HWND>& finestre, POINT ancora, RECT area, int indiceIcona) {
+    // Apre (o rifa' per un'altra icona) sopra l'icona (rettangolo a riposo, coordinate dello schermo; cima: il bordo
+    // sopra il quale stanno le schede), dentro l'area di lavoro, con le finestre nell'ordine dato (al massimo quelle che
+    // entrano in larghezza). dietro: la finestra delle icone del dock, sotto la quale le schede escono e rientrano
+    void apri(const std::vector<HWND>& finestre, RECT icona, LONG cima, RECT area, int indiceIcona, HWND dietro) {
         for (auto& s : schede) s->togliMiniatura();
+        const POINT ancora = {(icona.left + icona.right) / 2, cima};
+        iconaR = icona; hDietro = dietro;
         const HMONITOR mon = MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST);
         dpi = vetro::dpiMonitor(mon);
         // quante entrano: n schede larghe largoScheda() con n-1 spazi, piu' 4 px per lato (xGiusta). Prima si contava
@@ -72,8 +75,8 @@ public:
         y0 = std::max((int)area.top + 4, (int)ancora.y - (int)(12 * dpi) - altoScheda());
         iconaDi = indiceIcona;
         mostrata = true; chiudendo = false;
-        k = std::min(k, 1.0);   // (riaperte mentre si chiudevano: si riparte da dov'erano)
-        t0 = vetro::secondi() - k * DURATA_APRE;
+        g = std::min(g, 1.0);   // (riaperte mentre si chiudevano: si riparte da dov'erano)
+        t0 = vetro::secondi() - g * durata();
         tPasso = vetro::secondi();
         for (int i = (int)schede.size() - 1; i >= n; i--) schede[i]->nascondi();   // (quelle in piu' di prima)
         aggiorna();
@@ -81,11 +84,12 @@ public:
         avvia();
     }
 
-    // chiusura animata (scendono un poco verso il dock e svaniscono)
+    // chiusura animata: lo stesso percorso dell'apertura all'indietro (le schede si restringono in quadrati che
+    // rientrano dietro l'icona), l'ultima uscita per prima
     void chiudi() {
         if (!mostrata || chiudendo) return;
         chiudendo = true;
-        t0 = vetro::secondi() - (1 - k) * DURATA_CHIUDE;
+        t0 = vetro::secondi() - (1 - g) * durata();
         avvia();
     }
 
@@ -127,7 +131,7 @@ public:
             case WM_PAINT: disegna(*s); return true;
             case WM_MOUSEMOVE: {
                 if (!s->dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, w, 0}; TrackMouseEvent(&tm); s->dentro = true; avvia(); }
-                const bool sx = inX(*s, (float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
+                const bool sx = s->piena && inX(*s, (float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (sx != s->sopraX) { s->sopraX = sx; disegna(*s); }
                 return true;
             }
@@ -135,7 +139,8 @@ public:
             case WM_LBUTTONUP: {
                 if (chiudendo || i >= n) return true;
                 const HWND h = s->h;
-                if (inX(*s, (float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l))) { if (chiudiFinestra) chiudiFinestra(h); }   // (la scheda: riconcilia)
+                // (la x solo a scheda intera: mentre cresce le misure non sono quelle di rettX)
+                if (s->piena && inX(*s, (float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l))) { if (chiudiFinestra) chiudiFinestra(h); }   // (la scheda: riconcilia)
                 else { chiudi(); if (scegli) scegli(h); }
                 return true;
             }
@@ -150,17 +155,23 @@ public:
 private:
     static constexpr float LARGO = 200, ALTO = 130, TESTA = 30, PAD = 8, GAP = 12, SALITA = 7;
     static constexpr int MAX = 8;
-    static constexpr double DURATA_APRE = 0.18, DURATA_CHIUDE = 0.13;
+    // Comparsa (richiesta dell'utente): ogni scheda spunta da dietro l'icona come un quadratino, sale e intanto si
+    // allarga fino alla sua forma; la scomparsa e' lo stesso percorso all'indietro. Una scheda dura CORSA, la successiva
+    // parte SFALSA dopo (si aprono a ventaglio)
+    static constexpr double CORSA = 0.30, SFALSA = 0.035;
     struct Scheda {
         vetro::Finestra v;
         HWND h = nullptr; HTHUMBNAIL th = nullptr;
         std::wstring titolo;
         bool ridotta = false, dentro = false, sopraX = false;
+        bool piena = false;   // alla sua misura finale (la x si clicca solo cosi')
         float mw = 0, mh = 0;
         double su = 0;    // 0..1: quanto e' alzata (mouse sopra), inseguito con una molla morbida
         double x = -1;    // posizione orizzontale che si vede (insegue quella giusta quando una scheda se ne va)
+        // contenuto disegnato alla misura finale e rimpicciolito nella finestra di adesso (sc, tx, ty), con opacita' op
+        float sc = 1, tx = 0, ty = 0, op = 1;
         void togliMiniatura() { if (th) DwmUnregisterThumbnail(th); th = nullptr; }
-        void nascondi() { if (v.fin) ShowWindow(v.fin, SW_HIDE); dentro = false; sopraX = false; }
+        void nascondi() { if (v.fin) ShowWindow(v.fin, SW_HIDE); dentro = false; sopraX = false; piena = false; }
     };
     std::vector<std::unique_ptr<Scheda>> schede;   // le prime n sono quelle mostrate
     int n = 0;
@@ -168,9 +179,13 @@ private:
     float fDpi = 0, dpi = 1;
     int y0 = 0, iconaDi = -1;
     LONG ancoraX = 0, areaL = 0, areaR = 0;
+    RECT iconaR{};             // l'icona a riposo, da dove escono le schede
+    HWND hDietro = nullptr;    // la finestra delle icone del dock: sotto di lei mentre escono e rientrano
     bool mostrata = false, chiudendo = false;
-    double k = 0, t0 = 0, tPasso = 0;
+    double g = 0;              // 0..1: avanzamento lineare di tutta la comparsa (all'indietro mentre si chiudono)
+    double t0 = 0, tPasso = 0;
 
+    double durata() const { return CORSA + std::max(0, n - 1) * SFALSA; }
     int largoScheda() const { return (int)std::lround((LARGO + 2 * PAD) * dpi); }
     int altoScheda() const { return (int)std::lround((PAD + TESTA + ALTO + PAD) * dpi); }
 
@@ -188,15 +203,13 @@ private:
     HWND hBattito = nullptr;
     void avvia() { if (!hBattito && !schede.empty()) hBattito = schede[0]->v.fin; if (hBattito) vetro::battito(hBattito, 1); }
 
-    // un fotogramma: comparsa o scomparsa (alfa e una piccola salita dal dock), schede alzate sotto il mouse,
-    // schede che scivolano al loro posto
+    // un fotogramma: comparsa o scomparsa, schede alzate sotto il mouse, schede che scivolano al loro posto
     void passo() {
         const double ora = vetro::secondi(), t = ora - t0;
         const double dt = std::clamp(ora - tPasso, 1.0 / 360, 1.0 / 30);
         tPasso = ora;
-        if (!chiudendo) k = vetro::uscita(t / DURATA_APRE);
-        else k = 1 - std::clamp(t / DURATA_CHIUDE, 0.0, 1.0);
-        bool muove = !chiudendo ? k < 1 : true;
+        g = std::clamp(chiudendo ? 1 - t / durata() : t / durata(), 0.0, 1.0);
+        bool muove = chiudendo || g < 1;
         for (int i = 0; i < n; i++) {
             Scheda& s = *schede[i];
             const double suObj = s.dentro && !chiudendo ? 1.0 : 0.0;
@@ -206,7 +219,7 @@ private:
             if (s.x < 0 || std::abs(s.x - xObj) < 0.5) s.x = xObj; else { s.x = xObj + (s.x - xObj) * std::exp(-dt / 0.05); muove = true; }
         }
         aggiorna();
-        if (chiudendo && k <= 0) {
+        if (chiudendo && g <= 0) {
             vetro::fermaBattito(hBattito, 1);
             for (auto& s : schede) { s->togliMiniatura(); s->nascondi(); }
             mostrata = false; chiudendo = false; iconaDi = -1; n = 0;
@@ -215,20 +228,46 @@ private:
         if (!muove) vetro::fermaBattito(hBattito, 1);
     }
 
+    static double liscia(double x) { x = std::clamp(x, 0.0, 1.0); return x * x * (3 - 2 * x); }
+
     void aggiorna() {
-        const int scende = (int)std::lround(10 * dpi * (1 - k));
+        const int LW = largoScheda(), LH = altoScheda();
+        // quadrato di partenza: grande quanto l'icona, al suo centro, nascosto dietro di lei. Piu' piccolo (sotto ~45 px)
+        // il vetro di Windows lo disegnava come un disco chiaro con un rombo scuro dentro (ripresa a 30 fps)
+        // Con gli angoli rotondi di Windhawk (raggio 24) un quadrato largo circa 2 raggi diventa un disco: almeno 2,6 raggi
+        const double lato = std::max({8.0, (double)std::min(iconaR.right - iconaR.left, iconaR.bottom - iconaR.top),
+                                      2.6 * raggio::vetro() * dpi});
+        const double icx = (iconaR.left + iconaR.right) / 2.0, icy = (iconaR.top + iconaR.bottom) / 2.0;
         for (int i = 0; i < n; i++) {
             Scheda& s = *schede[i];
             if (s.x < 0) s.x = xGiusta(i);
+            // avanzamento di questa scheda (le altre partono un poco dopo; all'indietro rientra prima l'ultima)
+            const double r = std::clamp((g * durata() - i * SFALSA) / CORSA, 0.0, 1.0);
+            const double sale = vetro::uscita(r);                               // dal centro dell'icona al suo posto
+            // prima il quadrato sale senza cambiare misura (cambiarla a ogni fotogramma fa arrivare il contenuto un
+            // fotogramma dopo, e accanto al quadrato piccolo si vedeva una falce di vetro chiaro), poi si allarga
+            const double cresce = vetro::uscita(std::clamp((r - 0.35) / 0.65, 0.0, 1.0));
             const int alza = (int)std::lround(SALITA * dpi * s.su);
-            s.v.posiziona((int)std::lround(s.x), y0 + scende - alza, largoScheda(), altoScheda());
-            s.v.alfa(k);
+            const double fx = s.x + LW / 2.0, fy = y0 - alza + LH / 2.0;      // centro della scheda intera
+            const double w = lato + (LW - lato) * cresce, h = lato + (LH - lato) * cresce;
+            const double cx = icx + (fx - icx) * cresce, cy = icy + (fy - icy) * sale;
+            const int iw = std::max(1, (int)std::lround(w)), ih = std::max(1, (int)std::lround(h));
+            s.piena = r >= 1 && iw == LW && ih == LH;
+            // dietro le icone mentre esce o rientra; intera, in cima (la finestra del dock e' piu' alta delle icone e,
+            // davanti, prenderebbe i clic sulle schede che le stanno sopra)
+            s.v.posiziona((int)std::lround(cx - w / 2), (int)std::lround(cy - h / 2), iw, ih,
+                          s.piena || !hDietro || !IsWindow(hDietro) ? HWND_TOPMOST : hDietro);
+            s.v.alfa(r / 0.12);   // (compare subito: all'inizio e' nascosta dall'icona)
+            s.sc = std::min((float)iw / LW, (float)ih / LH);
+            s.tx = (iw - LW * s.sc) / 2; s.ty = (ih - LH * s.sc) / 2;
+            s.op = (float)liscia((cresce - 0.55) / 0.4);   // il contenuto compare quando la scheda e' quasi intera
             if (s.th) {
-                const float cx = (LARGO / 2 + PAD) * dpi, cy = (PAD + TESTA + ALTO / 2) * dpi;
+                const float mx = (LARGO / 2 + PAD) * dpi, my = (PAD + TESTA + ALTO / 2) * dpi;
                 DWM_THUMBNAIL_PROPERTIES p{};
                 p.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
-                p.rcDestination = {(LONG)std::lround(cx - s.mw / 2), (LONG)std::lround(cy - s.mh / 2), (LONG)std::lround(cx + s.mw / 2), (LONG)std::lround(cy + s.mh / 2)};
-                p.fVisible = TRUE; p.opacity = (BYTE)std::lround(255 * std::clamp(k, 0.0, 1.0)); p.fSourceClientAreaOnly = FALSE;
+                p.rcDestination = {(LONG)std::lround(s.tx + (mx - s.mw / 2) * s.sc), (LONG)std::lround(s.ty + (my - s.mh / 2) * s.sc),
+                                   (LONG)std::lround(s.tx + (mx + s.mw / 2) * s.sc), (LONG)std::lround(s.ty + (my + s.mh / 2) * s.sc)};
+                p.fVisible = s.op > 0.01f; p.opacity = (BYTE)std::lround(255 * std::clamp(s.op, 0.0f, 1.0f)); p.fSourceClientAreaOnly = FALSE;
                 DwmUpdateThumbnailProperties(s.th, &p);
             }
             disegna(s);
@@ -243,22 +282,30 @@ private:
             s.v.pen->SetColor(s.v.scuro ? D2D1::ColorF(1, 1, 1, 0.07f * (float)s.su) : D2D1::ColorF(1, 1, 1, 0.25f * (float)s.su));
             s.v.rt->FillRectangle({0, 0, (float)s.v.W, (float)s.v.H}, s.v.pen);
         }
-        s.v.testo(s.titolo.empty() ? std::wstring(L"—") : s.titolo, fTitolo, {(PAD + 4) * d, PAD * d, (LARGO + 2 * PAD - 34) * d, (PAD + TESTA) * d}, s.v.inchiostro());
-        // "x": cerchio rosso quando il mouse e' sopra
-        const D2D1_RECT_F rx = rettX();
-        const float cx = (rx.left + rx.right) / 2, cy = (rx.top + rx.bottom) / 2;
-        if (s.sopraX) { s.v.pen->SetColor(D2D1::ColorF(0.95f, 0.30f, 0.25f, 0.95f)); s.v.rt->FillEllipse({{cx, cy}, 10 * d, 10 * d}, s.v.pen); }
-        s.v.pen->SetColor(s.sopraX ? D2D1::ColorF(1, 1, 1, 1) : s.v.inchiostro(0.7f));
-        s.v.rt->DrawLine({cx - 4 * d, cy - 4 * d}, {cx + 4 * d, cy + 4 * d}, s.v.pen, 1.6f * d);
-        s.v.rt->DrawLine({cx + 4 * d, cy - 4 * d}, {cx - 4 * d, cy + 4 * d}, s.v.pen, 1.6f * d);
-        // finestra ridotta: niente miniatura di DWM, un riquadro con la scritta
-        if (!s.th) {
-            const float mx = (LARGO / 2 + PAD) * d, my = (PAD + TESTA + ALTO / 2) * d;
-            const D2D1_RECT_F m = {mx - s.mw / 2, my - s.mh / 2, mx + s.mw / 2, my + s.mh / 2};
-            s.v.pen->SetColor(s.v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(0, 0, 0, 0.05f));
-            s.v.rt->FillRoundedRectangle({m, 8 * d, 8 * d}, s.v.pen);
-            s.v.testo(s.ridotta ? testi::t(L"Ridotta a icona", L"Minimized") : testi::t(L"Anteprima non disponibile", L"No preview"),
-                      fTitolo, {m.left + 10 * d, m.top, m.right - 10 * d, m.bottom}, s.v.inchiostro(0.6f));
+        if (s.op > 0.01f) {
+            // il contenuto alla misura finale, rimpicciolito nella scheda che cresce, con la sua opacita'
+            s.v.rt->SetTransform(D2D1::Matrix3x2F::Scale(s.sc, s.sc) * D2D1::Matrix3x2F::Translation(s.tx, s.ty));
+            s.v.rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                    D2D1::IdentityMatrix(), s.op), nullptr);
+            s.v.testo(s.titolo.empty() ? std::wstring(L"—") : s.titolo, fTitolo, {(PAD + 4) * d, PAD * d, (LARGO + 2 * PAD - 34) * d, (PAD + TESTA) * d}, s.v.inchiostro());
+            // "x": cerchio rosso quando il mouse e' sopra
+            const D2D1_RECT_F rx = rettX();
+            const float cx = (rx.left + rx.right) / 2, cy = (rx.top + rx.bottom) / 2;
+            if (s.sopraX) { s.v.pen->SetColor(D2D1::ColorF(0.95f, 0.30f, 0.25f, 0.95f)); s.v.rt->FillEllipse({{cx, cy}, 10 * d, 10 * d}, s.v.pen); }
+            s.v.pen->SetColor(s.sopraX ? D2D1::ColorF(1, 1, 1, 1) : s.v.inchiostro(0.7f));
+            s.v.rt->DrawLine({cx - 4 * d, cy - 4 * d}, {cx + 4 * d, cy + 4 * d}, s.v.pen, 1.6f * d);
+            s.v.rt->DrawLine({cx + 4 * d, cy - 4 * d}, {cx - 4 * d, cy + 4 * d}, s.v.pen, 1.6f * d);
+            // finestra ridotta: niente miniatura di DWM, un riquadro con la scritta
+            if (!s.th) {
+                const float mx = (LARGO / 2 + PAD) * d, my = (PAD + TESTA + ALTO / 2) * d;
+                const D2D1_RECT_F m = {mx - s.mw / 2, my - s.mh / 2, mx + s.mw / 2, my + s.mh / 2};
+                s.v.pen->SetColor(s.v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(0, 0, 0, 0.05f));
+                s.v.rt->FillRoundedRectangle({m, 8 * d, 8 * d}, s.v.pen);
+                s.v.testo(s.ridotta ? testi::t(L"Ridotta a icona", L"Minimized") : testi::t(L"Anteprima non disponibile", L"No preview"),
+                          fTitolo, {m.left + 10 * d, m.top, m.right - 10 * d, m.bottom}, s.v.inchiostro(0.6f));
+            }
+            s.v.rt->PopLayer();
+            s.v.rt->SetTransform(D2D1::Matrix3x2F::Identity());
         }
         s.v.finisci();
     }

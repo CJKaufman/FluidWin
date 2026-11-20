@@ -2611,11 +2611,17 @@ private:
                 PostMessageW(h, WM_SYSCOMMAND, SC_CLOSE, 0);
             };
         }
-        // sopra l'icona a riposo (il punto in cui il dock la disegna adesso, in coordinate dello schermo)
-        const POINT ancora = {schermo.left + (LONG)((v.rett.left + v.rett.right) / 2), schermo.bottom - H + (LONG)v.rett.top};
+        // Le schede escono da dietro l'icona a riposo (senza la lente: v.rett e' quella ingrandita sotto il mouse, piu'
+        // alta, e il quadratino partiva sopra l'icona invece che da dietro), sotto la finestra delle icone; stanno
+        // sopra il piu' alto dei due bordi, cosi' non coprono l'icona ingrandita
+        const auto pos = posizioniRiposo();
+        if ((size_t)i >= pos.size()) return;
+        const RECT ic = {schermo.left + (LONG)pos[i], schermo.bottom - H + (LONG)(yBaseRiposo() - S),
+                         schermo.left + (LONG)(pos[i] + S), schermo.bottom - H + (LONG)yBaseRiposo()};
+        const LONG cima = std::min(ic.top, schermo.bottom - H + (LONG)v.rett.top);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-        if (!GetMonitorInfoW(MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST), &mi)) return;
-        ant.apri(finestreInOrdine(v), ancora, mi.rcWork, i);
+        if (!GetMonitorInfoW(MonitorFromPoint({(ic.left + ic.right) / 2, ic.top}, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        ant.apri(finestreInOrdine(v), ic, cima, mi.rcWork, i, icone);
         antFuoriT = -1;
         if (registro) { char b[64]; snprintf(b, 64, "dock: anteprime di %zu finestre", v.finestre.size()); scrivi(b); }
     }
