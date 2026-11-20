@@ -1889,8 +1889,11 @@ private:
         // scala con la lente del dock, come un'icona al suo posto: col mouse vicino cresce insieme alle icone
         scTesta = 1;
         if (lente > 0.001 && rettTesta.right > rettTesta.left && mouseDentro) {
-            const float c = (rettTesta.left + rettTesta.right) / 2, raggio = S * 2.6f;
-            const float dist = std::min(std::abs(mouseX - c) / raggio, 1.0f);
+            // distanza dal bordo piu' vicino, 0 sopra la capsula: e' larga, e dal centro (come un'icona) i tasti a destra
+            // la facevano rimpicciolire mentre ci si andava sopra
+            const float raggio = S * 2.6f;
+            const float fuori = std::max({0.0f, rettTesta.left - mouseX, mouseX - rettTesta.right});
+            const float dist = std::min(fuori / raggio, 1.0f);
             const float kk = (std::cos(dist * (float)M_PI) + 1) / 2;
             scTesta = 1 + (M / S - 1) * kk * (float)lente;
         }
