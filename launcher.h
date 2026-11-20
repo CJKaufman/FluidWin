@@ -1126,136 +1126,542 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
     if (lDialogoAperto) return;
     lDialogoAperto = true;
 
-    struct StatoRinomina {
+    struct DialogoRinomina {
+        vetro::Finestra v;
+        std::wstring testo;
+        int caret = 0;
+        int selIni = 0;
+        int selFin = 0;
+        float scrollX = 0;
+        bool caretVis = true;
         bool finito = false;
         bool confermato = false;
-    } st;
+        bool hovSave = false;
+        bool hovCancel = false;
+        bool trackingMouse = false;
+        bool draggingSel = false;
+        int pressedBtn = 0; // 1 = Cancel, 2 = Save
+        ULONGLONG tFade = 0;
 
-    const wchar_t* clsName = L"FluidWinRinominaGioco";
-    HINSTANCE hInst = GetModuleHandleW(nullptr);
-    static ATOM clsAtom = 0;
-    if (!clsAtom) {
-        WNDCLASSEXW wc{};
-        wc.cbSize = sizeof(wc);
-        wc.hInstance = hInst;
-        wc.lpszClassName = clsName;
-        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-        wc.lpfnWndProc = [](HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) -> LRESULT {
-            if (msg == WM_NCCREATE) {
-                auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(cs->lpCreateParams));
-                return TRUE;
+        IDWriteTextFormat* fTitolo = nullptr;
+        IDWriteTextFormat* fInput = nullptr;
+        IDWriteTextFormat* fBtn = nullptr;
+        ID2D1LinearGradientBrush* sheen = nullptr;
+        unsigned sheenGiro = ~0u;
+
+        static std::wstring trim(const std::wstring& s) {
+            std::wstring pulita;
+            pulita.reserve(s.size());
+            for (wchar_t ch : s) {
+                if (ch != L'\t' && ch != L'\r' && ch != L'\n') pulita.push_back(ch);
             }
-            auto* s = reinterpret_cast<StatoRinomina*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-            if (s) {
-                if (msg == WM_COMMAND) {
-                    const WORD id = LOWORD(wParam);
-                    if (id == IDOK) { s->confermato = true; s->finito = true; return 0; }
-                    if (id == IDCANCEL) { s->finito = true; return 0; }
-                } else if (msg == WM_CLOSE) {
-                    s->finito = true;
-                    return 0;
+            const size_t ini = pulita.find_first_not_of(L' ');
+            if (ini == std::wstring::npos) return {};
+            const size_t fin = pulita.find_last_not_of(L' ');
+            return pulita.substr(ini, fin - ini + 1);
+        }
+
+        void aggiornaFormati() {
+            const float s = v.dpi;
+            if (!fTitolo) fTitolo = v.formato(14.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            if (!fInput) {
+                fInput = v.formato(13.5f * s);
+                if (fInput) {
+                    DWRITE_TRIMMING tr{ DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
+                    fInput->SetTrimming(&tr, nullptr);
                 }
             }
-            return DefWindowProcW(hwnd, msg, wParam, lParam);
-        };
-        clsAtom = RegisterClassExW(&wc);
+            if (!fBtn) fBtn = v.formato(13.0f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        void aggiornaSheen() {
+            if (!v.rt) return;
+            if (sheen && sheenGiro == v.giroRt) return;
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            D2D1_GRADIENT_STOP stops[2]{
+                { 0.0f, D2D1::ColorF(1, 1, 1, v.scuro ? 0.10f : 0.35f) },
+                { 1.0f, D2D1::ColorF(1, 1, 1, 0.0f) }
+            };
+            ID2D1GradientStopCollection* col = nullptr;
+            if (SUCCEEDED(v.rt->CreateGradientStopCollection(stops, 2, &col)) && col) {
+                v.rt->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties({ 0, 0 }, { 0, (float)v.H * 0.45f }),
+                    col, &sheen);
+                col->Release();
+            }
+            sheenGiro = v.giroRt;
+        }
+
+        void libera() {
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            if (fTitolo) { fTitolo->Release(); fTitolo = nullptr; }
+            if (fInput) { fInput->Release(); fInput = nullptr; }
+            if (fBtn) { fBtn->Release(); fBtn = nullptr; }
+        }
+
+        D2D1_RECT_F rectInput() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s;
+            return { pad, 50.0f * s, (float)v.W - pad, 88.0f * s };
+        }
+
+        D2D1_RECT_F rectCancel() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s, btnW = 86.0f * s, btnH = 32.0f * s, gap = 10.0f * s;
+            const float y = (float)v.H - pad - btnH;
+            const float x = (float)v.W - pad - 2.0f * btnW - gap;
+            return { x, y, x + btnW, y + btnH };
+        }
+
+        D2D1_RECT_F rectSave() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s, btnW = 86.0f * s, btnH = 32.0f * s;
+            const float y = (float)v.H - pad - btnH;
+            const float x = (float)v.W - pad - btnW;
+            return { x, y, x + btnW, y + btnH };
+        }
+
+        static bool dentro(const D2D1_RECT_F& r, float x, float y) {
+            return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        }
+
+        IDWriteTextLayout* creaLayoutInput() const {
+            if (!v.fdw || !fInput) return nullptr;
+            IDWriteTextLayout* layout = nullptr;
+            const D2D1_RECT_F ri = rectInput();
+            v.fdw->CreateTextLayout(testo.c_str(), (UINT32)testo.size(), fInput, 10000.0f, ri.bottom - ri.top, &layout);
+            return layout;
+        }
+
+        int posDaPunto(float px) {
+            IDWriteTextLayout* layout = creaLayoutInput();
+            if (!layout) return (int)testo.size();
+            const float s = v.dpi;
+            const D2D1_RECT_F ri = rectInput();
+            const float textX = ri.left + 11.0f * s;
+            DWRITE_HIT_TEST_METRICS htm{};
+            BOOL isTrailing = FALSE, isInside = FALSE;
+            layout->HitTestPoint(px - (textX - scrollX), (ri.bottom - ri.top) * 0.5f, &isTrailing, &isInside, &htm);
+            layout->Release();
+            int pos = (int)htm.textPosition + (isTrailing ? 1 : 0);
+            return std::clamp(pos, 0, (int)testo.size());
+        }
+
+        void eliminaSelezione() {
+            if (selIni == selFin) return;
+            const int lo = std::min(selIni, selFin);
+            const int hi = std::max(selIni, selFin);
+            testo.erase((size_t)lo, (size_t)(hi - lo));
+            caret = selIni = selFin = lo;
+        }
+
+        void resetBlink(HWND h) {
+            caretVis = true;
+            SetTimer(h, 1, 530, nullptr);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+
+        void copiaSelezione(HWND h) const {
+            if (selIni == selFin) return;
+            const int lo = std::min(selIni, selFin);
+            const int hi = std::max(selIni, selFin);
+            const std::wstring sub = testo.substr((size_t)lo, (size_t)(hi - lo));
+            if (sub.empty() || !OpenClipboard(h)) return;
+            EmptyClipboard();
+            const SIZE_T bytes = (sub.size() + 1) * sizeof(wchar_t);
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (hg) {
+                if (void* p = GlobalLock(hg)) {
+                    memcpy(p, sub.c_str(), bytes);
+                    GlobalUnlock(hg);
+                }
+                SetClipboardData(CF_UNICODETEXT, hg);
+            }
+            CloseClipboard();
+        }
+
+        void incolla(HWND h) {
+            if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(h)) return;
+            HANDLE hd = GetClipboardData(CF_UNICODETEXT);
+            std::wstring ins;
+            if (hd) {
+                if (const wchar_t* p = (const wchar_t*)GlobalLock(hd)) {
+                    for (const wchar_t* q = p; *q; ++q) {
+                        if (*q != L'\t' && *q != L'\r' && *q != L'\n') ins.push_back(*q);
+                    }
+                    GlobalUnlock(hd);
+                }
+            }
+            CloseClipboard();
+            if (!ins.empty()) {
+                eliminaSelezione();
+                testo.insert((size_t)caret, ins);
+                caret += (int)ins.size();
+                selIni = selFin = caret;
+                resetBlink(h);
+            }
+        }
+
+        void disegna() {
+            if (!v.inizia(0.82f)) return;
+            aggiornaFormati();
+            aggiornaSheen();
+
+            const float s = v.dpi;
+            const float rad = v.raggio();
+            if (sheen) {
+                v.rt->FillRoundedRectangle(
+                    D2D1::RoundedRect({ 0, 0, (float)v.W, (float)v.H }, rad, rad),
+                    sheen);
+            }
+
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, v.scuro ? 0.18f : 0.70f));
+            v.rt->DrawRoundedRectangle(
+                D2D1::RoundedRect({ 0.5f, 0.5f, (float)v.W - 0.5f, (float)v.H - 0.5f },
+                    std::max(0.0f, rad - 0.5f), std::max(0.0f, rad - 0.5f)),
+                v.pen, 1.0f);
+
+            const float pad = 18.0f * s;
+            v.testo(testi::t(L"Rinomina gioco", L"Rename game"), fTitolo,
+                { pad, 16.0f * s, (float)v.W - pad, 40.0f * s }, v.inchiostro());
+
+            const D2D1_RECT_F ri = rectInput();
+            const float inRad = 10.0f * s;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.68f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(ri, inRad, inRad), v.pen);
+
+            v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.85f));
+            v.rt->DrawRoundedRectangle(D2D1::RoundedRect(ri, inRad, inRad), v.pen, 1.5f * s);
+
+            const float textX = ri.left + 11.0f * s;
+            const float textR = ri.right - 11.0f * s;
+            const float innerW = std::max(1.0f, textR - textX);
+            if (IDWriteTextLayout* layout = creaLayoutInput()) {
+                FLOAT cx = 0, cy = 0;
+                DWRITE_HIT_TEST_METRICS cm{};
+                layout->HitTestTextPosition((UINT32)caret, FALSE, &cx, &cy, &cm);
+
+                DWRITE_TEXT_METRICS tm{};
+                layout->GetMetrics(&tm);
+                if (tm.widthIncludingTrailingWhitespace <= innerW) {
+                    scrollX = 0.0f;
+                } else {
+                    if (cx - scrollX > innerW - 2.0f * s) scrollX = cx - (innerW - 2.0f * s);
+                    if (cx - scrollX < 0.0f) scrollX = cx;
+                    scrollX = std::clamp(scrollX, 0.0f, std::max(0.0f, tm.widthIncludingTrailingWhitespace - innerW + 2.0f * s));
+                }
+
+                v.rt->PushAxisAlignedClip({ textX - 1.0f, ri.top + 2.0f * s, textR + 1.0f, ri.bottom - 2.0f * s },
+                    D2D1_ANTIALIAS_MODE_ALIASED);
+
+                if (selIni != selFin) {
+                    const int lo = std::min(selIni, selFin);
+                    const int hi = std::max(selIni, selFin);
+                    FLOAT x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    DWRITE_HIT_TEST_METRICS m0{}, m1{};
+                    layout->HitTestTextPosition((UINT32)lo, FALSE, &x0, &y0, &m0);
+                    layout->HitTestTextPosition((UINT32)hi, FALSE, &x1, &y1, &m1);
+                    v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.34f));
+                    v.rt->FillRectangle({ textX + x0 - scrollX, ri.top + 7.0f * s, textX + x1 - scrollX, ri.bottom - 7.0f * s }, v.pen);
+                }
+
+                v.pen->SetColor(v.inchiostro());
+                v.rt->DrawTextLayout({ textX - scrollX, ri.top }, layout, v.pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+                if (caretVis) {
+                    const float kx = textX + cx - scrollX;
+                    v.pen->SetColor(v.inchiostro());
+                    v.rt->DrawLine({ kx, ri.top + 7.5f * s }, { kx, ri.bottom - 7.5f * s }, v.pen, 1.5f * s);
+                }
+
+                v.rt->PopAxisAlignedClip();
+                layout->Release();
+            }
+
+            const D2D1_RECT_F rc = rectCancel();
+            const float btnRad = 9.0f * s;
+            v.pen->SetColor(v.scuro
+                ? D2D1::ColorF(1, 1, 1, hovCancel ? 0.18f : 0.10f)
+                : D2D1::ColorF(0, 0, 0, hovCancel ? 0.10f : 0.05f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(rc, btnRad, btnRad), v.pen);
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.16f) : D2D1::ColorF(0, 0, 0, 0.10f));
+            v.rt->DrawRoundedRectangle(D2D1::RoundedRect(rc, btnRad, btnRad), v.pen, 1.0f);
+            v.testo(testi::t(L"Annulla", L"Cancel"), fBtn, rc, v.inchiostro());
+
+            const D2D1_RECT_F rs = rectSave();
+            const bool valido = !trim(testo).empty();
+            v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, !valido ? 0.40f : (hovSave ? 1.0f : 0.90f)));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(rs, btnRad, btnRad), v.pen);
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, valido ? 0.28f : 0.10f));
+            v.rt->DrawLine({ rs.left + btnRad, rs.top + 0.75f }, { rs.right - btnRad, rs.top + 0.75f }, v.pen, 1.0f);
+            v.testo(testi::t(L"Salva", L"Save"), fBtn, rs, D2D1::ColorF(1, 1, 1, valido ? 1.0f : 0.55f));
+
+            v.finisci();
+        }
+
+        bool messaggio(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+            switch (m) {
+                case WM_PAINT:
+                    disegna();
+                    return true;
+                case WM_TIMER:
+                    if (w == 1) {
+                        caretVis = !caretVis;
+                        InvalidateRect(h, nullptr, FALSE);
+                        return true;
+                    }
+                    if (w == 2) {
+                        const double p = std::clamp((double)(GetTickCount64() - tFade) / 140.0, 0.0, 1.0);
+                        v.alfa(vetro::uscita(p));
+                        if (p >= 1.0) KillTimer(h, 2);
+                        return true;
+                    }
+                    return false;
+                case WM_CHAR: {
+                    if (w == 0x01) { // Ctrl+A
+                        selIni = 0;
+                        selFin = caret = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == 0x03) { // Ctrl+C
+                        copiaSelezione(h);
+                        return true;
+                    }
+                    if (w == 0x18) { // Ctrl+X
+                        copiaSelezione(h);
+                        eliminaSelezione();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == 0x16) { // Ctrl+V
+                        incolla(h);
+                        return true;
+                    }
+                    if (w == L'\b') {
+                        if (selIni != selFin) {
+                            eliminaSelezione();
+                        } else if (caret > 0) {
+                            testo.erase((size_t)(caret - 1), 1);
+                            caret--;
+                            selIni = selFin = caret;
+                        }
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w >= 32) {
+                        eliminaSelezione();
+                        testo.insert((size_t)caret, 1, (wchar_t)w);
+                        caret++;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_KEYDOWN:
+                    if (w == VK_RETURN) {
+                        if (!trim(testo).empty()) { confermato = true; finito = true; }
+                        return true;
+                    }
+                    if (w == VK_ESCAPE) {
+                        finito = true;
+                        return true;
+                    }
+                    if (w == VK_LEFT) {
+                        if (selIni != selFin) caret = std::min(selIni, selFin);
+                        else if (caret > 0) caret--;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_RIGHT) {
+                        if (selIni != selFin) caret = std::max(selIni, selFin);
+                        else if (caret < (int)testo.size()) caret++;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_HOME) {
+                        caret = selIni = selFin = 0;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_END) {
+                        caret = selIni = selFin = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_DELETE) {
+                        if (selIni != selFin) {
+                            eliminaSelezione();
+                        } else if (caret < (int)testo.size()) {
+                            testo.erase((size_t)caret, 1);
+                            selIni = selFin = caret;
+                        }
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                case WM_MOUSEMOVE: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (draggingSel) {
+                        caret = selFin = posDaPunto(mx);
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (!trackingMouse) {
+                        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, h, 0 };
+                        trackingMouse = TrackMouseEvent(&tme) != FALSE;
+                    }
+                    const bool hs = dentro(rectSave(), mx, my);
+                    const bool hc = dentro(rectCancel(), mx, my);
+                    if (hs != hovSave || hc != hovCancel) {
+                        hovSave = hs;
+                        hovCancel = hc;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                }
+                case WM_MOUSELEAVE:
+                    trackingMouse = false;
+                    if (hovSave || hovCancel) {
+                        hovSave = hovCancel = false;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                case WM_LBUTTONDOWN: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (dentro(rectInput(), mx, my)) {
+                        caret = selIni = selFin = posDaPunto(mx);
+                        draggingSel = true;
+                        SetCapture(h);
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (dentro(rectCancel(), mx, my)) {
+                        pressedBtn = 1;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (dentro(rectSave(), mx, my)) {
+                        pressedBtn = 2;
+                        SetCapture(h);
+                        return true;
+                    }
+                    ReleaseCapture();
+                    SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    return true;
+                }
+                case WM_LBUTTONUP: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (draggingSel) {
+                        draggingSel = false;
+                        ReleaseCapture();
+                        return true;
+                    }
+                    if (pressedBtn != 0) {
+                        const int btn = pressedBtn;
+                        pressedBtn = 0;
+                        ReleaseCapture();
+                        if (btn == 1 && dentro(rectCancel(), mx, my)) {
+                            finito = true;
+                        } else if (btn == 2 && dentro(rectSave(), mx, my) && !trim(testo).empty()) {
+                            confermato = true;
+                            finito = true;
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_LBUTTONDBLCLK: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (dentro(rectInput(), mx, my)) {
+                        selIni = 0;
+                        selFin = caret = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_CLOSE:
+                    finito = true;
+                    r = 0;
+                    return true;
+            }
+            return false;
+        }
+    } dlg;
+
+    dlg.testo = a.nome;
+    dlg.selIni = 0;
+    dlg.selFin = dlg.caret = (int)dlg.testo.size();
+
+    const wchar_t* clsName = L"FluidWin.RinominaGioco";
+    WNDCLASSW wc{};
+    if (!GetClassInfoW(GetModuleHandleW(nullptr), clsName, &wc)) {
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = vetro::procedura<DialogoRinomina>;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = clsName;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
     }
 
-    auto sc = [&](int v) { return (int)std::lround(v * dpi); };
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
-    const DWORD exStyle = WS_EX_TOPMOST;
-    const int cw = sc(340), ch = sc(96);
-    RECT rc{ 0, 0, cw, ch };
-    AdjustWindowRectEx(&rc, style, FALSE, exStyle);
-    const int ww = rc.right - rc.left, wh = rc.bottom - rc.top;
-
-    RECT rl{};
-    GetWindowRect(launcher, &rl);
-    int wx = rl.left + ((rl.right - rl.left) - ww) / 2;
-    int wy = rl.top + ((rl.bottom - rl.top) - wh) / 2;
-    MONITORINFO mi{ sizeof(mi) };
-    if (GetMonitorInfoW(MonitorFromWindow(launcher, MONITOR_DEFAULTTONEAREST), &mi)) {
-        wx = std::clamp(wx, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - ww));
-        wy = std::clamp(wy, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - wh));
-    }
-
-    HWND dlg = CreateWindowExW(exStyle, clsName, testi::t(L"Rinomina gioco", L"Rename game"),
-        style, wx, wy, ww, wh, launcher, nullptr, hInst, &st);
     std::wstring nuovoNome;
-    if (dlg) {
-        if (temaScuro()) {
-            BOOL scuro = TRUE;
-            DwmSetWindowAttribute(dlg, DWMWA_USE_IMMERSIVE_DARK_MODE, &scuro, sizeof(scuro));
+    if (dlg.v.crea(clsName, vetro::procedura<DialogoRinomina>, &dlg, true, 2, true, true)) {
+        const int W = (int)std::lround(360 * dpi);
+        const int H = (int)std::lround(154 * dpi);
+        RECT rl{};
+        GetWindowRect(launcher, &rl);
+        int wx = rl.left + ((rl.right - rl.left) - W) / 2;
+        int wy = rl.top + ((rl.bottom - rl.top) - H) / 2;
+        MONITORINFO mi{ sizeof(mi) };
+        if (GetMonitorInfoW(MonitorFromWindow(launcher, MONITOR_DEFAULTTONEAREST), &mi)) {
+            wx = std::clamp(wx, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - W));
+            wy = std::clamp(wy, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - H));
         }
 
-        HFONT font = CreateFontW(-sc(14), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-            DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        const int pad = sc(14), editH = sc(26), btnW = sc(84), btnH = sc(28), gap = sc(8);
-        HWND edit = CreateWindowExW(0, L"EDIT", a.nome.c_str(),
-            WS_CHILD | WS_VISIBLE | WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
-            pad, pad, cw - 2 * pad, editH, dlg, (HMENU)101, hInst, nullptr);
-        HWND btnOk = CreateWindowExW(0, L"BUTTON", testi::t(L"Salva", L"Save"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-            cw - pad - 2 * btnW - gap, pad + editH + sc(14), btnW, btnH, dlg, (HMENU)(INT_PTR)IDOK, hInst, nullptr);
-        HWND btnCancel = CreateWindowExW(0, L"BUTTON", testi::t(L"Annulla", L"Cancel"),
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-            cw - pad - btnW, pad + editH + sc(14), btnW, btnH, dlg, (HMENU)(INT_PTR)IDCANCEL, hInst, nullptr);
-
-        if (font) {
-            SendMessageW(edit, WM_SETFONT, (WPARAM)font, TRUE);
-            SendMessageW(btnOk, WM_SETFONT, (WPARAM)font, TRUE);
-            SendMessageW(btnCancel, WM_SETFONT, (WPARAM)font, TRUE);
-        }
-
+        dlg.v.posiziona(wx, wy, W, H, HWND_TOPMOST, 0);
         EnableWindow(launcher, FALSE);
-        ShowWindow(dlg, SW_SHOW);
-        SetFocus(edit);
-        SendMessageW(edit, EM_SETSEL, 0, -1);
+        dlg.tFade = GetTickCount64();
+        ShowWindow(dlg.v.fin, SW_SHOW);
+        SetForegroundWindow(dlg.v.fin);
+        SetFocus(dlg.v.fin);
+        SetTimer(dlg.v.fin, 1, 530, nullptr);
+        SetTimer(dlg.v.fin, 2, 16, nullptr);
+        InvalidateRect(dlg.v.fin, nullptr, FALSE);
 
         MSG msg{};
-        while (!st.finito && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        while (!dlg.finito && GetMessageW(&msg, nullptr, 0, 0) > 0) {
             if (msg.message == WM_QUIT) {
                 PostQuitMessage((int)msg.wParam);
                 break;
             }
-            if (!IsDialogMessageW(dlg, &msg)) {
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
 
-        if (st.confermato) {
-            const int len = GetWindowTextLengthW(edit);
-            if (len > 0) {
-                std::wstring raw(len + 1, L'\0');
-                const int n = GetWindowTextW(edit, raw.data(), len + 1);
-                raw.resize(n > 0 ? n : 0);
-                for (wchar_t ch : raw) {
-                    if (ch != L'\t' && ch != L'\r' && ch != L'\n') nuovoNome.push_back(ch);
-                }
-                const size_t ini = nuovoNome.find_first_not_of(L" \t\r\n");
-                if (ini == std::wstring::npos) {
-                    nuovoNome.clear();
-                } else {
-                    const size_t fin = nuovoNome.find_last_not_of(L" \t\r\n");
-                    nuovoNome = nuovoNome.substr(ini, fin - ini + 1);
-                }
-            }
+        if (dlg.confermato) {
+            nuovoNome = DialogoRinomina::trim(dlg.testo);
         }
 
+        KillTimer(dlg.v.fin, 1);
+        KillTimer(dlg.v.fin, 2);
         EnableWindow(launcher, TRUE);
-        DestroyWindow(dlg);
-        if (font) DeleteObject(font);
     }
+
+    dlg.libera();
+    dlg.v.chiudi();
 
     lDialogoAperto = false;
     if (lAperto && !lChiusura) prendiFuoco(launcher);
 
-    if (st.confermato && !nuovoNome.empty()) {
+    if (dlg.confermato && !nuovoNome.empty()) {
         auto nm = leggiNomiGiochi();
         nm[minuscolo(a.avvio)] = nuovoNome;
         salvaNomiGiochi(nm);
