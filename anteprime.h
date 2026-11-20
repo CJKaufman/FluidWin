@@ -64,7 +64,8 @@ public:
             if (s.ridotta) { WINDOWPLACEMENT wp{sizeof(wp)}; if (GetWindowPlacement(h, &wp)) r = wp.rcNormalPosition; }
             else GetWindowRect(h, &r);
             const float fw = (float)std::max(1L, r.right - r.left), fh = (float)std::max(1L, r.bottom - r.top);
-            const float sc = std::min(LARGO * dpi / fw, ALTO * dpi / fh);
+            // (un poco rientrata nella scheda, con lo stesso margine attorno: prima la toccava ai lati, richiesta dell'utente)
+            const float sc = std::min((LARGO - 2 * RIENTRO) * dpi / fw, (ALTO - 2 * RIENTRO) * dpi / fh);
             s.mw = fw * sc; s.mh = fh * sc;
             s.dentro = false; s.sopraX = false; s.su = 0;
             s.x = -1;   // (posizione da prendere subito, senza scivolare)
@@ -166,6 +167,7 @@ public:
 
 private:
     static constexpr float LARGO = 200, ALTO = 130, TESTA = 30, PAD = 8, GAP = 12, SALITA = 7;
+    static constexpr float RIENTRO = 10;   // margine della miniatura dentro il suo spazio (LARGO x ALTO)
     static constexpr int MAX = 8;
     // Comparsa (richiesta dell'utente): ogni scheda spunta da dietro l'icona come un quadratino, sale e intanto si
     // allarga fino alla sua forma; la scomparsa e' lo stesso percorso all'indietro. Una scheda dura CORSA, la successiva

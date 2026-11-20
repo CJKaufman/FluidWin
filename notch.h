@@ -289,22 +289,40 @@ private:
         return ORA;
     }
 
+    // Microfono e webcam in uso: pallini arancione e verde, come su iPhone. Col notch acceso stanno dentro, a destra, in
+    // uno spazio che il notch a riposo (ora, musica, timer) si tiene in piu'; prima stavano fuori, nel vuoto accanto al
+    // notch. Col notch spento li mostra il dock, piccoli (dock::Motore::puntiSensoriDock)
+    int nPunti() const {
+        if (!abilitato) return 0;
+        const sensori::Sensori& se = sensori::Sensori::io();
+        return (se.micApp.empty() ? 0 : 1) + (se.camApp.empty() ? 0 : 1);
+    }
+    float puntiW() const { const int n = nPunti(); return n ? (8.0f + 8.0f * n) * dpi : 0.0f; }
+    void puntiSensori(float h, float a) {
+        if (puntiW() <= 0) return;
+        const sensori::Sensori& se = sensori::Sensori::io();
+        const float d = dpi, Rv = (W2 + (float)mw.x) / 2;   // (il bordo vero, che con la molla si muove)
+        float cx = Rv - puntiW() + 8 * d;
+        if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); cx += 8 * d; }
+        if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); }
+    }
+
     void misura(int s, float& w, float& h, float& R) const {
         const float d = dpi;
         switch (s) {
-            case MUSICA:   w = largoOra + 62 * d; h = 22 * d; R = 9 * d; break;
+            case MUSICA:   w = largoOra + 62 * d + 2 * puntiW(); h = 22 * d; R = 9 * d; break;   // (puntiW: microfono e webcam)
             case APERTO:   w = 372 * d; h = 96 * d; R = 26 * d; break;
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
             case SCAFFALE: w = 372 * d; h = 96 * d; R = 26 * d; break;
             // avviso: largo quanto simbolo e testo con un margine uguale ai due lati (vedi AVVISO in disegna)
             case AVVISO:   w = std::clamp(larghezzaAvviso + (AV_SIMBOLO + AV_SPAZIO + 2 * AV_MARGINE) * d, 150 * d, 372 * d); h = 32 * d; R = 14 * d; break;
-            case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
+            case TIMER:    w = largoOra + 104 * d + 2 * puntiW(); h = 22 * d; R = 9 * d; break;
             case TIMER_APERTO: w = 312 * d; h = 60 * d; R = 24 * d; break;
             case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
                            {   // posto per scaffale e tazzina (a sinistra) e luna (a destra), uguale ai due lati: l'ora resta al centro
-                               const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = segnoSilenzio ? 22 * d : 0;
+                               const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = (segnoSilenzio ? 22 * d : 0) + puntiW();
                                w += 2 * std::max(sx, dx);
                            }
                            if (sopraVale()) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
@@ -387,8 +405,8 @@ private:
             if (sec != secondoTimer) { secondoTimer = sec; ridisegnare = true; }
         }
         if (scena == SUONA) ridisegnare = true;
-        // microfono e webcam (pallini fuori dal notch)
-        if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; }
+        // microfono e webcam (pallini dentro il notch: il loro spazio cambia la sua larghezza)
+        if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; bersagli(); anima(); }
         // lunetta (non disturbare) e tazzina (tieni sveglio)
         if (comodita::silenzio() != segnoSilenzio) { segnoSilenzio = comodita::silenzio(); tSegnoSilenzio = t; bersagli(); anima(); }
         if (comodita::sveglio() != segnoSveglio) { segnoSveglio = comodita::sveglio(); tSegnoSveglio = t; bersagli(); anima(); }
@@ -662,17 +680,8 @@ private:
             }
         }
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
-        {
-            // pallini fuori dal notch, a destra, come su iPhone: arancione il microfono, verde la webcam (fermi sul
-            // bordo anche col notch salito: dicono chi sta usando microfono e webcam)
-            const sensori::Sensori& se = sensori::Sensori::io();
-            if (w < 330 * dpi) {
-                const float yPunti = basso ? (float)H2 - 6 * dpi : 6 * dpi;   // (sul bordo dello schermo, anche in basso)
-                float px = x1 + f + 7 * dpi;
-                if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, 1); rt->FillEllipse({{px, yPunti}, 3.5f * dpi, 3.5f * dpi}, pen); px += 10 * dpi; }
-                if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, 1); rt->FillEllipse({{px, yPunti}, 3.5f * dpi, 3.5f * dpi}, pen); }
-            }
-        }
+        // (i pallini di microfono e webcam non stanno piu' fuori dal notch, nel vuoto: dentro, vedi puntiSensori; col
+        // notch spento li mostra il dock, piccoli)
         if (g) g->Release();
         if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { libera(); return; }
         mostraAlfa();
@@ -682,7 +691,7 @@ private:
     bool zonaBarrette(D2D1_RECT_F& r, D2D1_POINT_2F& o) const {
         float w, h, R; misura(scena, w, h, R);
         const float L = sinistra(scena), d = dpi;
-        if (scena == MUSICA) o = {L + w - 25 * d, h / 2};
+        if (scena == MUSICA) o = {L + w - puntiW() - 25 * d, h / 2};   // (vedi contenutoScena: lo spazio dei pallini)
         else if (scena == APERTO) o = {L + w - 35 * d, 24 * d};
         else return false;
         o.y += scesa(scena);   // (notch in basso: contro il bordo in basso)
@@ -725,7 +734,10 @@ private:
     void contenutoScena(int s, float a) {
         if (a <= 0.001f) return;
         float w, h, R; misura(s, w, h, R);
-        const float L = sinistra(s), d = dpi;
+        float L = sinistra(s); const float d = dpi;
+        // musica e timer a riposo: i pallini di microfono e webcam a destra, e lo stesso spazio a sinistra (contenuto al centro)
+        if (s == MUSICA || s == TIMER) { L += puntiW(); w -= 2 * puntiW(); }
+        if (s == ORA || s == MUSICA || s == TIMER) puntiSensori(h, a);
         switch (s) {
             case ORA:
                 ora(L, w, h, a);
@@ -742,7 +754,7 @@ private:
                         rt->SetTransform(base);
                     }
                     if (al > 0.01f) {
-                        const D2D1_POINT_2F c = {Rv - 17 * d, h / 2};
+                        const D2D1_POINT_2F c = {Rv - 17 * d - puntiW(), h / 2};   // (a sinistra dei pallini, se ci sono)
                         rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c) * base);
                         lunetta(c.x, c.y, 0.8f * a * al);
                         rt->SetTransform(base);
