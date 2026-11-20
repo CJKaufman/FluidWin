@@ -185,6 +185,7 @@ A release focused on fixes and on the feedback received after 1.2.0.
 | Ctrl+Win+T   | Keep the active window always on top (or not) |
 | Win+Left/Right | Snap the active window to half of the screen |
 | Win+Z        | Choose a layout for the active window         |
+| Ctrl+Alt+Shift+F12 | Emergency exit: quit FluidWin and put Windows back as it was, even if FluidWin is not responding |
 
 ## How to try it
 
@@ -201,11 +202,23 @@ You need **Windows 11**.
 
 ## How to close it
 
-Open the **control center** (the last icon on the right of the dock), then **In background**, **FluidWin**, **Exit**.
-From the same menu you can open the **settings** and turn each feature on or off. You can also open them by
-right-clicking an empty spot of the dock.
+Any of these quits FluidWin:
 
-To remove it completely, close it and delete its folder.
+- right-click an empty spot of the dock, then **Quit FluidWin**;
+- **Settings**, **General**, **Quit FluidWin**;
+- the **control center** (the last icon on the right of the dock), then **In background**, **FluidWin**, **Exit**;
+- **Ctrl+Alt+Shift+F12**, the emergency exit. It is handled by a small separate FluidWin process, so it works even if
+  FluidWin hangs: if FluidWin does not respond, it is closed by force and Windows is put back anyway.
+
+When FluidWin quits (or crashes, or is closed from Task Manager), Windows goes back to how it was: the taskbar
+reappears, windows are visible and opaque again, Windows' own animations, Snap, cursors and "always on top" are
+restored, and the space reserved for the dock is released. FluidWin never changes Windows system files.
+
+One exception: if you turned on **FluidWin notifications**, the Windows notification banners stay off until you turn
+that option off, because Windows only reads that setting when you sign in.
+
+From the settings you can also turn each feature on or off. To remove FluidWin completely, quit it and delete its
+folder.
 
 ## Updates
 

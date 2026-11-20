@@ -4059,17 +4059,65 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
 // si confondono con un altro FluidWin che riceva lo stesso PID; nessun altro processo puo' aprire l'evento per nome.
 // Prima: PID riaperto con OpenProcess ed evento con nome dal PID (R20261113-115217-S1, R20261113-120006-S1).
 // Il PID resta sulla riga di comando solo come ripiego, se le maniglie non fossero valide.
-static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
-    const HANDLE h[2] = {ferma, proc};   // il segnale per primo: se arrivano insieme (riavvio) vince lui
-    DWORD r = proc && ferma ? WaitForMultipleObjects(2, h, FALSE, INFINITE) : WAIT_FAILED;
-    if (r == WAIT_FAILED) {   // maniglie non valide: come prima, il processo dal PID (e il segnale, se c'e')
-        if (HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
-            const HANDLE h2[2] = {ferma, p};
-            r = ferma && WaitForSingleObject(ferma, 0) != WAIT_FAILED ? WaitForMultipleObjects(2, h2, FALSE, INFINITE) : WaitForSingleObject(p, INFINITE) + 1;
-            CloseHandle(p);
-        } else if (ferma && WaitForSingleObject(ferma, 0) == WAIT_OBJECT_0) r = WAIT_OBJECT_0;
+// Uscita d'emergenza (issue #16: "un modo rapido per tornare allo stato di prima"): Ctrl+Alt+Maiusc+F12, registrata dal
+// guardiano e non da FluidWin, cosi' funziona anche con FluidWin bloccato. FluidWin che risponde: gli si chiede di
+// uscire (WM_CLOSE alla finestra dei messaggi, l'uscita normale che rimette a posto tutto) e lo si aspetta fino a 8 s;
+// bloccato o troppo lento: lo si termina, e il ripristino lo fa il guardiano come dopo un crash.
+// Il PID si riapre solo mentre la maniglia ereditata dice che il processo e' vivo: finche' una maniglia e' aperta il PID
+// non puo' passare a un altro processo
+static constexpr int TASTO_EMERGENZA = 0x4657;   // ("FW")
+static void uscitaEmergenza(DWORD pid, HANDLE proc) {
+    if (!proc || WaitForSingleObject(proc, 0) != WAIT_TIMEOUT) return;
+    HWND m = nullptr;
+    while ((m = FindWindowExW(nullptr, m, L"FluidWin.Messaggi", nullptr)) != nullptr) {
+        DWORD p = 0; GetWindowThreadProcessId(m, &p);
+        if (p == pid) break;
     }
-    if (r == WAIT_OBJECT_0) ExitProcess(0);   // riavvio voluto: ci pensa il FluidWin nuovo
+    DWORD_PTR rr = 0;
+    if (m && SendMessageTimeoutW(m, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &rr)) {
+        PostMessageW(m, WM_CLOSE, 0, 0);
+        if (WaitForSingleObject(proc, 8000) == WAIT_OBJECT_0) return;
+    }
+    if (WaitForSingleObject(proc, 0) != WAIT_TIMEOUT) return;
+    if (HANDLE t = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) { TerminateProcess(t, 3); CloseHandle(t); }
+}
+
+static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
+    // maniglie non valide: come prima, il processo dal PID (e il segnale solo se valido). Prima di attendere, cosi'
+    // l'attesa e la scorciatoia sono le stesse anche nel ripiego (R20261120-020556-S1)
+    auto valida = [](HANDLE x) { return x && WaitForSingleObject(x, 0) != WAIT_FAILED; };
+    HANDLE p = proc, propria = nullptr;
+    if (!valida(p)) p = propria = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    const HANDLE f = valida(ferma) ? ferma : nullptr;
+    bool riavvioVoluto;
+    if (!p) riavvioVoluto = f && WaitForSingleObject(f, 0) == WAIT_OBJECT_0;   // (processo gia' finito e non riapribile)
+    else {
+        HANDLE h[2]; DWORD n = 0;
+        if (f) h[n++] = f;   // il segnale per primo: se arrivano insieme (riavvio) vince lui
+        h[n++] = p;
+        // scorciatoia d'emergenza su questo thread (WM_HOTKEY nella sua coda). Gia' presa: per esempio dal guardiano del
+        // FluidWin di prima, in un riavvio, che finisce un attimo dopo; si riprova ogni 2 s per mezzo minuto
+        bool tasto = RegisterHotKey(nullptr, TASTO_EMERGENZA, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F12) != FALSE;
+        int tentativi = 15;
+        DWORD r;
+        for (;;) {
+            r = MsgWaitForMultipleObjects(n, h, FALSE, tasto || tentativi <= 0 ? INFINITE : 2000, QS_HOTKEY);
+            if (r < WAIT_OBJECT_0 + n) break;
+            if (r == WAIT_FAILED) { r = WaitForMultipleObjects(n, h, FALSE, INFINITE); break; }   // (senza scorciatoia)
+            if (r == WAIT_TIMEOUT) {
+                tentativi--;
+                tasto = RegisterHotKey(nullptr, TASTO_EMERGENZA, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F12) != FALSE;
+                continue;
+            }
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE))
+                if (msg.message == WM_HOTKEY && msg.wParam == TASTO_EMERGENZA) uscitaEmergenza(pid, p);
+        }
+        if (tasto) UnregisterHotKey(nullptr, TASTO_EMERGENZA);
+        riavvioVoluto = f && r == WAIT_OBJECT_0;
+    }
+    if (propria) CloseHandle(propria);
+    if (riavvioVoluto) ExitProcess(0);   // riavvio voluto: ci pensa il FluidWin nuovo
     // aggiornamento interrotto fra le due rinomine (crash, chiusura da Gestione attivita'): senza FluidWin.exe nessuno
     // lo potrebbe piu' avviare; il guardiano (che gira dalla stessa cartella) lo rimette (R20261116-000127-S1)
     aggiorna::recupera(aggiorna::dettagli::exeInUso());
@@ -4315,6 +4363,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.copiaDiagnostica = copiaDiagnostica;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     // (senza rettangolo: dal menu del dock, crescono dal punto del clic)
+    gDock.esci = [] { logf("esci dal menu del dock"); PostQuitMessage(0); };
+    gImpostazioni.esci = [] { logf("esci dalle impostazioni"); PostQuitMessage(0); };
     gDock.impostazioni = [](const RECT* da) { gImpostazioni.raggioWindhawk = raggio::windhawk(); gImpostazioni.apri(da, da == nullptr); };
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };

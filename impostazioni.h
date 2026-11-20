@@ -159,6 +159,7 @@ public:
     int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
     std::function<bool()> copiaDiagnostica;   // mette negli appunti la diagnostica (fluidwin.cpp); true se riuscito
+    std::function<void()> esci;               // "Esci da FluidWin": l'uscita normale, che rimette Windows com'era (#16)
     std::function<void()> tornaAlCentro;      // aperte dal centro di controllo e richiuse nel suo rettangolo: lo riapre
     std::function<void(bool)> dockSu;         // aperte dal centro di controllo: il dock resta su finche' ci sono
     std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
@@ -648,6 +649,7 @@ private:
             disegna();
             return;
         }
+        if (id == 401) { if (esci) esci(); return; }   // "Esci da FluidWin" (#16)
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
             disegna();
@@ -824,11 +826,12 @@ private:
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
         };
-        auto riga = [&](const std::wstring& titolo, const std::wstring& testo) {   // riga informativa (senza interruttore)
+        // riga informativa (senza interruttore); spazio: quanto lasciare libero a destra per un pulsante
+        auto riga = [&](const std::wstring& titolo, const std::wstring& testo, float spazio = 0) {
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);
-            v.testo(titolo, fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 16 * d, r.top + 29 * d}, inkS);
-            v.testo(testo, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 16 * d, r.top + 48 * d}, tenueS);
+            v.testo(titolo, fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 16 * d - spazio, r.top + 29 * d}, inkS);
+            v.testo(testo, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 16 * d - spazio, r.top + 48 * d}, tenueS);
             y += 60 * d;
         };
         for (size_t i = 0; i < voci.size(); i++) {
@@ -871,13 +874,29 @@ private:
             // segnala un problema; il pulsante "Copia" a destra
             {
                 const float yr = y;
-                riga(testi::t(L"Diagnostica", L"Diagnostics"), testi::t(L"Sistema, schermi, scheda video e impostazioni, da incollare in una segnalazione",
-                                                                         L"System, screens, graphics card and settings, to paste into a report"));
                 const std::wstring tb = copiataAlle ? testi::t(L"Copiata", L"Copied") : testi::t(L"Copia", L"Copy");
                 const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                // (il testo si ferma prima del pulsante: prima ci finiva sotto)
+                riga(testi::t(L"Diagnostica", L"Diagnostics"), testi::t(L"Sistema, schermi, scheda video e impostazioni, da incollare in una segnalazione",
+                                                                         L"System, screens, graphics card and settings, to paste into a report"), lw + 12 * d);
                 const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
                 zone.push_back({rb, 400});
                 v.pen->SetColor(copiataAlle ? D2D1::ColorF(0.20f, 0.78f, 0.35f, (float)e) : D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == 400 ? 1.0f : 0.88f) * (float)e));
+                v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
+            }
+            // uscita (issue #16): con la barra di Windows nascosta l'icona nell'area di notifica non si vede. La
+            // scorciatoia d'emergenza la tiene il guardiano e funziona anche con FluidWin bloccato
+            {
+                const float yr = y;
+                const std::wstring tb = testi::t(L"Esci", L"Quit");
+                const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                riga(testi::t(L"Esci da FluidWin", L"Quit FluidWin"),
+                     testi::t(L"Windows torna com'era. Bloccato? Ctrl+Alt+Maiusc+F12",
+                              L"Windows goes back as it was. Stuck? Ctrl+Alt+Shift+F12"), lw + 12 * d);
+                const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
+                zone.push_back({rb, 401});
+                v.pen->SetColor(D2D1::ColorF(0.92f, 0.26f, 0.22f, (sopra == 401 ? 1.0f : 0.88f) * (float)e));
                 v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
                 v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
             }

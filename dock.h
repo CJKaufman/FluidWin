@@ -2548,6 +2548,7 @@ public:
     // apre le impostazioni di FluidWin (dal centro di controllo): da = rettangolo del vetro del pannello sullo schermo,
     // da cui le impostazioni crescono
     void (*impostazioni)(const RECT* da) = nullptr;
+    void (*esci)() = nullptr;   // "Esci da FluidWin" (issue #16): l'uscita normale, che rimette Windows com'era
     // le impostazioni aperte dal centro di controllo si sono richiuse nel suo rettangolo: il centro ricompare li'
     void riapriControllo();
     // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
@@ -2868,8 +2869,11 @@ private:
             else if (aperte) vv.push_back(menu::voce(testi::t(L"Mostra il desktop", L"Show desktop"), 2));
             if (vv.size() > 1) vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
+            // (con la barra di Windows nascosta l'icona nell'area di notifica non si vede: qui l'uscita si trova, #16)
+            if (esci) vv.push_back(menu::voce(testi::t(L"Esci da FluidWin", L"Quit FluidWin"), 4));
             const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
             if (s == 1 && impostazioni) impostazioni(nullptr);
+            else if (s == 4 && esci) esci();
             else if (s == 2) mostraDesktop();
             else if (s == 3) ripristinaDesktop();
             return;
