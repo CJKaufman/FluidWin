@@ -664,6 +664,15 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+    // cima del dock sullo schermo m (y dello schermo), per i menu; INT_MAX se li' non c'e' o resta giu'. E' la cima a
+    // riposo (dock su, icone non ingrandite), non quella del momento: un menu aperto mentre il dock risale finiva poi
+    // sotto di lui (R20261120-145131-S2)
+    int cimaSu(HMONITOR m) const {
+        if (!attivo || nascostoSchermoIntero || MonitorFromRect(&schermo, MONITOR_DEFAULTTONEAREST) != m) return INT_MAX;
+        const bool restaGiu = vuoleNascondersi && !rivelato && nessunaScheda() && !dockSu && !lAperto;
+        if (restaGiu) return INT_MAX;
+        return (int)std::floor(schermo.bottom - H + yBaseRiposo() - S - PAD - 2 * dpi);
+    }
 
     // impostazioni: notch acceso o spento, e ora e data in fondo al dock, dopo il centro di controllo
     void impostaNotch(bool si) { notch.abilita(si); dirty = true; }   // (spento: musica e timer nella testa del dock)
@@ -869,14 +878,17 @@ private:
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
-    // musica (copertina e barrette) e il timer in corso (anello e tempo che resta). Il clic fa scendere dal notch il suo
-    // pannello (notch::Notch::apri). Con il notch fisso non c'e': musica e timer stanno nel notch
+    // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
+    // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
     double testaK = 0;                // 0..1: comparsa (la larghezza entra nella disposizione, il dock si allarga)
     float largTesta = 0;              // larghezza dei contenuti (l'ultima, anche mentre sparisce)
-    float divTesta = 0;               // x che separa musica e timer quando ci sono tutti e due
-    bool testaMusica = false, testaTimer = false;   // cosa mostra (deciso in render)
-    D2D1_RECT_F rettTesta{};          // il suo posto per il mouse (vuoto se non c'e')
-    bool testaPremuta = false; double evTesta = 0;
+    bool testaMusica = false, testaTimer = false, testaSveglio = false, testaSilenzio = false;   // cosa mostra (deciso in render)
+    double tSveglio = -10, tSilenzio = -10;   // quando si sono accesi (rimbalzo e onda del segno)
+    double kMus = 0, kTim = 0;        // 0..1: musica e timer allargati coi tasti (mouse sopra)
+    D2D1_RECT_F rettTesta{}, rettMus{}, rettTim{};   // posti per il mouse: tutta la testa, musica, timer (vuoti se non ci sono)
+    D2D1_RECT_F tastoTesta[5]{};      // indietro, play/pausa, avanti, +1 min, stop
+    int tastoPremuto = -1;            // tasto premuto (-2: la testa fuori dai tasti, -1: niente)
+    double evTesta = 0;
     ID2D1Bitmap* bTesta = nullptr; UINT versioneTesta = 0xFFFFFFFF;   // copertina del brano
     double ultimaMusica = -100;       // quando suonava l'ultima volta (in pausa resta qualche secondo)
     int periodoTesta = 0;             // TIMER_TESTA (ms, 0 spento): 60 con le barrette che ballano, 250 per i secondi del timer
@@ -1775,7 +1787,7 @@ private:
         }
 
         // testa del dock (musica e timer, notch a scomparsa): all'inizio, prima della prima icona
-        movimento |= disegnaTesta(sinistra, yb, scuro);
+        movimento |= disegnaTestaDock(sinistra, yb, scuro, t);
 
         // icona sotto il mouse ricalcolata sulle posizioni appena disegnate (il dock si muove anche col mouse fermo)
         sopra = (mouseDentro && mouseSulDock) ? iconaInPunto(mouseX, mouseY) : -1;
@@ -1794,16 +1806,23 @@ private:
             etichettaTesto = descrizioneStato(statoSopra);
             etichettaCx = (rettStato[statoSopra].left + rettStato[statoSopra].right) / 2; etichettaTop = isola.top - 10 * dpi;
             etichettaVoluta = true;
-        } else if (mouseDentro && inTesta(mouseX, mouseY) && !testaPremuta && nessunaScheda() && !ant.aperta()) {
-            // testa: titolo e artista del brano, o "Timer"
-            const bool musica_ = testaMusica && (!testaTimer || mouseX < divTesta);
+        } else if (mouseDentro && inTesta(mouseX, mouseY) && tastoPremuto == -1 && nessunaScheda() && !ant.aperta()) {
+            // testa: titolo e artista del brano, "Timer", o i segni accesi
             const musica::Brano& br = notch.musicaOra();
-            etichettaTesto = !musica_ ? testi::t(L"Timer", L"Timer")
-                           : br.titolo.empty() ? testi::t(L"Musica", L"Music")
-                           : br.artista.empty() ? br.titolo : br.titolo + L" · " + br.artista;
-            etichettaCx = musica_ && testaTimer ? (rettTesta.left + divTesta) / 2 : testaTimer && testaMusica ? (divTesta + rettTesta.right) / 2 : (rettTesta.left + rettTesta.right) / 2;
+            if (dentro(rettMus, mouseX, mouseY)) {
+                etichettaTesto = br.titolo.empty() ? testi::t(L"Musica", L"Music") : br.artista.empty() ? br.titolo : br.titolo + L" · " + br.artista;
+                etichettaCx = (rettMus.left + rettMus.right) / 2;
+            } else if (dentro(rettTim, mouseX, mouseY)) {
+                etichettaTesto = testi::t(L"Timer", L"Timer");
+                etichettaCx = (rettTim.left + rettTim.right) / 2;
+            } else {
+                etichettaTesto.clear();
+                if (testaSveglio) etichettaTesto = testi::t(L"Tieni sveglio acceso", L"Keep awake on");
+                if (testaSilenzio) etichettaTesto += (etichettaTesto.empty() ? L"" : L" · ") + std::wstring(testi::t(L"Non disturbare acceso", L"Do not disturb on"));
+                etichettaCx = mouseX;
+            }
             etichettaTop = rettTesta.top - 12 * dpi;
-            etichettaVoluta = true;
+            etichettaVoluta = !etichettaTesto.empty();
         }
         const double et = verso(etichettaAlfa, etichettaVoluta ? 1.0 : 0.0, 0.025);
         if (et != etichettaAlfa) movimento = true;
@@ -1834,28 +1853,46 @@ private:
         }
     }
 
-    // ---- testa del dock: musica e timer col notch a scomparsa ----
+    // ---- testa del dock: musica, timer, tieni sveglio e non disturbare col notch a scomparsa ----
+    // Tre parti, da sinistra: i segni di "Tieni sveglio" (tazzina) e "Non disturbare" (luna), che entrano con un piccolo
+    // rimbalzo e un'onda; la musica (copertina e barrette); il timer (anello e tempo). Col mouse sopra la musica si
+    // allarga con indietro / play-pausa / avanti, il timer con +1 min e stop: si controllano dal dock, senza il notch
 
-    // cosa mostra, comparsa, larghezza, copertina e ritmo del ridisegno; true se sta ancora animando
+    // cosa mostra, allargamenti, larghezza, copertina e ritmo del ridisegno; true se sta ancora animando
     bool statoTesta(double t) {
         const musica::Brano& br = notch.musicaOra();
         if (br.c && br.suona) ultimaMusica = t;
         const bool fisso = notch.fisso();
-        // in pausa resta 8 s (e finche' il suo pannello e' giu'): messa in pausa e ripresa non fanno ballare il dock
-        testaMusica = !fisso && br.c && (br.suona || t - ultimaMusica < 8 || notch.apertoDalDock(0));
+        // in pausa resta 8 s (e finche' ci sono sopra il mouse o un tasto premuto): pausa e ripresa non fanno ballare il dock
+        const bool sullaMusica = mouseDentro && testaMusica && dentro(rettMus, mouseX, mouseY);
+        testaMusica = !fisso && br.c && (br.suona || t - ultimaMusica < 8 || sullaMusica || (tastoPremuto >= 0 && tastoPremuto <= 2));
         testaTimer = !fisso && comodita::timerAttivo();
-        const bool vuole = testaMusica || testaTimer;
+        const bool sv = !fisso && comodita::sveglio(), si = !fisso && comodita::silenzio();
+        if (sv && !testaSveglio) tSveglio = t;      // (comparsa: rimbalzo e onda)
+        if (si && !testaSilenzio) tSilenzio = t;
+        testaSveglio = sv; testaSilenzio = si;
+        bool anima = false;
+        // allargamenti col mouse sopra (o con un tasto premuto)
+        auto allarga = [&](double& k, bool voluto) { const double n = verso(k, voluto ? 1.0 : 0.0, 0.06); anima |= n != k; k = n; };
+        allarga(kMus, testaMusica && ((mouseDentro && dentro(rettMus, mouseX, mouseY)) || (tastoPremuto >= 0 && tastoPremuto <= 2)));
+        allarga(kTim, testaTimer && ((mouseDentro && dentro(rettTim, mouseX, mouseY)) || tastoPremuto == 3 || tastoPremuto == 4));
+        const bool vuole = testaMusica || testaTimer || testaSveglio || testaSilenzio;
         if (vuole) {
-            const float mus = testaMusica ? S * 0.62f + 8 * dpi + 14 * dpi : 0;
-            std::wstring cifre = testaTimer ? comodita::durata(comodita::timerResto()) : L"";
-            for (wchar_t& c : cifre) if (c >= L'0' && c <= L'9') c = L'0';   // (larghezza fissa mentre i secondi scorrono)
-            const float tim = testaTimer ? 18 * dpi + 6 * dpi + larghezzaTesto(cifre, fmtOra) : 0;
-            largTesta = std::round(mus + tim + (testaMusica && testaTimer ? 12 * dpi : 0) + 20 * dpi);
+            float w = 0; int parti = 0;
+            if (testaSveglio || testaSilenzio) { w += ((testaSveglio ? 1 : 0) + (testaSilenzio ? 1 : 0)) * 20 * dpi; parti++; }
+            if (testaMusica) { w += S * 0.62f + 8 * dpi + 14 * dpi + (float)kMus * (3 * 26 + 6) * dpi; parti++; }
+            if (testaTimer) {
+                std::wstring cifre = comodita::durata(comodita::timerResto());
+                for (wchar_t& c : cifre) if (c >= L'0' && c <= L'9') c = L'0';   // (larghezza fissa mentre i secondi scorrono)
+                w += 18 * dpi + 6 * dpi + larghezzaTesto(cifre, fmtOra) + (float)kTim * (44 + 6 + 26 + 4) * dpi; parti++;
+            }
+            largTesta = std::round(w + (parti - 1) * 12 * dpi + 20 * dpi);
         }
         const double k = verso(testaK, vuole ? 1.0 : 0.0, 0.07);
-        const bool anima = k != testaK;
+        anima |= k != testaK;
         testaK = k;
-        if (testaK <= 0.001) { rettTesta = {}; testaPremuta = false; }
+        if (testaK <= 0.001) { rettTesta = rettMus = rettTim = {}; tastoPremuto = -1; kMus = kTim = 0; }
+        if (t - tSveglio < 0.7 || t - tSilenzio < 0.7) anima = true;   // rimbalzo e onda dei segni
         // copertina (si rifa' quando cambia il brano)
         const UINT ver = br.versione ^ (UINT)br.copertina.size();
         if (testaMusica && ver != versioneTesta) {
@@ -1874,13 +1911,16 @@ private:
         return anima;
     }
 
-    // (ogni 500 ms da aggiornaStato) brano, pausa, timer o notch fisso cambiati, o pausa da piu' di 8 s
+    static bool dentro(const D2D1_RECT_F& r, float x, float y) { return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
+
+    // (ogni 500 ms da aggiornaStato) brano, pausa, timer, segni o notch fisso cambiati, o pausa da piu' di 8 s
     UINT firmaTesta = 0xFFFFFFFF;
     bool testaCambiata() {
         const musica::Brano& br = notch.musicaOra();
         // anche col dock giu' (nessun disegno): gli 8 s della pausa contano da quando ha smesso davvero (R20261120-141156-S2)
         if (br.c && br.suona) ultimaMusica = adesso();
-        const UINT f = (notch.fisso() ? 1u : 0u) | (br.c ? 2u : 0u) | (br.suona ? 4u : 0u) | (comodita::timerAttivo() ? 8u : 0u) | (br.versione << 4);
+        const UINT f = (notch.fisso() ? 1u : 0u) | (br.c ? 2u : 0u) | (br.suona ? 4u : 0u) | (comodita::timerAttivo() ? 8u : 0u) |
+                       (comodita::sveglio() ? 16u : 0u) | (comodita::silenzio() ? 32u : 0u) | (br.versione << 6);
         const bool scaduta = testaMusica && !br.suona && adesso() - ultimaMusica >= 8;
         if (f == firmaTesta && !scaduta) return false;
         firmaTesta = f;
@@ -1890,17 +1930,59 @@ private:
     bool inTesta(float x, float y) const {
         return rettTesta.right > rettTesta.left && x >= rettTesta.left && x < rettTesta.right && y >= rettTesta.top - 6 * dpi && y <= rettTesta.bottom + PAD;
     }
-
-    // clic: scende dal notch il pannello della musica o del timer (con tutti e due, quello sotto il mouse)
-    void cliccaTesta(float x) {
-        const int cosa = testaMusica && testaTimer ? (x < divTesta ? 0 : 1) : testaTimer ? 1 : 0;
-        notch.apri(cosa);
+    // tasto della testa sotto il mouse: 0 indietro, 1 play/pausa, 2 avanti, 3 +1 min, 4 stop; -1 nessuno
+    int tastoTestaIn(float x, float y) const {
+        for (int i = 0; i < 5; i++) {
+            // (solo ad allargamento finito: prima i tasti stanno gia' al posto finale, oltre lo spazio concesso, e potevano
+            // finire sopra il timer, R20261120-145131-S1)
+            const bool vale = i <= 2 ? kMus > 0.98 : kTim > 0.98;
+            if (vale && dentro(tastoTesta[i], x, y)) return i;
+        }
+        return -1;
+    }
+    void premiTastoTesta(int b) {
+        if (b >= 0 && b <= 2) notch.comandoMusica(b);
+        else if (b == 3) comodita::aggiungiTimer(60000);
+        else if (b == 4) comodita::fermaTimer();
         dirty = true;
     }
 
+    // tazzina (tieni sveglio) e luna (non disturbare), come nel notch, col colore del dock
+    void segnoTesta(bool tazza, float cx, float cy, D2D1_COLOR_F ink) {
+        const float d = dpi;
+        pennello->SetColor(ink);
+        if (tazza) {
+            dc->FillRoundedRectangle({{cx - 5 * d, cy - 2 * d, cx + 3 * d, cy + 5 * d}, 1.6f * d, 1.6f * d}, pennello);
+            dc->DrawEllipse({{cx + 4 * d, cy + 1.2f * d}, 2.2f * d, 2.2f * d}, pennello, 1.3f * d);
+            dc->DrawLine({cx - 2.5f * d, cy - 4 * d}, {cx - 2.5f * d, cy - 6.5f * d}, pennello, 1.1f * d);
+            dc->DrawLine({cx + 0.5f * d, cy - 4 * d}, {cx + 0.5f * d, cy - 6.5f * d}, pennello, 1.1f * d);
+            return;
+        }
+        ID2D1EllipseGeometry *a = nullptr, *b = nullptr; ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreateEllipseGeometry({{cx, cy}, 6 * d, 6 * d}, &a)) && SUCCEEDED(f2d->CreateEllipseGeometry({{cx + 3.6f * d, cy - 2.6f * d}, 5 * d, 5 * d}, &b)) &&
+            SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            if (SUCCEEDED(a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s)) && SUCCEEDED(s->Close())) dc->FillGeometry(g, pennello);
+        }
+        if (s) s->Release();
+        if (g) g->Release();
+        if (b) b->Release();
+        if (a) a->Release();
+    }
+
+    // un tasto rotondo della testa (evidenza col mouse sopra, piu' scuro premuto)
+    void fondoTasto(int i, bool scuro, float a) {
+        const D2D1_RECT_F& r = tastoTesta[i];
+        const bool sopraT = mouseDentro && dentro(r, mouseX, mouseY);
+        if (!sopraT && tastoPremuto != i) return;
+        const float q = tastoPremuto == i ? 0.22f : 0.12f;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, q * a) : D2D1::ColorF(0, 0, 0, q * 0.6f * a));
+        const float rr = (r.bottom - r.top) / 2;
+        dc->FillRoundedRectangle({r, rr, rr}, pennello);
+    }
+
     // disegna la testa all'inizio del dock (x0: dove comincia); true se sta animando
-    bool disegnaTesta(float x0, float yb, bool scuro) {
-        if (larghezzaTesta() <= 0) { rettTesta = {}; return false; }
+    bool disegnaTestaDock(float x0, float yb, bool scuro, double t) {
+        if (larghezzaTesta() <= 0) { rettTesta = rettMus = rettTim = {}; return false; }
         const float k = (float)testaK, cw = largTesta * k, d = dpi;
         const D2D1_RECT_F r = {x0, yb - S, x0 + cw, yb};
         rettTesta = r;
@@ -1908,12 +1990,11 @@ private:
         pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * k));
         const float sx = x0 + cw + (GAP + 0.5f) * k;
         dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
-        // capsula: fondo come ora e data in coda (solo col vetro trasparente), evidenza col mouse o col pannello giu'
+        // capsula: fondo come ora e data in coda (solo col vetro trasparente), evidenza col mouse sopra
         const float cy = (r.top + r.bottom) / 2, ph = S * 0.42f;
         const D2D1_ROUNDED_RECT capsula = {{r.left, cy - ph, r.right, cy + ph}, std::min(10 * d, ph), std::min(10 * d, ph)};
-        const bool aperta = notch.apertoDalDock(0) || notch.apertoDalDock(1);
-        const double e = verso(evTesta, ((mouseDentro && inTesta(mouseX, mouseY)) || aperta) ? 1.0 : 0.0, 0.05);
-        const bool anima = e != evTesta;
+        const double e = verso(evTesta, (mouseDentro && inTesta(mouseX, mouseY)) ? 1.0 : 0.0, 0.05);
+        bool anima = e != evTesta;
         evTesta = e;
         {
             BYTE av = 255; DWORD fl = 0;
@@ -1929,12 +2010,31 @@ private:
             dc->FillRoundedRectangle(capsula, pennello);
         }
         // contenuti: entrano con la comparsa, tagliati alla capsula mentre si allarga
-        const float s = testaPremuta && inTesta(mouseX, mouseY) ? 0.94f : 1.0f;   // si "schiaccia" un poco alla pressione
         dc->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {(r.left + r.right) / 2, cy}));
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f * k) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f * k);
         float x = r.left + 10 * d;
+        bool prima = false;   // c'e' gia' una parte prima (spazio di 12 px)
+        // segni: rimbalzo (scala con un poco di oltre) e un'onda che si allarga e sfuma, per 0,7 s dalla comparsa
+        for (int i = 0; i < 2; i++) {
+            const bool acceso = i == 0 ? testaSveglio : testaSilenzio;
+            if (!acceso) continue;
+            const double et = t - (i == 0 ? tSveglio : tSilenzio);
+            const float cx = x + 10 * d;
+            if (et < 0.7) {
+                const float u = (float)std::clamp(et / 0.45, 0.0, 1.0), c1 = 1.70158f, c3 = c1 + 1;
+                const float sc = 0.4f + 0.6f * (1 + c3 * (u - 1) * (u - 1) * (u - 1) + c1 * (u - 1) * (u - 1));   // easeOutBack
+                const float o = (float)std::clamp(et / 0.7, 0.0, 1.0);
+                pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.5f * (1 - o)});
+                dc->DrawEllipse({{cx, cy}, (7 + 9 * o) * d, (7 + 9 * o) * d}, pennello, 1.2f * d);
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {cx, cy}));
+                segnoTesta(i == 0, cx, cy, ink);
+                dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            } else segnoTesta(i == 0, cx, cy, ink);
+            x += 20 * d; prima = true;
+        }
         if (testaMusica) {
+            if (prima) x += 12 * d;
+            const float x1 = x;
             const float q = S * 0.62f;
             const D2D1_RECT_F rc = {x, cy - q / 2, x + q, cy + q / 2};
             ID2D1BitmapBrush* bb = nullptr;
@@ -1957,18 +2057,56 @@ private:
             // barrette: ballano mentre suona, ferme e basse in pausa (come nel notch)
             const musica::Brano& br = notch.musicaOra();
             const float bx = rc.right + 8 * d, lb = 2.4f * d, passo = (14 * d - lb) / 3;
-            const double tt = adesso();
             pennello->SetColor(ink);
             for (int i = 0; i < 4; i++) {
                 float kb = 0.25f;
-                if (br.suona) kb = (float)(0.35 + 0.65 * std::fabs(std::sin(tt * (5.1 + i * 1.7) + i * 1.3)));
+                if (br.suona) kb = (float)(0.35 + 0.65 * std::fabs(std::sin(t * (5.1 + i * 1.7) + i * 1.3)));
                 const float hb = std::max(2.4f * d, 12 * d * kb);
                 dc->FillRoundedRectangle({{bx + i * passo, cy - hb / 2, bx + i * passo + lb, cy + hb / 2}, lb / 2, lb / 2}, pennello);
             }
             x = bx + 14 * d;
-            if (testaTimer) { divTesta = x + 6 * d; x += 12 * d; }
-        }
+            // tasti (col mouse sopra): indietro, play/pausa, avanti
+            const float km = (float)kMus;
+            // disegnati solo nello spazio gia' concesso (si scoprono mentre la sezione si allarga)
+            dc->PushAxisAlignedClip({x, r.top, x + km * (3 * 26 + 6) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            for (int i = 0; i < 3; i++) {
+                const float tc = x + 6 * d + (13 + 26 * i) * d;
+                tastoTesta[i] = {tc - 12 * d, cy - 12 * d, tc + 12 * d, cy + 12 * d};
+                if (km < 0.02f) continue;
+                fondoTasto(i, scuro, km * k);
+                pennello->SetColor({ink.r, ink.g, ink.b, ink.a * km});
+                const float tr = 4.2f * d;
+                auto triangolo = [&](float ax, bool destra) {   // punta a destra o a sinistra
+                    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* sk = nullptr;
+                    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&sk))) {
+                        const float dx = destra ? tr : -tr;
+                        sk->BeginFigure({ax - dx, cy - tr}, D2D1_FIGURE_BEGIN_FILLED);
+                        sk->AddLine({ax + dx, cy}); sk->AddLine({ax - dx, cy + tr});
+                        sk->EndFigure(D2D1_FIGURE_END_CLOSED);
+                        if (SUCCEEDED(sk->Close())) dc->FillGeometry(g, pennello);
+                    }
+                    if (sk) sk->Release();
+                    if (g) g->Release();
+                };
+                if (i == 1) {
+                    if (br.suona) {   // pausa: due barre
+                        dc->FillRoundedRectangle({{tc - 4 * d, cy - 5 * d, tc - 1.3f * d, cy + 5 * d}, 1 * d, 1 * d}, pennello);
+                        dc->FillRoundedRectangle({{tc + 1.3f * d, cy - 5 * d, tc + 4 * d, cy + 5 * d}, 1 * d, 1 * d}, pennello);
+                    } else triangolo(tc + 1 * d, true);
+                } else {
+                    const bool destra = i == 2;
+                    triangolo(tc + (destra ? -2.5f : 2.5f) * d, destra);
+                    triangolo(tc + (destra ? 2.5f : -2.5f) * d, destra);
+                }
+            }
+            dc->PopAxisAlignedClip();
+            x += km * (3 * 26 + 6) * d;
+            rettMus = {x1 - 6 * d, r.top, x + 6 * d, r.bottom};
+            prima = true;
+        } else rettMus = {};
         if (testaTimer) {
+            if (prima) x += 12 * d;
+            const float x1 = x;
             // anello che si svuota e il tempo che resta, in arancio come nel notch
             const float rr = 7 * d, ax = x + rr + 2 * d;
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f * k) : D2D1::ColorF(0, 0, 0, 0.16f * k));
@@ -1983,17 +2121,43 @@ private:
                     sk->BeginFigure({ax, cy - rr}, D2D1_FIGURE_BEGIN_HOLLOW);
                     sk->AddArc(D2D1::ArcSegment({ax + rr * std::sin(ang), cy - rr * std::cos(ang)}, {rr, rr}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE,
                                                 av > 0.5f ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
-                    sk->EndFigure(D2D1_FIGURE_END_OPEN); sk->Close(); sk->Release(); sk = nullptr;
-                    dc->DrawGeometry(g, pennello, 2.2f * d);
+                    sk->EndFigure(D2D1_FIGURE_END_OPEN);
+                    if (SUCCEEDED(sk->Close())) dc->DrawGeometry(g, pennello, 2.2f * d);
                 }
                 if (sk) sk->Release();
                 if (g) g->Release();
             }
-            const std::wstring resto = comodita::durata(comodita::timerResto());
-            dc->DrawText(resto.c_str(), (UINT32)resto.size(), fmtOra, {ax + rr + 6 * d, cy - 10 * d, r.right - 8 * d, cy + 10 * d}, pennello);
-        }
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            std::wstring cifre = comodita::durata(comodita::timerResto());
+            const float tw = larghezzaTesto([&] { std::wstring z = cifre; for (wchar_t& c : z) if (c >= L'0' && c <= L'9') c = L'0'; return z; }(), fmtOra);
+            const float xt = ax + rr + 6 * d;
+            dc->DrawText(cifre.c_str(), (UINT32)cifre.size(), fmtOra, {xt, cy - 10 * d, xt + tw, cy + 10 * d}, pennello);
+            x = xt + tw;
+            // tasti (col mouse sopra): +1 min e stop
+            const float kt = (float)kTim;
+            tastoTesta[3] = {x + 6 * d, cy - 11 * d, x + 50 * d, cy + 11 * d};
+            tastoTesta[4] = {x + 56 * d, cy - 12 * d, x + 80 * d, cy + 12 * d};
+            if (kt > 0.02f) {
+                dc->PushAxisAlignedClip({x, r.top, x + kt * (44 + 6 + 26 + 4) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);   // (come i tasti della musica)
+                const D2D1_RECT_F& rp = tastoTesta[3];
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, (tastoPremuto == 3 ? 0.30f : mouseDentro && dentro(rp, mouseX, mouseY) ? 0.22f : 0.14f) * kt * k)
+                                         : D2D1::ColorF(0, 0, 0, (tastoPremuto == 3 ? 0.18f : mouseDentro && dentro(rp, mouseX, mouseY) ? 0.13f : 0.08f) * kt * k));
+                dc->FillRoundedRectangle({rp, 11 * d, 11 * d}, pennello);
+                pennello->SetColor({ink.r, ink.g, ink.b, ink.a * kt});
+                const std::wstring piu = testi::t(L"+1 min", L"+1 min");
+                dc->DrawText(piu.c_str(), (UINT32)piu.size(), fmtData, rp, pennello);
+                const D2D1_RECT_F& rs = tastoTesta[4];
+                const float scx = (rs.left + rs.right) / 2;
+                pennello->SetColor(D2D1::ColorF(1.0f, 0.42f, 0.32f, (tastoPremuto == 4 ? 1.0f : 0.85f) * kt * k));
+                dc->FillEllipse({{scx, cy}, 11 * d, 11 * d}, pennello);
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, kt * k));
+                dc->FillRoundedRectangle({{scx - 3.5f * d, cy - 3.5f * d, scx + 3.5f * d, cy + 3.5f * d}, 1.2f * d, 1.2f * d}, pennello);
+                dc->PopAxisAlignedClip();
+            }
+            x += kt * (44 + 6 + 26 + 4) * d;
+            rettTim = {x1 - 6 * d, r.top, x + 6 * d, r.bottom};
+        } else rettTim = {};
         dc->PopAxisAlignedClip();
+        if (t - tSveglio < 0.7 || t - tSilenzio < 0.7) anima = true;
         return anima;
     }
 
@@ -3376,11 +3540,11 @@ private:
             case WM_MOUSELEAVE:
                 if (d->trascinando) return 0;   // (con la cattura il mouse puo' uscire: il trascinamento continua)
                 d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->premuta = -1;
-                d->statoSopra = -1; d->statoPremuto = -1; d->testaPremuta = false; d->dirty = true;
+                d->statoSopra = -1; d->statoPremuto = -1; d->tastoPremuto = -1; d->dirty = true;
                 return 0;
             case WM_LBUTTONDOWN: {
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
-                if (d->inTesta(x, y)) { d->testaPremuta = true; d->ant.chiudi(); d->dirty = true; return 0; }   // musica e timer
+                if (d->inTesta(x, y)) { d->tastoPremuto = d->tastoTestaIn(x, y); if (d->tastoPremuto < 0) d->tastoPremuto = -2; d->ant.chiudi(); d->dirty = true; return 0; }   // musica e timer
                 if (d->sullIsola(x, y)) d->statoPremuto = d->statoInPunto(x, y);
                 else {
                     d->premuta = d->iconaInPunto(x, y);
@@ -3394,9 +3558,10 @@ private:
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
                 if (d->trascinando) { d->fineTrascina(); d->statoPremuto = -1; return 0; }   // (posata: niente clic)
                 if (GetCapture() == h) ReleaseCapture();
-                if (d->testaPremuta) {
-                    d->testaPremuta = false;
-                    if (d->inTesta(x, y)) d->cliccaTesta(x);
+                if (d->tastoPremuto != -1) {   // testa: il tasto premuto, se il mouse e' ancora sopra
+                    const int b = d->tastoPremuto;
+                    d->tastoPremuto = -1;
+                    if (b >= 0 && d->tastoTestaIn(x, y) == b) d->premiTastoTesta(b);
                     d->premuta = -1; d->statoPremuto = -1; d->dirty = true;
                     return 0;
                 }

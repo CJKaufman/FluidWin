@@ -4612,6 +4612,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     menu::animazioniInCorso = daDisegnare;
     menu::passoAnimazioni = unFotogramma;
     if (gLog) menu::registro = [](const char* s) { logf("%s", s); };
+    menu::cimaDock = [](HMONITOR m) { return gDockOk ? gDock.cimaSu(m) : INT_MAX; };   // (i menu lunghi restano sopra il dock)
 
     // ciclo principale: messaggi quando non c'e' niente da animare, un passo per fotogramma del compositore quando si anima
     MSG msg;

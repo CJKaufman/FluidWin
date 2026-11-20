@@ -11,7 +11,7 @@
 // l'indicatore di vetro.
 // Notch spento nelle impostazioni (1.3.0, "a scomparsa"): a riposo (ora, musica, timer) sta sopra il bordo dello schermo;
 // per volume, notifiche, avvisi, sveglia del timer e scaffale scende dall'alto e poi risale. Musica e timer li mostra il
-// dock (una capsula a sinistra), che col clic fa scendere qui il pannello aperto della musica o del timer (apri()).
+// dock (una capsula all'inizio, con i loro controlli al passaggio del mouse: comandoMusica()).
 //
 // Disegno: una finestra a strati di misura fissa (la piu' grande che serve), la forma disegnata al centro con
 // Direct2D software in un DIB tenuto da parte; ogni fotogramma e' un UpdateLayeredWindow. La trasparenza col mouse
@@ -108,7 +108,7 @@ public:
     void modo(int m) {
         if (m == modoAtt) return;
         modoAtt = m;
-        if (m != NORMALE) { sopra = false; daDock = false; attesa = 0; finisciNotifica(); }   // sopra un'app a schermo intero niente notifiche
+        if (m != NORMALE) { sopra = false; attesa = 0; finisciNotifica(); }   // sopra un'app a schermo intero niente notifiche
         visibilita();
         cliccabile(false);
         bersagli(); ridisegna();
@@ -120,24 +120,20 @@ public:
     void abilita(bool si) {
         if (si == abilitato) return;
         abilitato = si;
-        if (si) daDock = false;
-        else if (!daDock) sopra = false;
+        if (!si) sopra = false;
         bersagli(true); ridisegna();
     }
     bool fisso() const { return abilitato; }
 
     // musica e timer per la capsula del dock (notch a scomparsa)
     const musica::Brano& musicaOra() const { return brano; }
-    // clic sulla capsula del dock: scende il pannello della musica (0) o del timer (1); un secondo clic lo richiude.
-    // Resta giu' finche' il mouse non ci passa sopra e poi esce, o 4 s se non ci arriva mai
-    void apri(int cosa) {
-        if (!visibile || modoAtt != NORMALE) return;
-        if (sopra && daDock && richiesta == cosa) { sopra = false; daDock = false; }
-        else { sopra = true; daDock = true; richiesta = cosa; entrato = false; fuori = 0; tenutoFino = adesso() + 4.0; }
-        bersagli(); anima();
+    // tasti della musica dalla capsula del dock: 0 indietro, 1 play/pausa, 2 avanti
+    void comandoMusica(int b) {
+        if (b < 0 || b > 2) return;
+        lettore.comando(b == 0 ? musica::Lettore::INDIETRO : b == 1 ? musica::Lettore::PLAY_PAUSA : musica::Lettore::AVANTI);
+        if (b == 1) brano.suona = !brano.suona;   // subito, senza aspettare la prossima lettura
+        if (visibile && !animando && salita() < 0.5) ridisegna();
     }
-    // pannello del dock aperto (per l'evidenza della capsula)
-    bool apertoDalDock(int cosa) const { return sopra && daDock && richiesta == cosa; }
 
     // volume 0..1 dai tasti; false se il notch non si vede (allora lo mostra l'indicatore di vetro)
     bool volume(float liv, bool muto) {
@@ -231,12 +227,9 @@ private:
     int attesa = 0, fuori = 0, pulsanteSopra = -1;
     bool sopraX = false, mouseDentro = false;
     ULONGLONG tCima = 0;
-    // a scomparsa: aperto dal clic sulla capsula del dock (richiesta: 0 musica, 1 timer). Finche' il mouse non ci e'
-    // entrato resta giu' fino a tenutoFino (il mouse e' ancora sul dock, in fondo allo schermo)
-    bool daDock = false, entrato = false; int richiesta = 0; double tenutoFino = 0;
-    // il mouse sopra conta: sempre col notch fisso; a scomparsa solo se l'ha aperto il dock (a riposo non c'e' niente
-    // da toccare, e passare sopra una notifica non deve lasciare aperta la musica quando la notifica finisce)
-    bool sopraVale() const { return sopra && (abilitato || daDock); }
+    // il mouse sopra conta solo col notch fisso: a scomparsa musica e timer li controlla il dock, e passare sopra una
+    // notifica non deve lasciare aperta la musica quando la notifica finisce
+    bool sopraVale() const { return sopra && abilitato; }
     static bool aRiposo(int s) { return s == ORA || s == MUSICA || s == TIMER; }
 
     std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero, fGrande}; }
@@ -254,7 +247,7 @@ private:
             SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         } else {
             KillTimer(fin, 2); vetro::fermaBattito(fin, 1); animando = false;
-            sopra = false; daDock = false; attesa = 0; cliccabile(false);
+            sopra = false; attesa = 0; cliccabile(false);
             finisciNotifica(); fineVolume = 0; fineAvviso = 0;
             ShowWindow(fin, SW_HIDE);
         }
@@ -282,12 +275,11 @@ private:
         if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
         if (trascinoSopra || t < fineScaffale) return SCAFFALE;
-        // col mouse sopra: il timer grande (+1 min e stop), lo scaffale, la musica aperta. A scomparsa li apre solo il
-        // dock, quello che ha chiesto (lo scaffale no: a riposo non c'e' un notch su cui trascinare i file)
-        const bool sv = sopraVale(), libero = abilitato || !daDock;
-        if (sv && comodita::timerAttivo() && (libero || richiesta == 1)) return TIMER_APERTO;
-        if (sv && !scaffale.empty() && abilitato) return SCAFFALE;
-        if (sv && brano.c && (libero || richiesta == 0)) return APERTO;
+        // col mouse sopra (solo col notch fisso): il timer grande (+1 min e stop), lo scaffale, la musica aperta
+        const bool sv = sopraVale();
+        if (sv && comodita::timerAttivo()) return TIMER_APERTO;
+        if (sv && !scaffale.empty()) return SCAFFALE;
+        if (sv && brano.c) return APERTO;
         if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
         return ORA;
@@ -401,13 +393,10 @@ private:
         // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
         if (!sopra) {
             attesa = dentro && !tasti ? attesa + 1 : 0;
-            if (attesa >= 6) { sopra = true; daDock = false; fuori = 0; bersagli(); }   // (aperto dal mouse, non dal dock: R20261120-141156-S1)
+            if (attesa >= 6) { sopra = true; fuori = 0; bersagli(); }
         } else {
-            if (dentro) entrato = true;
-            // aperto dal dock: il mouse e' ancora giu', sul dock; non si chiude finche' non ci arriva (o per 4 s)
-            const bool tenuto = daDock && !entrato && t < tenutoFino;
-            fuori = dentro || tenuto ? 0 : fuori + 1;
-            if (fuori >= 5) { sopra = false; daDock = false; attesa = 0; bersagli(); }
+            fuori = dentro ? 0 : fuori + 1;
+            if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
         }
         // tasto sotto il mouse (aperto) e x della notifica
         const POINT pc = {p.x - posX(), p.y - schermo.top};
@@ -478,7 +467,7 @@ private:
         if (scena == TIMER_APERTO) {   // +1 min o stop; altrove sul timer non succede niente (prima apriva le notifiche)
             const int b = tastoTimerIn(x, y);
             if (b == 0) comodita::aggiungiTimer(60000);
-            else if (b == 1) { comodita::fermaTimer(); sopra = false; daDock = false; }
+            else if (b == 1) { comodita::fermaTimer(); sopra = false; }
             bersagli(); ridisegna();
             return;
         }

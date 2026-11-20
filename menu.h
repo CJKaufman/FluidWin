@@ -20,6 +20,7 @@
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <cstdint>
 
@@ -39,6 +40,17 @@ inline void chiudi() { if (aperti > 0) chiudiTutti = true; }
 inline bool animazioni() { return animazioniInCorso && passoAnimazioni && animazioniInCorso(); }
 // registro di FluidWin (solo con --log): alla chiusura di ogni menu, quanto arrivavano in ritardo i movimenti del mouse
 inline void (*registro)(const char*) = nullptr;
+// cima del dock su quello schermo (y dello schermo; INT_MAX se li' non c'e'): il dock non riserva spazio (la zona di
+// lavoro arriva in fondo allo schermo), e un menu lungo aperto dal centro di controllo finiva in parte sotto il dock,
+// con le ultime voci non cliccabili ("Ferma il timer", "Spegni")
+inline int (*cimaDock)(HMONITOR) = nullptr;
+inline int fondoLibero(HMONITOR m, const RECT& lavoro) {
+    const int c = cimaDock ? cimaDock(m) : INT_MAX;
+    // sopra il dock non c'e' posto (schermo basso, area di lavoro ridotta): meglio un menu che copre il dock di uno alto
+    // un pixel (R20261120-145131-S3)
+    if (c < lavoro.top + 160) return lavoro.bottom;
+    return std::min<int>(lavoro.bottom, c);
+}
 
 struct Voce {
     std::wstring testo;
@@ -265,11 +277,12 @@ private:
         }
         // dentro lo schermo
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
-        hMax = (int)(mi.rcWork.bottom - mi.rcWork.top);
+        const int fondo = fondoLibero(mon, mi.rcWork);   // (sopra il dock)
+        hMax = (int)(fondo - mi.rcWork.top);
         H = std::min((int)std::ceil(hCompatto), hMax);
         int x = pt.x, y = versoAlto ? pt.y - H : pt.y;
         if (x + W > mi.rcWork.right) x = std::max((int)mi.rcWork.left, (padre ? (int)padre->sinistraFin() - W : (int)mi.rcWork.right - W));
-        if (y + H > mi.rcWork.bottom) y = mi.rcWork.bottom - H;
+        if (y + H > fondo) y = fondo - H;
         if (y < mi.rcWork.top) y = mi.rcWork.top;
         x0 = x; y0 = y;
         fin = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"FluidWin.Menu", L"", WS_POPUP,
@@ -302,7 +315,7 @@ private:
         const double e = 1 - std::pow(1 - kEsp, 3);
         const int h = std::min((int)std::ceil(hCompatto + (hPieno - hCompatto) * e), hMax);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
-        const int y = std::max((int)mi.rcWork.top, std::min(y0, (int)mi.rcWork.bottom - h));
+        const int y = std::max((int)mi.rcWork.top, std::min(y0, fondoLibero(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), mi.rcWork) - h));
         if (alfa < 255) posa(1);   // (se l'apertura non era finita, la si chiude qui)
         SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
         H = h;
