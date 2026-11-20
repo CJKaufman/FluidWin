@@ -1789,7 +1789,7 @@ private:
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
-                  A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
+                  A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_RIAVVIA, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA };
@@ -2301,6 +2301,7 @@ public:
     // apre le impostazioni di FluidWin (dal centro di controllo): da = rettangolo del vetro del pannello sullo schermo,
     // da cui le impostazioni crescono
     void (*impostazioni)(const RECT* da) = nullptr;
+    void (*riavvia)() = nullptr;
     // le impostazioni aperte dal centro di controllo si sono richiuse nel suo rettangolo: il centro ricompare li'
     void riapriControllo();
     // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
@@ -2495,9 +2496,11 @@ private:
         if (!suApp) {
             if (i >= 0 && i < (int)voci.size() && voci[i].uscente) return;
             SetForegroundWindow(icone);
-            const int s = (int)menu::mostra({menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1)},
-                                            {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            std::vector<menu::Voce> vv = {menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1)};
+            if (riavvia) vv.push_back(menu::voce(testi::t(L"Riavvia FluidWin", L"Quick restart"), 2));
+            const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
             if (s == 1 && impostazioni) impostazioni(nullptr);
+            else if (s == 2 && riavvia) riavvia();
             return;
         }
         if (voci[i].uscente) return;
