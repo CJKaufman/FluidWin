@@ -884,7 +884,9 @@ private:
     float largTesta = 0;              // larghezza dei contenuti (l'ultima, anche mentre sparisce)
     bool testaMusica = false, testaTimer = false, testaSveglio = false, testaSilenzio = false;   // cosa mostra (deciso in render)
     double tSveglio = -10, tSilenzio = -10;   // quando si sono accesi (rimbalzo e onda del segno)
-    double kMus = 0, kTim = 0;        // 0..1: musica e timer allargati coi tasti (mouse sopra)
+    double kMus = 0, kTim = 0, vkMus = 0, vkTim = 0;   // 0..1: musica e timer allargati coi tasti (mouse sopra), con le velocita' delle molle
+    double vTestaK = 0, pSv = 0, vSv = 0, pSi = 0, vSi = 0, pMu = 0, vMu = 0, pTi = 0, vTi = 0;   // presenze delle parti (molle)
+    float scTesta = 1;                // scala con la lente del dock (come le icone vicine)
     D2D1_RECT_F rettTesta{}, rettMus{}, rettTim{};   // posti per il mouse: tutta la testa, musica, timer (vuoti se non ci sono)
     D2D1_RECT_F tastoTesta[5]{};      // indietro, play/pausa, avanti, +1 min, stop
     int tastoPremuto = -1;            // tasto premuto (-2: la testa fuori dai tasti, -1: niente)
@@ -1834,6 +1836,7 @@ private:
         // la regione della finestra limita i clic al dock (con le icone ingrandite) e all'isola di stato
         float regTop = fondoT;
         for (auto& v : voci) regTop = std::min(regTop, v.rett.top);
+        if (rettTesta.right > rettTesta.left) regTop = std::min(regTop, rettTesta.top - 6 * dpi);   // (testa ingrandita con la lente)
         // l'icona trascinata e' disegnata 6 px piu' su del suo rett (che resta quello per il mouse): dentro anche lei
         // (R20261120-013029-S3)
         if (trascinando && trascinata >= 0 && trascinata < (int)voci.size()) regTop = std::min(regTop, voci[trascinata].rett.top - 6 * dpi);
@@ -1858,7 +1861,9 @@ private:
     // rimbalzo e un'onda; la musica (copertina e barrette); il timer (anello e tempo). Col mouse sopra la musica si
     // allarga con indietro / play-pausa / avanti, il timer con +1 min e stop: si controllano dal dock, senza il notch
 
-    // cosa mostra, allargamenti, larghezza, copertina e ritmo del ridisegno; true se sta ancora animando
+    // cosa mostra, presenze, allargamenti, scala con la lente, larghezza, copertina e ritmo del ridisegno; true se anima.
+    // Ogni parte (tazzina, luna, musica, timer) entra ed esce con una molla senza rimbalzo (prima la larghezza cambiava
+    // di colpo all'accendersi di un segno e il dock scattava)
     bool statoTesta(double t) {
         const musica::Brano& br = notch.musicaOra();
         if (br.c && br.suona) ultimaMusica = t;
@@ -1871,27 +1876,38 @@ private:
         if (sv && !testaSveglio) tSveglio = t;      // (comparsa: rimbalzo e onda)
         if (si && !testaSilenzio) tSilenzio = t;
         testaSveglio = sv; testaSilenzio = si;
-        bool anima = false;
-        // allargamenti col mouse sopra (o con un tasto premuto)
-        auto allarga = [&](double& k, bool voluto) { const double n = verso(k, voluto ? 1.0 : 0.0, 0.06); anima |= n != k; k = n; };
-        allarga(kMus, testaMusica && ((mouseDentro && dentro(rettMus, mouseX, mouseY)) || (tastoPremuto >= 0 && tastoPremuto <= 2)));
-        allarga(kTim, testaTimer && ((mouseDentro && dentro(rettTim, mouseX, mouseY)) || tastoPremuto == 3 || tastoPremuto == 4));
         const bool vuole = testaMusica || testaTimer || testaSveglio || testaSilenzio;
-        if (vuole) {
-            float w = 0; int parti = 0;
-            if (testaSveglio || testaSilenzio) { w += ((testaSveglio ? 1 : 0) + (testaSilenzio ? 1 : 0)) * 20 * dpi; parti++; }
-            if (testaMusica) { w += S * 0.62f + 8 * dpi + 14 * dpi + (float)kMus * (3 * 26 + 6) * dpi; parti++; }
-            if (testaTimer) {
-                std::wstring cifre = comodita::durata(comodita::timerResto());
-                for (wchar_t& c : cifre) if (c >= L'0' && c <= L'9') c = L'0';   // (larghezza fissa mentre i secondi scorrono)
-                w += 18 * dpi + 6 * dpi + larghezzaTesto(cifre, fmtOra) + (float)kTim * (44 + 6 + 26 + 4) * dpi; parti++;
-            }
-            largTesta = std::round(w + (parti - 1) * 12 * dpi + 20 * dpi);
+        bool anima = false;
+        // molla critica (niente rimbalzo), ~0,35 s: comparsa della testa e di ogni parte
+        auto entra = [&](double& p, double& v, bool voluto, double k = 120) { anima |= molla(p, v, voluto ? 1.0 : 0.0, k, 1.0, 0.002); };
+        entra(testaK, vTestaK, vuole);
+        entra(pSv, vSv, testaSveglio); entra(pSi, vSi, testaSilenzio);
+        entra(pMu, vMu, testaMusica); entra(pTi, vTi, testaTimer);
+        // allargamenti col mouse sopra (o con un tasto premuto), un poco piu' svelti
+        entra(kMus, vkMus, testaMusica && ((mouseDentro && dentro(rettMus, mouseX, mouseY)) || (tastoPremuto >= 0 && tastoPremuto <= 2)), 200);
+        entra(kTim, vkTim, testaTimer && ((mouseDentro && dentro(rettTim, mouseX, mouseY)) || tastoPremuto == 3 || tastoPremuto == 4), 200);
+        // scala con la lente del dock, come un'icona al suo posto: col mouse vicino cresce insieme alle icone
+        scTesta = 1;
+        if (lente > 0.001 && rettTesta.right > rettTesta.left && mouseDentro) {
+            const float c = (rettTesta.left + rettTesta.right) / 2, raggio = S * 2.6f;
+            const float dist = std::min(std::abs(mouseX - c) / raggio, 1.0f);
+            const float kk = (std::cos(dist * (float)M_PI) + 1) / 2;
+            scTesta = 1 + (M / S - 1) * kk * (float)lente;
         }
-        const double k = verso(testaK, vuole ? 1.0 : 0.0, 0.07);
-        anima |= k != testaK;
-        testaK = k;
-        if (testaK <= 0.001) { rettTesta = rettMus = rettTim = {}; tastoPremuto = -1; kMus = kTim = 0; }
+        // larghezza: le parti pesano quanto la loro presenza (si allargano e stringono con la molla)
+        const float d = dpi * scTesta;
+        float w = 0, prima = 0;   // prima: quanto c'e' gia' a sinistra (lo spazio di 12 px compare con la parte)
+        auto parte = [&](double p, float largo) {
+            if (p <= 0.001) return;
+            w += (float)p * largo + 12 * d * (float)p * std::min(1.0f, prima);
+            prima += (float)p;
+        };
+        w += (float)(pSv + pSi) * 20 * d;   // (tazzina e luna una accanto all'altra, senza spazio)
+        prima = std::min(1.0f, (float)(pSv + pSi));
+        parte(pMu, larghezzaMusica());
+        parte(pTi, larghezzaTimer());
+        if (w > 0) largTesta = std::round(w + 20 * d);
+        if (testaK <= 0.001 && !vuole) { rettTesta = rettMus = rettTim = {}; tastoPremuto = -1; }
         if (t - tSveglio < 0.7 || t - tSilenzio < 0.7) anima = true;   // rimbalzo e onda dei segni
         // copertina (si rifa' quando cambia il brano)
         const UINT ver = br.versione ^ (UINT)br.copertina.size();
@@ -1903,13 +1919,21 @@ private:
                                  D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &bTesta);
         }
         // barrette che ballano: ~16 fotogrammi al secondo; solo il timer: 4 (i secondi). Niente se non si vede
-        const int periodo = testaK <= 0.001 ? 0 : testaMusica && br.suona ? 60 : testaTimer ? 250 : 0;
+        const int periodo = testaK <= 0.001 ? 0 : pMu > 0.001 && br.suona ? 60 : pTi > 0.001 ? 250 : 0;
         if (periodo != periodoTesta) {
             periodoTesta = periodo;
             if (periodo) SetTimer(icone, TIMER_TESTA, periodo, nullptr); else KillTimer(icone, TIMER_TESTA);
         }
         return anima;
     }
+    // larghezze piene di musica e timer (con i tasti in proporzione all'allargamento), alla scala attuale
+    float larghezzaMusica() const { const float d = dpi * scTesta; return S * scTesta * 0.62f + 22 * d + (float)kMus * (3 * 26 + 6) * d; }
+    float cifreTimer() {   // larghezza del tempo a grandezza 1 (cifre a larghezza fissa mentre i secondi scorrono)
+        std::wstring z = comodita::durata(comodita::timerResto());
+        for (wchar_t& c : z) if (c >= L'0' && c <= L'9') c = L'0';
+        return larghezzaTesto(z, fmtOra);
+    }
+    float larghezzaTimer() { const float d = dpi * scTesta; return 24 * d + cifreTimer() * scTesta + (float)kTim * (44 + 6 + 26 + 4) * d; }
 
     static bool dentro(const D2D1_RECT_F& r, float x, float y) { return r.right > r.left && x >= r.left && x < r.right && y >= r.top && y < r.bottom; }
 
@@ -1980,18 +2004,20 @@ private:
         dc->FillRoundedRectangle({r, rr, rr}, pennello);
     }
 
-    // disegna la testa all'inizio del dock (x0: dove comincia); true se sta animando
+    // disegna la testa all'inizio del dock (x0: dove comincia), alla scala della lente (scTesta); true se sta animando.
+    // Ogni parte e' ritagliata alla sua larghezza del momento e sfuma con la sua presenza: entrando e uscendo si scopre
+    // e si copre, senza salti
     bool disegnaTestaDock(float x0, float yb, bool scuro, double t) {
         if (larghezzaTesta() <= 0) { rettTesta = rettMus = rettTim = {}; return false; }
-        const float k = (float)testaK, cw = largTesta * k, d = dpi;
-        const D2D1_RECT_F r = {x0, yb - S, x0 + cw, yb};
+        const float k = (float)std::clamp(testaK, 0.0, 1.0), cw = largTesta * k, sc = scTesta, d = dpi * sc, Ss = S * sc;
+        const D2D1_RECT_F r = {x0, yb - Ss, x0 + cw, yb};
         rettTesta = r;
         // separatore fra la testa e la prima icona
         pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * k));
         const float sx = x0 + cw + (GAP + 0.5f) * k;
         dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
         // capsula: fondo come ora e data in coda (solo col vetro trasparente), evidenza col mouse sopra
-        const float cy = (r.top + r.bottom) / 2, ph = S * 0.42f;
+        const float cy = (r.top + r.bottom) / 2, ph = Ss * 0.42f;
         const D2D1_ROUNDED_RECT capsula = {{r.left, cy - ph, r.right, cy + ph}, std::min(10 * d, ph), std::min(10 * d, ph)};
         const double e = verso(evTesta, (mouseDentro && inTesta(mouseX, mouseY)) ? 1.0 : 0.0, 0.05);
         bool anima = e != evTesta;
@@ -2011,42 +2037,47 @@ private:
         }
         // contenuti: entrano con la comparsa, tagliati alla capsula mentre si allarga
         dc->PushAxisAlignedClip(r, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-        const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f * k) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f * k);
-        float x = r.left + 10 * d;
-        bool prima = false;   // c'e' gia' una parte prima (spazio di 12 px)
+        const D2D1_COLOR_F ink0 = scuro ? D2D1::ColorF(1, 1, 1, 0.92f * k) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f * k);
+        float x = r.left + 10 * d, prima = 0;
         // segni: rimbalzo (scala con un poco di oltre) e un'onda che si allarga e sfuma, per 0,7 s dalla comparsa
         for (int i = 0; i < 2; i++) {
-            const bool acceso = i == 0 ? testaSveglio : testaSilenzio;
-            if (!acceso) continue;
+            const float p = (float)std::clamp(i == 0 ? pSv : pSi, 0.0, 1.0);
+            if (p <= 0.01f) continue;
+            const D2D1_COLOR_F ink = {ink0.r, ink0.g, ink0.b, ink0.a * p};
             const double et = t - (i == 0 ? tSveglio : tSilenzio);
-            const float cx = x + 10 * d;
+            const float cx = x + 10 * d * p;
+            float sp = 1;   // rimbalzo della comparsa
             if (et < 0.7) {
                 const float u = (float)std::clamp(et / 0.45, 0.0, 1.0), c1 = 1.70158f, c3 = c1 + 1;
-                const float sc = 0.4f + 0.6f * (1 + c3 * (u - 1) * (u - 1) * (u - 1) + c1 * (u - 1) * (u - 1));   // easeOutBack
+                sp = 0.4f + 0.6f * (1 + c3 * (u - 1) * (u - 1) * (u - 1) + c1 * (u - 1) * (u - 1));   // easeOutBack
                 const float o = (float)std::clamp(et / 0.7, 0.0, 1.0);
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.5f * (1 - o)});
                 dc->DrawEllipse({{cx, cy}, (7 + 9 * o) * d, (7 + 9 * o) * d}, pennello, 1.2f * d);
-                dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {cx, cy}));
-                segnoTesta(i == 0, cx, cy, ink);
-                dc->SetTransform(D2D1::Matrix3x2F::Identity());
-            } else segnoTesta(i == 0, cx, cy, ink);
-            x += 20 * d; prima = true;
+            }
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(sc * sp * (0.6f + 0.4f * p), sc * sp * (0.6f + 0.4f * p), {cx, cy}));
+            segnoTesta(i == 0, cx, cy, ink);   // (disegnato a grandezza 1 attorno al centro: lo scala la trasformazione)
+            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            x += 20 * d * p;
         }
-        if (testaMusica) {
-            if (prima) x += 12 * d;
-            const float x1 = x;
-            const float q = S * 0.62f;
+        prima = std::min(1.0f, (float)(pSv + pSi));
+        if (pMu > 0.001) {
+            const float p = (float)std::clamp(pMu, 0.0, 1.0);
+            x += 12 * d * p * prima;
+            const float x1 = x, largo = larghezzaMusica();
+            const D2D1_COLOR_F ink = {ink0.r, ink0.g, ink0.b, ink0.a * p};
+            dc->PushAxisAlignedClip({x1, r.top, x1 + largo * p, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            const float q = Ss * 0.62f;
             const D2D1_RECT_F rc = {x, cy - q / 2, x + q, cy + q / 2};
             ID2D1BitmapBrush* bb = nullptr;
             if (bTesta && SUCCEEDED(dc->CreateBitmapBrush(bTesta, &bb)) && bb) {
                 const D2D1_SIZE_F bs = bTesta->GetSize();
                 bb->SetTransform(D2D1::Matrix3x2F::Scale(q / bs.width, q / bs.height) * D2D1::Matrix3x2F::Translation(rc.left, rc.top));
                 bb->SetInterpolationMode(D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
-                bb->SetOpacity(k);
+                bb->SetOpacity(k * p);
                 dc->FillRoundedRectangle({rc, q * 0.22f, q * 0.22f}, bb);
                 bb->Release();
             } else {   // senza copertina: riquadro con una nota
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * k) : D2D1::ColorF(0, 0, 0, 0.10f * k));
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * k * p) : D2D1::ColorF(0, 0, 0, 0.10f * k * p));
                 dc->FillRoundedRectangle({rc, q * 0.22f, q * 0.22f}, pennello);
                 const float nx = (rc.left + rc.right) / 2, ny = cy;
                 pennello->SetColor(ink);
@@ -2065,15 +2096,14 @@ private:
                 dc->FillRoundedRectangle({{bx + i * passo, cy - hb / 2, bx + i * passo + lb, cy + hb / 2}, lb / 2, lb / 2}, pennello);
             }
             x = bx + 14 * d;
-            // tasti (col mouse sopra): indietro, play/pausa, avanti
-            const float km = (float)kMus;
-            // disegnati solo nello spazio gia' concesso (si scoprono mentre la sezione si allarga)
+            // tasti (col mouse sopra): indietro, play/pausa, avanti; disegnati solo nello spazio gia' concesso
+            const float km = (float)std::clamp(kMus, 0.0, 1.0);
             dc->PushAxisAlignedClip({x, r.top, x + km * (3 * 26 + 6) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             for (int i = 0; i < 3; i++) {
                 const float tc = x + 6 * d + (13 + 26 * i) * d;
                 tastoTesta[i] = {tc - 12 * d, cy - 12 * d, tc + 12 * d, cy + 12 * d};
                 if (km < 0.02f) continue;
-                fondoTasto(i, scuro, km * k);
+                fondoTasto(i, scuro, km * k * p);
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * km});
                 const float tr = 4.2f * d;
                 auto triangolo = [&](float ax, bool destra) {   // punta a destra o a sinistra
@@ -2100,19 +2130,23 @@ private:
                 }
             }
             dc->PopAxisAlignedClip();
-            x += km * (3 * 26 + 6) * d;
-            rettMus = {x1 - 6 * d, r.top, x + 6 * d, r.bottom};
-            prima = true;
+            dc->PopAxisAlignedClip();
+            x = x1 + largo * p;
+            rettMus = p > 0.5f ? D2D1_RECT_F{x1 - 6 * d, r.top, x + 6 * d, r.bottom} : D2D1_RECT_F{};
+            prima = std::min(1.0f, prima + p);
         } else rettMus = {};
-        if (testaTimer) {
-            if (prima) x += 12 * d;
-            const float x1 = x;
+        if (pTi > 0.001) {
+            const float p = (float)std::clamp(pTi, 0.0, 1.0);
+            x += 12 * d * p * prima;
+            const float x1 = x, largo = larghezzaTimer();
+            dc->PushAxisAlignedClip({x1, r.top, x1 + largo * p, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            const D2D1_COLOR_F ink = {ink0.r, ink0.g, ink0.b, ink0.a * p};
             // anello che si svuota e il tempo che resta, in arancio come nel notch
             const float rr = 7 * d, ax = x + rr + 2 * d;
-            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f * k) : D2D1::ColorF(0, 0, 0, 0.16f * k));
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f * k * p) : D2D1::ColorF(0, 0, 0, 0.16f * k * p));
             dc->DrawEllipse({{ax, cy}, rr, rr}, pennello, 2.2f * d);
             const float av = std::clamp((float)comodita::timerAvanzamento(), 0.0f, 1.0f);
-            pennello->SetColor(D2D1::ColorF(1.0f, 0.62f, 0.04f, k));
+            pennello->SetColor(D2D1::ColorF(1.0f, 0.62f, 0.04f, k * p));
             if (av >= 0.999f) dc->DrawEllipse({{ax, cy}, rr, rr}, pennello, 2.2f * d);
             else if (av > 0.001f) {
                 ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* sk = nullptr;
@@ -2127,34 +2161,42 @@ private:
                 if (sk) sk->Release();
                 if (g) g->Release();
             }
-            std::wstring cifre = comodita::durata(comodita::timerResto());
-            const float tw = larghezzaTesto([&] { std::wstring z = cifre; for (wchar_t& c : z) if (c >= L'0' && c <= L'9') c = L'0'; return z; }(), fmtOra);
+            // tempo che resta (scritto a grandezza 1 e scalato attorno al suo inizio)
+            const std::wstring cifre = comodita::durata(comodita::timerResto());
+            const float tw = cifreTimer();
             const float xt = ax + rr + 6 * d;
-            dc->DrawText(cifre.c_str(), (UINT32)cifre.size(), fmtOra, {xt, cy - 10 * d, xt + tw, cy + 10 * d}, pennello);
-            x = xt + tw;
-            // tasti (col mouse sopra): +1 min e stop
-            const float kt = (float)kTim;
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {xt, cy}));
+            dc->DrawText(cifre.c_str(), (UINT32)cifre.size(), fmtOra, {xt, cy - 10 * dpi, xt + tw, cy + 10 * dpi}, pennello);
+            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            x = xt + tw * sc;
+            // tasti (col mouse sopra): +1 min e stop, disegnati solo nello spazio gia' concesso
+            const float kt = (float)std::clamp(kTim, 0.0, 1.0);
             tastoTesta[3] = {x + 6 * d, cy - 11 * d, x + 50 * d, cy + 11 * d};
             tastoTesta[4] = {x + 56 * d, cy - 12 * d, x + 80 * d, cy + 12 * d};
             if (kt > 0.02f) {
-                dc->PushAxisAlignedClip({x, r.top, x + kt * (44 + 6 + 26 + 4) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);   // (come i tasti della musica)
+                dc->PushAxisAlignedClip({x, r.top, x + kt * (44 + 6 + 26 + 4) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 const D2D1_RECT_F& rp = tastoTesta[3];
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, (tastoPremuto == 3 ? 0.30f : mouseDentro && dentro(rp, mouseX, mouseY) ? 0.22f : 0.14f) * kt * k)
-                                         : D2D1::ColorF(0, 0, 0, (tastoPremuto == 3 ? 0.18f : mouseDentro && dentro(rp, mouseX, mouseY) ? 0.13f : 0.08f) * kt * k));
+                const bool sopraP = mouseDentro && dentro(rp, mouseX, mouseY);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, (tastoPremuto == 3 ? 0.30f : sopraP ? 0.22f : 0.14f) * kt * k * p)
+                                         : D2D1::ColorF(0, 0, 0, (tastoPremuto == 3 ? 0.18f : sopraP ? 0.13f : 0.08f) * kt * k * p));
                 dc->FillRoundedRectangle({rp, 11 * d, 11 * d}, pennello);
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * kt});
                 const std::wstring piu = testi::t(L"+1 min", L"+1 min");
-                dc->DrawText(piu.c_str(), (UINT32)piu.size(), fmtData, rp, pennello);
+                const float pcx = (rp.left + rp.right) / 2;
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {pcx, cy}));
+                dc->DrawText(piu.c_str(), (UINT32)piu.size(), fmtData, {pcx - 22 * dpi, cy - 11 * dpi, pcx + 22 * dpi, cy + 11 * dpi}, pennello);
+                dc->SetTransform(D2D1::Matrix3x2F::Identity());
                 const D2D1_RECT_F& rs = tastoTesta[4];
                 const float scx = (rs.left + rs.right) / 2;
-                pennello->SetColor(D2D1::ColorF(1.0f, 0.42f, 0.32f, (tastoPremuto == 4 ? 1.0f : 0.85f) * kt * k));
+                pennello->SetColor(D2D1::ColorF(1.0f, 0.42f, 0.32f, (tastoPremuto == 4 ? 1.0f : 0.85f) * kt * k * p));
                 dc->FillEllipse({{scx, cy}, 11 * d, 11 * d}, pennello);
-                pennello->SetColor(D2D1::ColorF(1, 1, 1, kt * k));
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, kt * k * p));
                 dc->FillRoundedRectangle({{scx - 3.5f * d, cy - 3.5f * d, scx + 3.5f * d, cy + 3.5f * d}, 1.2f * d, 1.2f * d}, pennello);
                 dc->PopAxisAlignedClip();
             }
-            x += kt * (44 + 6 + 26 + 4) * d;
-            rettTim = {x1 - 6 * d, r.top, x + 6 * d, r.bottom};
+            dc->PopAxisAlignedClip();
+            x = x1 + largo * p;
+            rettTim = p > 0.5f ? D2D1_RECT_F{x1 - 6 * d, r.top, x + 6 * d, r.bottom} : D2D1_RECT_F{};
         } else rettTim = {};
         dc->PopAxisAlignedClip();
         if (t - tSveglio < 0.7 || t - tSilenzio < 0.7) anima = true;
