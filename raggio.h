@@ -3,6 +3,8 @@
 // dalle sue impostazioni, cosi' dock, menu, capsula, gelatina e genio hanno la stessa forma delle finestre vere.
 #pragma once
 #include <windows.h>
+#include <dwmapi.h>
+#include <vector>
 
 namespace raggio {
 
@@ -20,7 +22,42 @@ inline int windhawk() {
     return v;
 }
 
-// angoli delle finestre "di vetro" di FluidWin (dock, isola, menu, pannelli): quelli di DWM
-inline int vetro() { const int w = windhawk(); return w > 0 ? w : 8; }
+// Impostazione "Angoli" (1.3.0, Fase 3): 0 arrotondati (quelli di Windows, o della mod), 1 poco arrotondati (la meta',
+// come gli angoli piccoli di DWM), 2 squadrati. Vale per dock, notch, pannelli, menu e finestre di FluidWin; le finestre
+// delle app restano come le fa Windows
+inline int& stile() { static int s = 0; return s; }
+inline float fattore() { return stile() == 0 ? 1.0f : stile() == 1 ? 0.5f : 0.0f; }
+
+// angoli delle finestre "di vetro" di FluidWin (dock, isola, menu, pannelli): quelli di DWM, secondo l'impostazione
+inline int vetro() {
+    const int w = windhawk(), base = w > 0 ? w : 8;
+    return stile() == 0 ? base : stile() == 1 ? (base + 1) / 2 : 0;
+}
+
+// preferenza di DWM per gli angoli del vetro (DWMWA_WINDOW_CORNER_PREFERENCE): 2 tondi, 3 piccoli, 1 squadrati
+inline int preferenzaDwm() { return stile() == 0 ? 2 : stile() == 1 ? 3 : 1; }
+
+// Finestre di vetro che seguono l'impostazione (le altre, come la panoramica a schermo intero, hanno angoli loro):
+// cambiandola si riapplica la preferenza a quelle ancora aperte
+// Ogni finestra registrata porta il segno PROP_ANGOLI, che sparisce con lei: un HWND riusato da Windows per un'altra
+// finestra non ce l'ha, e si toglie dall'elenco invece di cambiarle gli angoli (R20261120-153844-S1)
+inline const wchar_t* PROP_ANGOLI = L"FluidWin.Angoli";
+inline std::vector<HWND>& registrate() { static std::vector<HWND> v; return v; }
+inline void registra(HWND h) {
+    if (!h) return;
+    SetPropW(h, PROP_ANGOLI, (HANDLE)1);
+    bool gia = false;
+    for (HWND x : registrate()) if (x == h) gia = true;
+    if (!gia) registrate().push_back(h);
+    int p = preferenzaDwm(); DwmSetWindowAttribute(h, DWMWA_WINDOW_CORNER_PREFERENCE, &p, sizeof(p));   // (sempre, anche gia' in elenco)
+}
+inline void riapplica() {
+    auto& v = registrate();
+    for (size_t i = 0; i < v.size();) {
+        if (!IsWindow(v[i]) || !GetPropW(v[i], PROP_ANGOLI)) { v[i] = v.back(); v.pop_back(); continue; }
+        int p = preferenzaDwm(); DwmSetWindowAttribute(v[i], DWMWA_WINDOW_CORNER_PREFERENCE, &p, sizeof(p));
+        i++;
+    }
+}
 
 }  // namespace raggio

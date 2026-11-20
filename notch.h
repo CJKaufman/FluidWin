@@ -124,6 +124,7 @@ public:
         bersagli(true); ridisegna();
     }
     bool fisso() const { return abilitato; }
+    void aggiornaAngoli() { ridisegna(); }   // impostazione "Angoli" cambiata (vedi ridisegna)
 
     // musica e timer per la capsula del dock (notch a scomparsa)
     const musica::Brano& musicaOra() const { return brano; }
@@ -607,7 +608,9 @@ private:
         rt->Clear(D2D1::ColorF(0, 0, 0, 0));
         const float f = std::round(6 * dpi);   // raccordo con il bordo in alto
         const float w = (float)std::max(2.0, mw.x), h = (float)std::max((double)f + 2, mh.x);
-        const float R = std::clamp((float)mr.x, 0.0f, std::min(w / 2, h - f));
+        // impostazione "Angoli": raccordi e angoli in basso in proporzione (squadrati: un rettangolo attaccato al bordo)
+        const float k = raggio::fattore(), fr = f * k;
+        const float R = std::clamp((float)mr.x, 0.0f, std::min(w / 2, h - f)) * k;
         const float x0 = (W2 - w) / 2, x1 = x0 + w;
         // a scomparsa: forma e contenuti salgono insieme sopra il bordo (tutto sopra: niente da disegnare)
         const float su = (float)salita();
@@ -616,14 +619,15 @@ private:
         rt->SetTransform(base);
         ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
         if (tutta && f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
-            s->BeginFigure({x0 - f, 0}, D2D1_FIGURE_BEGIN_FILLED);
-            s->AddArc({{x0, f}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
+            // (archi solo se hanno una misura: a raggio zero un lato dritto fino all'angolo)
+            s->BeginFigure({x0 - fr, 0}, D2D1_FIGURE_BEGIN_FILLED);
+            if (fr >= 0.5f) s->AddArc({{x0, fr}, {fr, fr}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
             s->AddLine({x0, h - R});
-            s->AddArc({{x0 + R, h}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+            if (R >= 0.5f) s->AddArc({{x0 + R, h}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
             s->AddLine({x1 - R, h});
-            s->AddArc({{x1, h - R}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
-            s->AddLine({x1, f});
-            s->AddArc({{x1 + f, 0}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});   // raccordo a destra
+            if (R >= 0.5f) s->AddArc({{x1, h - R}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+            s->AddLine({x1, fr});
+            if (fr >= 0.5f) s->AddArc({{x1 + fr, 0}, {fr, fr}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});   // raccordo a destra
             s->EndFigure(D2D1_FIGURE_END_CLOSED);
             s->Close(); s->Release();
             colore(0, 0, 0, 1);

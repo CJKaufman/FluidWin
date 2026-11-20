@@ -3860,7 +3860,7 @@ static std::wstring diagnostica() {
     const sensori::Sensori& se = sensori::Sensori::io();
     if (se.batteria >= 0) riga(L"Batteria: %d%%%ls", se.batteria, se.inCarica ? L", in carica" : L""); else riga(L"Batteria: nessuna (PC fisso)");
     riga(L"Dock: %d, genio: %d, effetti di animazione di Windows: %d, tema scuro: %d", (int)gDockOk, (int)gGenioOk, (int)gMovimento, (int)vetro::temaScuro());
-    riga(L"Angoli: Windhawk %d px", raggio::windhawk());
+    riga(L"Angoli: impostazione %d (0 tondi, 1 poco, 2 squadrati), Windhawk %d px", raggio::stile(), raggio::windhawk());
     riga(L"Giochi riconosciuti: %zu", giochiNoti().size());
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
@@ -3892,7 +3892,6 @@ static bool copiaDiagnostica() {
 
 // dalMouse: aperte da un menu (crescono dal punto del clic); senza, dal centro dello schermo (ricerca)
 static void apriImpostazioni(bool dalMouse = false) {
-    gImpostazioni.raggioWindhawk = raggio::windhawk();
     gImpostazioni.apri(nullptr, dalMouse);
 }
 
@@ -3906,6 +3905,13 @@ static void applicaImpostazioni() {
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
     if (gDockOk) { gDock.impostaNotch(v.notch); gDock.impostaOraNelDock(v.oraDock); }
+    // angoli di FluidWin (raggio.h): le finestre di vetro aperte cambiano subito, le altre nascono gia' cosi'
+    if (raggio::stile() != v.angoli) {
+        raggio::stile() = v.angoli;
+        raggio::riapplica();
+        if (gDockOk) gDock.impostaAngoli();
+        logf("angoli: %s", v.angoli == 0 ? "arrotondati" : v.angoli == 1 ? "poco arrotondati" : "squadrati");
+    }
     if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
     aggiornaTransizioni();
@@ -4559,7 +4565,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // (senza rettangolo: dal menu del dock, crescono dal punto del clic)
     gDock.esci = [] { logf("esci dal menu del dock"); PostQuitMessage(0); };
     gImpostazioni.esci = [] { logf("esci dalle impostazioni"); PostQuitMessage(0); };
-    gDock.impostazioni = [](const RECT* da) { gImpostazioni.raggioWindhawk = raggio::windhawk(); gImpostazioni.apri(da, da == nullptr); };
+    gDock.impostazioni = [](const RECT* da) { gImpostazioni.apri(da, da == nullptr); };
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };

@@ -20,6 +20,7 @@ struct Valori {
     bool gelatina = true;         // finestre "di gelatina" quando si trascinano
     bool genio = true;            // riduzione e ripristino animati (con il genio o con la caduta, vedi riduzione)
     int riduzione = 0;            // 0 genio (la finestra si deforma), 1 caduta nel dock (riquadro che cade dietro le icone)
+    int angoli = 0;               // angoli di dock, notch, pannelli e finestre di FluidWin: 0 arrotondati, 1 poco, 2 squadrati (raggio.h)
     bool chiusura = true;         // finestre che si rimpiccioliscono e svaniscono quando si chiudono
     bool apertura = true;         // finestre aperte fuori dal dock (Start, ricerca...) che crescono dal centro
     bool onda = true;             // onda di luce multicolore sui bordi dello schermo quando si apre la ricerca
@@ -117,6 +118,7 @@ inline void carica() {
     v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.riduzione = leggiDword(L"Riduzione", 0) == 1 ? 1 : 0;
+    { const DWORD a = leggiDword(L"Angoli", 0); v.angoli = a <= 2 ? (int)a : 0; }
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
@@ -142,7 +144,7 @@ inline void carica() {
 inline void salva() {
     const Valori& v = valori();
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
-    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda); scriviDword(L"Riduzione", (DWORD)v.riduzione);
+    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda); scriviDword(L"Riduzione", (DWORD)v.riduzione); scriviDword(L"Angoli", (DWORD)v.angoli);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
@@ -159,7 +161,6 @@ inline void salva() {
 class Finestra {
 public:
     std::function<void()> cambiato;   // dopo ogni cambio (gia' salvato)
-    int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
     std::function<bool()> copiaDiagnostica;   // mette negli appunti la diagnostica (fluidwin.cpp); true se riuscito
     std::function<void()> esci;               // "Esci da FluidWin": l'uscita normale, che rimette Windows com'era (#16)
@@ -679,6 +680,7 @@ private:
         }
         if (id >= 300 && id < 300 + SEZIONI) { vaiASezione(id - 300); return; }
         if (id == 120 || id == 121) valori().riduzione = id - 120;   // stile della riduzione a icona (1.3.0)
+        else if (id >= 130 && id <= 132) valori().angoli = id - 130;   // angoli (1.3.0, Fase 3)
         else if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
@@ -919,9 +921,28 @@ private:
                 v.testo(nomi[i], fCentro, r, inkS);
             }
             y += 70 * d;
-            riga(testi::t(L"Angoli delle finestre", L"Window corners"), raggioWindhawk > 0
-                ? std::wstring(testi::t(L"Arrotondati a ", L"Rounded to ")) + std::to_wstring(raggioWindhawk) + testi::t(L" px dalla mod di Windhawk", L" px by the Windhawk mod")
-                : std::wstring(testi::t(L"Quelli di Windows (piu' tondi con la mod di Windhawk)", L"The Windows ones (rounder with the Windhawk mod)")));
+            {   // angoli (1.3.0, Fase 3): dock, notch, pannelli, menu e finestre di FluidWin; tre scelte
+                const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
+                riquadro(ra, false);
+                v.testo(testi::t(L"Angoli", L"Corners"), fVoce, {ra.left + 16 * d, ra.top, ra.left + 160 * d, ra.bottom}, inkS);
+                const float x0 = ra.left + 170 * d, larg = ra.right - 16 * d - x0, h = 34 * d, yl = ra.top + 15 * d;
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const wchar_t* nomi[3] = {testi::t(L"Arrotondati", L"Rounded"), testi::t(L"Poco arrotondati", L"Slightly rounded"), testi::t(L"Squadrati", L"Square")};
+                for (int i = 0; i < 3; i++) {
+                    const D2D1_RECT_F r = {x0 + larg * i / 3 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 3 - 3 * d, yl + h - 3 * d};
+                    zone.push_back({r, 130 + i});
+                    if (valori().angoli == i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == 130 + i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[i], fCentro, r, inkS);
+                }
+                y += 70 * d;
+            }
             riga(L"FluidWin" + (ver.empty() ? std::wstring() : L" " + ver), testi::t(L"Windows reimmaginato · github.com/clooudfn/FluidWin", L"Windows reimagined · github.com/clooudfn/FluidWin"));
             // diagnostica: versione, Windows, schermi, scheda video, impostazioni (niente dati personali), per chi
             // segnala un problema; il pulsante "Copia" a destra

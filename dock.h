@@ -676,6 +676,8 @@ public:
 
     // impostazioni: notch acceso o spento, e ora e data in fondo al dock, dopo il centro di controllo
     void impostaNotch(bool si) { notch.abilita(si); dirty = true; }   // (spento: musica e timer nella testa del dock)
+    // impostazione "Angoli": raggio del fondo (il vetro lo cambia raggio::riapplica), notch e capsule
+    void impostaAngoli() { RAGGIO = raggio::vetro() * dpi; notch.aggiornaAngoli(); dirty = true; }
     void impostaOraNelDock(bool si) {
         if (si == oraNelDock) return;
         oraNelDock = si;
@@ -997,7 +999,7 @@ private:
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(v, &mg);
         BOOL scuro = temaScuro(); DwmSetWindowAttribute(v, DWMWA_USE_IMMERSIVE_DARK_MODE, &scuro, sizeof(scuro));
         int tipo = 3; DwmSetWindowAttribute(v, DWMWA_SYSTEMBACKDROP_TYPE, &tipo, sizeof(tipo));
-        int angoli = 2; DwmSetWindowAttribute(v, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
+        raggio::registra(v);   // angoli: quelli dell'impostazione "Angoli" (anche cambiandola dopo)
         BOOL niente = TRUE; DwmSetWindowAttribute(v, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         return v;
     }
@@ -1761,7 +1763,7 @@ private:
             const float h2 = 17 * dpi;                           // altezza di una riga (a grandezza piena)
             // capsula attorno al testo: la stessa per il fondo e per l'evidenza del mouse
             const float pw = (larghezzaOra / 2 + 8 * dpi) * k * s, ph = (h2 + 3 * dpi) * k * s;
-            const D2D1_ROUNDED_RECT capsula = {{cx - pw, cy - ph, cx + pw, cy + ph}, std::min(9 * dpi, ph), std::min(9 * dpi, ph)};
+            const D2D1_ROUNDED_RECT capsula = {{cx - pw, cy - ph, cx + pw, cy + ph}, std::min(9 * dpi, ph) * raggio::fattore(), std::min(9 * dpi, ph) * raggio::fattore()};
             // fondo: compare solo quanto il vetro del dock e' trasparente (opacita' nelle impostazioni), cosi' l'ora si legge
             // anche sopra una finestra chiara; col vetro pieno non c'e'. Lo dice la trasparenza della finestra del vetro
             {
@@ -2021,7 +2023,7 @@ private:
         dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
         // capsula: fondo come ora e data in coda (solo col vetro trasparente), evidenza col mouse sopra
         const float cy = (r.top + r.bottom) / 2, ph = Ss * 0.42f;
-        const D2D1_ROUNDED_RECT capsula = {{r.left, cy - ph, r.right, cy + ph}, std::min(10 * d, ph), std::min(10 * d, ph)};
+        const D2D1_ROUNDED_RECT capsula = {{r.left, cy - ph, r.right, cy + ph}, std::min(10 * d, ph) * raggio::fattore(), std::min(10 * d, ph) * raggio::fattore()};
         const double e = verso(evTesta, (mouseDentro && inTesta(mouseX, mouseY)) ? 1.0 : 0.0, 0.05);
         bool anima = e != evTesta;
         evTesta = e;
@@ -2214,7 +2216,7 @@ private:
                                  : scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
         dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
-        dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
+        dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, std::max(0.0f, RAGGIO - 0.5f), std::max(0.0f, RAGGIO - 0.5f)}, pennello, 1.0f);
         pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.45f : 0.10f) * a));
         dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
     }
@@ -2230,9 +2232,9 @@ private:
         D2D1_RECT_F rr = {cx - lw / 2, top, cx + lw / 2, top + lh};
         rettEtichetta = rr;
         pennello->SetColor(scuro ? D2D1::ColorF(0.18f, 0.18f, 0.2f, 0.92f * a) : D2D1::ColorF(0.96f, 0.96f, 0.97f, 0.95f * a));
-        dc->FillRoundedRectangle({rr, 7 * dpi, 7 * dpi}, pennello);
+        dc->FillRoundedRectangle({rr, 7 * dpi * raggio::fattore(), 7 * dpi * raggio::fattore()}, pennello);
         pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.15f * a));
-        dc->DrawRoundedRectangle({rr, 7 * dpi, 7 * dpi}, pennello, 1.0f);
+        dc->DrawRoundedRectangle({rr, 7 * dpi * raggio::fattore(), 7 * dpi * raggio::fattore()}, pennello, 1.0f);
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, a) : D2D1::ColorF(0.1f, 0.1f, 0.1f, a));
         lay->SetMaxWidth(lw); lay->SetMaxHeight(lh);
         dc->DrawTextLayout({rr.left, rr.top}, lay, pennello);
@@ -2280,7 +2282,7 @@ private:
             if (e > 0.01) {
                 const float hw = (r.right - r.left) / 2 * s, hh = (r.bottom - r.top) / 2 * s;
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
-                dc->FillRoundedRectangle({{cx - hw, cy - hh, cx + hw, cy + hh}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
+                dc->FillRoundedRectangle({{cx - hw, cy - hh, cx + hw, cy + hh}, std::max(0.0f, RAGGIO - 2 * dpi), std::max(0.0f, RAGGIO - 2 * dpi)}, pennello);
             }
             dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {cx, cy}));
             pennello->SetColor(inchiostro);

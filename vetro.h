@@ -98,7 +98,8 @@ public:
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(fin, &mg);
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &sc, sizeof(sc));
         int tipo = acrilico ? 3 : 1; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
-        DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
+        if (angoli == 2) raggio::registra(fin);   // angoli normali: quelli dell'impostazione "Angoli" (anche cambiandola dopo)
+        else DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         // fabbriche condivise da tutte le finestre di vetro (e dai menu): con una fabbrica Direct2D a testa ognuna si
         // creava il suo motore grafico, ~20 thread del driver video in piu' per finestra aperta almeno una volta
