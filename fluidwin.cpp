@@ -136,6 +136,7 @@ struct Anim {
     int        fotogrammiGenio = 0;  // la miniatura resta sotto i primi fotogrammi del genio, finche' e' sicuramente a schermo
     double     pGenio = 0;           // punto raggiunto dal genio (0 finestra, 1 icona): un nuovo clic lo inverte da qui
     bool       sobbalzo = false;     // caduta nel dock: il riquadro ha gia' toccato le icone (sobbalzo dato, una volta)
+    bool       scartaClic = false;   // doppio clic sulla barra, ripristino comandato da FluidWin: i trattenuti non ripartono
     std::vector<genio::Vertice> magliaC;   // caduta nel dock: il riquadro (2x2 vertici), tagliato dove entra dietro le icone
     bool       cresce = false;       // apertura fuori dal dock: la foto cresce dal centro della finestra (senza icona)
     RECT       fin{};                // Pronta: GetWindowRect alla pressione (se cambia, la finestra si e' mossa davvero)
@@ -208,6 +209,7 @@ static Trattenuto gTrCoda[GTR_MAX]; static int gTrN = 0;   // eventi trattenuti,
 static int gTrInVolo = 0;                              // rimandati e non ancora passati dal gancio
 static ULONGLONG gTrDa = 0, gTrVoloDa = 0;             // quando e' stato trattenuto il primo / rimandato l'ultimo
 static HWND gTrAttesa = nullptr;                       // preparazione in corso: i rilasci sinistri si trattengono
+static bool gTrIngoiaSu = false;                       // scartata una pressione senza il suo rilascio: il prossimo rilascio vero non passa
 // doppio clic armato: una pressione dentro gTrFascia entro gTrFino (e vicina a gTrPunto) si trattiene
 static RECT gTrFascia{}; static ULONGLONG gTrFino = 0; static POINT gTrPunto{}; static HWND gTrDoppioH = nullptr;
 static const int GTR_INPUT = GTR_MAX + 2;               // gli eventi, piu' l'ultimo movimento ed eventualmente quello nuovo
@@ -221,6 +223,7 @@ static bool gTrMossa = false; static POINT gTrUltimo{};
 static DWORD gThreadMouse = 0;
 static HANDLE gThreadMouseH = nullptr;   // all'uscita si aspetta che abbia rimandato e tolto il gancio (resto di S5)
 static const UINT WM_TR_RIMANDA = WM_APP + 42;
+static const UINT WM_TR_SCARTA = WM_APP + 43;   // come WM_TR_RIMANDA, ma senza la seconda pressione e il suo rilascio (wParam: finestra)
 
 // (con gTrLock preso) toglie dalla coda gli eventi da rimandare (in[] di GTR_INPUT); li manda chi chiama, fuori dal
 // lucchetto. Ogni evento torna nel punto e con l'ora in cui era stato premuto o rilasciato davvero: il cursore intanto
@@ -267,6 +270,22 @@ static void rimandaTrattenuti(HWND h) {
     if (gThreadMouse) PostThreadMessageW(gThreadMouse, WM_TR_RIMANDA, 0, 0);
     if (n) logf("clic trattenuti: via libera (%d)", n);
 }
+
+// Come rimandaTrattenuti, ma i clic trattenuti non ripartono: solo il movimento rimasto in coda (il cursore deve
+// arrivare dov'e' il mouse). Per il doppio clic sulla barra di un'ingrandita, quando il ripristino lo comanda FluidWin
+// (Snap di Windows spento): rimandata, la seconda pressione cadeva dove la finestra non c'era piu' (era gia' tornata
+// piccola) e portava in primo piano la finestra che stava sotto (provato: "clic trattenuti: via libera" e 15 ms dopo
+// il primo piano passato allo sfondo di prova). Il sistema non vede ne' quella pressione ne' il suo rilascio.
+// Lo scarto lo fa il thread del gancio (WM_TR_SCARTA), nello stesso lucchetto in cui toglie l'attesa e rimanda il
+// resto: solo la pressione e il suo rilascio, non i clic fatti dopo (R20261120-031636-S1), e nessun istante in cui un
+// movimento nuovo passi davanti a quello vecchio ancora in coda (S2)
+static void scartaTrattenuti(HWND h) {
+    if (gThreadMouse) PostThreadMessageW(gThreadMouse, WM_TR_SCARTA, (WPARAM)h, 0);
+    else rimandaTrattenuti(h);   // (senza gancio non c'e' niente di trattenuto)
+    logf("clic trattenuti: si scarta la seconda pressione (il comando lo ha dato FluidWin)");
+}
+
+static void liberaTrattenuti(const Anim& a) { if (a.scartaClic) scartaTrattenuti(a.hwnd); else rimandaTrattenuti(a.hwnd); }
 
 static void attendiRilascio(HWND h) { AcquireSRWLockExclusive(&gTrLock); gTrAttesa = h; ReleaseSRWLockExclusive(&gTrLock); }
 static void armaDoppioClic(HWND h, const RECT& fascia, POINT pt, UINT ms) {
@@ -988,7 +1007,7 @@ static void annullaAnimDi(HWND h) {
             // (una preparazione non ancora coperta non ha toccato la finestra: magari e' la gelatina a tenerla nascosta)
             if (it->zoom) { if (IsWindow(h) && !(it->zoomAtteso && it->attesa < 3)) rendiVisibileFinestra(h); liberaFotoZoom(*it); }
             // preparazione: i clic trattenuti per lei ripartono, il doppio clic armato su di lei si spegne
-            if (it->zoomAtteso) { rimandaTrattenuti(h); if (gDoppioH == h) { gDoppioH = nullptr; disarmaDoppioClic(); } if (IsWindow(h)) daiComando(*it); }
+            if (it->zoomAtteso) { liberaTrattenuti(*it); if (gDoppioH == h) { gDoppioH = nullptr; disarmaDoppioClic(); } if (IsWindow(h)) daiComando(*it); }
             chiudiMiniatura(*it); it = gAnim.erase(it);
         } else ++it;
     }
@@ -2283,7 +2302,7 @@ static void passo(double t) {
                 logf("ingrandimento preparato annullato %p: %s", a.hwnd, perche);
                 if (a.attesa == 3) rendiVisibileFinestra(a.hwnd);   // opaca subito: la foto sparisce al passo dopo
                 a.chiudi = true;
-                rimandaTrattenuti(a.hwnd);
+                liberaTrattenuti(a);
                 daiComando(a);   // (Win+frecce: il comando arriva comunque, senza animazione)
                 if (gDoppioH == a.hwnd) { gDoppioH = nullptr; disarmaDoppioClic(); }
             };
@@ -2339,7 +2358,7 @@ static void passo(double t) {
                         alfaFinestra(a.hwnd, ALFA_INVISIBILE);
                         a.attesa = 3; a.tCoperta = t;
                         logf("ingrandimento preparato %p: coperta dopo %.0f ms", a.hwnd, (ora() - a.t0) * 1000);
-                        rimandaTrattenuti(a.hwnd);
+                        liberaTrattenuti(a);
                         if (a.comando) { daiComando(a); a.fase = 1; a.tFase = t; }   // (come un tasto rilasciato adesso)
                     } else { annulla("trasparenza rifiutata"); }
                 }
@@ -2771,7 +2790,9 @@ static void suSinistro(WPARAM w, POINT pt) {
             // con lo Snap di Windows spento il doppio clic sulla barra di un'ingrandita non la ripristina piu' (provato:
             // SPI_SETWINARRANGING a 0 resta ingrandita, a 1 si ripristina): il comando lo da' FluidWin, a copertura
             // pronta. (Se l'app la ripristina da se', SC_RESTORE su una finestra normale non fa niente)
-            if (gAffAttivo && IsZoomed(a->hwnd)) comandoPreparato(*a, SC_RESTORE, RECT{});
+            // La seconda pressione trattenuta allora non si rimanda: il ripristino lo fa il comando, e rimandata
+            // cadrebbe su quello che sta sotto la finestra gia' tornata piccola (vedi scartaTrattenuti)
+            if (gAffAttivo && IsZoomed(a->hwnd)) { a->scartaClic = true; comandoPreparato(*a, SC_RESTORE, RECT{}); }
         }
         else rimandaTrattenuti(nullptr);
         PostMessageW(gMessaggi, WM_NULL, 0, 0);
@@ -2932,7 +2953,7 @@ static void suRiduci(HWND h) {
         liberaFotoClic();
         gFotoClic.foto = a->fotoPrima; a->fotoPrima = {};
         gFotoClic.h = h; gFotoClic.vis = a->da; gFotoClic.t = ora();
-        rimandaTrattenuti(h);
+        liberaTrattenuti(*a);
         if (gDoppioH == h) { gDoppioH = nullptr; disarmaDoppioClic(); }
         for (auto it = gAnim.begin(); it != gAnim.end(); ++it) if (&*it == a) { liberaFotoZoom(*it); chiudiMiniatura(*it); gAnim.erase(it); break; }
         a = nullptr;
@@ -3385,7 +3406,13 @@ static LRESULT CALLBACK suMouse(int code, WPARAM w, LPARAM l) {
             // uno dei nostri rimandati: passa. Quando sono passati tutti, quelli arrivati intanto ripartono dietro
             if (gTrInVolo > 0) gTrInVolo--;
             if (gTrInVolo == 0 && (gTrN > 0 || gTrMossa) && !gTrAttesa) n = prendiCodaTr(in);
+        } else if (!giu && gTrIngoiaSu) {
+            // rilascio della seconda pressione scartata (vedi WM_TR_SCARTA): non passa, come la sua pressione
+            gTrIngoiaSu = false;
+            ReleaseSRWLockExclusive(&gTrLock);
+            return 1;
         } else {
+            if (giu) gTrIngoiaSu = false;   // (una pressione nuova: quel rilascio non puo' piu' arrivare)
             const ULONGLONG ora = GetTickCount64();
             // FluidWin bloccato o tasti scambiati: niente piu' attese del thread principale (l'ordine resta)
             const bool vivo = uiViva() && !GetSystemMetrics(SM_SWAPBUTTON);
@@ -3451,6 +3478,28 @@ static DWORD WINAPI threadMouse(LPVOID) {
     const UINT_PTR timerGancio = SetTimer(nullptr, 0, 15000, nullptr);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_TR_SCARTA) {
+            // doppio clic con il ripristino comandato da FluidWin: via l'attesa, via la seconda pressione (la prima
+            // pressione in coda) e il primo rilascio dopo di lei; se il rilascio non e' ancora arrivato, il gancio
+            // ingoia il prossimo rilascio vero. Il resto (clic fatti dopo, movimento) riparte in ordine
+            INPUT in[GTR_INPUT]; int n = 0;
+            AcquireSRWLockExclusive(&gTrLock);
+            if (!m.wParam || gTrAttesa == (HWND)m.wParam) gTrAttesa = nullptr;
+            int k = 0;
+            while (k < gTrN && gTrCoda[k].flag != MOUSEEVENTF_LEFTDOWN) k++;
+            if (k < gTrN) {
+                for (int i = k; i + 1 < gTrN; i++) gTrCoda[i] = gTrCoda[i + 1];
+                gTrN--;
+                int s = k;
+                while (s < gTrN && gTrCoda[s].flag != MOUSEEVENTF_LEFTUP) s++;
+                if (s < gTrN) { for (int i = s; i + 1 < gTrN; i++) gTrCoda[i] = gTrCoda[i + 1]; gTrN--; }
+                else gTrIngoiaSu = true;
+            }
+            if (!gTrAttesa && gTrInVolo == 0 && (gTrN > 0 || gTrMossa)) n = prendiCodaTr(in);
+            ReleaseSRWLockExclusive(&gTrLock);
+            if (n) { const UINT messi = SendInput((UINT)n, in, sizeof(INPUT)); if (messi != (UINT)n) PostMessageW(gMessaggi, WM_SINISTRO, 8, (LPARAM)messi); }
+            continue;
+        }
         if (m.message == WM_TR_RIMANDA) {
             // il thread principale ha tolto l'attesa: quello che e' in coda riparte da qui (se niente e' in volo; se no
             // ripartira' quando i rimandati ripassano dal gancio)
