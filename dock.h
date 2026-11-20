@@ -1930,16 +1930,6 @@ private:
             piano();
         }
 
-        // microfono e webcam in uso col notch spento (col notch acceso stanno dentro il notch): due pallini piccoli
-        // nell'angolo del fondo verso la fine del dock, dal lato interno; si vedono senza dare fastidio
-        if (!notch.fisso()) {
-            const sensori::Sensori& se = sensori::Sensori::io();
-            float px = fondoR - std::max(14 * dpi, RAGGIO);
-            const float py = fondoT + 5 * dpi;
-            if (!se.camApp.empty()) { pennello->SetColor(D2D1::ColorF(0.2f, 0.84f, 0.29f, 1)); dc->FillEllipse({{px, py}, 1.8f * dpi, 1.8f * dpi}, pennello); px -= 6 * dpi; }
-            if (!se.micApp.empty()) { pennello->SetColor(D2D1::ColorF(1.0f, 0.62f, 0.04f, 1)); dc->FillEllipse({{px, py}, 1.8f * dpi, 1.8f * dpi}, pennello); }
-        }
-
         // testa del dock (musica e timer, notch a scomparsa): all'inizio, prima della prima icona
         movimento |= disegnaTestaDock(sinistra, yb, scuro, t);
 
@@ -2594,8 +2584,6 @@ private:
     // ora, volume e rete; ogni 500 ms (rete ogni 2 s). Ridisegna solo se qualcosa e' cambiato
     void aggiornaStato(bool tutto) {
         bool cambiato = false;
-        // (microfono e webcam: i pallini piccoli col notch spento)
-        if (sensori::Sensori::io().versione != versioneSensoriDock) { versioneSensoriDock = sensori::Sensori::io().versione; dirty = true; }
         SYSTEMTIME st; GetLocalTime(&st);
         wchar_t b[96];
         swprintf(b, 96, L"%02d:%02d", st.wHour, st.wMinute);
@@ -2944,7 +2932,6 @@ private:
     void simboloTimer(float cx, float cy);
 
     void simboloMicrofono(float cx, float cy, bool acceso);
-    UINT versioneSensoriDock = 0;   // per i pallini di microfono e webcam nel dock (vedi render)
     UINT versioneSensoriCentro = 0, versioneTempoCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
     // ---- numeri delle notifiche, cestino, pila ----
     std::unordered_map<std::wstring, int> numeriNotifiche;   // AppUserModelID (minuscolo) -> quante

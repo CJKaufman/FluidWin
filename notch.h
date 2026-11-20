@@ -288,21 +288,25 @@ private:
         if (brano.c && brano.suona) return MUSICA;
         return ORA;
     }
-
-    // Microfono e webcam in uso: pallini arancione e verde, come su iPhone. Col notch acceso stanno dentro, a destra, in
-    // uno spazio che il notch a riposo (ora, musica, timer) si tiene in piu'; prima stavano fuori, nel vuoto accanto al
-    // notch. Col notch spento li mostra il dock, piccoli (dock::Motore::puntiSensoriDock)
+    // Microfono e webcam in uso: pallini arancione e verde, come su iPhone. Solo col notch acceso: stanno dentro, a destra,
+    // in uno spazio che il notch a riposo (ora, musica, timer) si tiene in piu'. Prima stavano fuori, nel vuoto accanto al
+    // notch; col notch spento non ci sono (l'utente non li voleva nel dock)
     int nPunti() const {
         if (!abilitato) return 0;
         const sensori::Sensori& se = sensori::Sensori::io();
         return (se.micApp.empty() ? 0 : 1) + (se.camApp.empty() ? 0 : 1);
     }
     float puntiW() const { const int n = nPunti(); return n ? (8.0f + 8.0f * n) * dpi : 0.0f; }
-    void puntiSensori(float h, float a) {
-        if (puntiW() <= 0) return;
+    // s: la scena. Con l'ora i pallini stanno a meta' fra la fine della data e il bordo (stesso spazio dai due lati; con
+    // la luna accesa fra lei e il bordo); con musica e timer nel loro spazio a destra
+    void puntiSensori(int s, float h, float a) {
+        const int n = nPunti();
+        if (!n) return;
         const sensori::Sensori& se = sensori::Sensori::io();
         const float d = dpi, Rv = (W2 + (float)mw.x) / 2;   // (il bordo vero, che con la molla si muove)
-        float cx = Rv - puntiW() + 8 * d;
+        float x0 = Rv - puntiW();                            // inizio dello spazio libero a destra
+        if (s == ORA) x0 = segnoSilenzio ? Rv - puntiW() - 8 * d : W2 / 2.0f + (lo + std::round(7 * d) + lg) / 2;   // (fine della data, vedi ora)
+        float cx = (x0 + Rv) / 2 - (n - 1) * 4 * d;
         if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); cx += 8 * d; }
         if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); }
     }
@@ -737,7 +741,7 @@ private:
         float L = sinistra(s); const float d = dpi;
         // musica e timer a riposo: i pallini di microfono e webcam a destra, e lo stesso spazio a sinistra (contenuto al centro)
         if (s == MUSICA || s == TIMER) { L += puntiW(); w -= 2 * puntiW(); }
-        if (s == ORA || s == MUSICA || s == TIMER) puntiSensori(h, a);
+        if (s == ORA || s == MUSICA || s == TIMER) puntiSensori(s, h, a);
         switch (s) {
             case ORA:
                 ora(L, w, h, a);
