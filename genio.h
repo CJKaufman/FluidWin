@@ -286,6 +286,24 @@ public:
         return true;
     }
 
+    // Texture di un solo colore (LATO_TINTA x LATO_TINTA), per disegnare riquadri pieni con lo stesso shader delle
+    // foto (angoli arrotondati compresi): il "chip" della riduzione a icona. r, g, b, a da 0 a 1; si salva
+    // premoltiplicata, come lo shader si aspetta
+    static const int LATO_TINTA = 64;
+    bool tinta(float r, float g, float b, float a, Immagine& out) {
+        out.libera();
+        const UINT c = ((UINT)std::lround(a * 255) << 24) | ((UINT)std::lround(r * a * 255) << 16) | ((UINT)std::lround(g * a * 255) << 8) | (UINT)std::lround(b * a * 255);
+        std::vector<UINT> px((size_t)LATO_TINTA * LATO_TINTA, c);
+        D3D11_TEXTURE2D_DESC td{}; td.Width = LATO_TINTA; td.Height = LATO_TINTA; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd{px.data(), (UINT)(LATO_TINTA * 4), 0};
+        if (FAILED(dev->CreateTexture2D(&td, &sd, &out.tex))) return false;
+        if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv))) { out.libera(); return false; }
+        out.w = out.h = LATO_TINTA;
+        return true;
+    }
+
     // Fuori dalle animazioni la finestra e' 1x1 e fuori schermo: una finestra in primo piano grande quanto lo schermo
     // farebbe credere a Windows che sia aperta un'app a schermo intero (e per esempio silenzierebbe le notifiche).
     // Resta pero' sempre "mostrata": cosi' per attivarla basta allargarla, senza il ritardo di una nuova comparsa.

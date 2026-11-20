@@ -102,6 +102,7 @@ static const double DISSOLVENZA_MINI = 0.050;  // s: la miniatura sfuma sulla fi
 static const double ATTESA_STILE     = 0.150;  // s: poi si toglie lo stile layered
 static const double DURATA_GENIO_RIDUCI     = 0.50;  // s
 static const double DURATA_GENIO_RIPRISTINA = 0.45;  // s
+static double inversaRipristino(double p);   // (piu' sotto: tempo del ripristino dal punto raggiunto, genio o caduta)
 static const int    LARGHEZZA_ICONA         = 48;    // px: la "bocca" sulla barra in cui entra il genio
 static const double DURATA_CRESCITA         = 0.45;  // s: finestra aperta fuori dal dock che cresce dal centro...
 static const double SCALA_CRESCITA          = 0.08;  // ... partendo da questa frazione della sua misura
@@ -137,7 +138,8 @@ struct Anim {
     double     pGenio = 0;           // punto raggiunto dal genio (0 finestra, 1 icona): un nuovo clic lo inverte da qui
     bool       sobbalzo = false;     // caduta nel dock: il riquadro ha gia' toccato le icone (sobbalzo dato, una volta)
     bool       scartaClic = false;   // doppio clic sulla barra, ripristino comandato da FluidWin: i trattenuti non ripartono
-    std::vector<genio::Vertice> magliaC;   // caduta nel dock: il riquadro (2x2 vertici), tagliato dove entra dietro le icone
+    // caduta nel dock: foto, tinta e bordo del chip (2x2 vertici ciascuno), tagliati dove entrano dietro le icone
+    std::vector<genio::Vertice> magliaC, magliaT, magliaB;
     bool       cresce = false;       // apertura fuori dal dock: la foto cresce dal centro della finestra (senza icona)
     RECT       fin{};                // Pronta: GetWindowRect alla pressione (se cambia, la finestra si e' mossa davvero)
     bool       zoom = false;         // ingrandimento o ripristino: la copia va dal vecchio rettangolo al nuovo, con la capsula
@@ -1071,7 +1073,7 @@ static double morbido(double x) { x = std::clamp(x, 0.0, 1.0); return x * x * (3
 static void annullaPronta(Anim& a, double t) {
     logf("clic annullato %p", a.hwnd);
     a.tipo = Tipo::Ripristina;
-    if (a.genio) { a.fase = 0; a.t0 = t - (1.0 - std::cbrt(a.pGenio)) * DURATA_GENIO_RIPRISTINA; return; }   // ripristino invertito: riprende
+    if (a.genio) { a.fase = 0; a.t0 = t - inversaRipristino(a.pGenio) * DURATA_GENIO_RIPRISTINA; return; }   // ripristino invertito: riprende
     a.fase = 1; a.tFase = t;
 }
 
@@ -1998,6 +2000,56 @@ static double inversaCurvaGenio(double p) {
     return p < 0.5 ? std::cbrt(p / 4) : 1 - std::cbrt(2 * (1 - p)) / 2;
 }
 
+// ---- tempi della "caduta nel dock" (1.3.0) ----
+// L'avanzamento p e' anche il punto del percorso, uguale nei due versi (cosi' un'inversione a meta' riparte dallo
+// stesso disegno, R20261120-132320-S1): da 0 a 0,5 il ritiro (finestra -> quadratino al punto intermedio), da 0,5 a 1
+// il volo (punto intermedio -> icona). Il tempo invece segue il modello dell'utente: riducendo il ritiro occupa il primo
+// 28% e accelera fino alla giunzione, il volo parte lanciato e frena; ripristinando il volo (all'indietro) occupa il
+// primo 28% accelerando, poi la crescita frena fino alla finestra. Le inverse servono alle inversioni (t0 da p)
+static double bezier(double x1, double y1, double x2, double y2, double x) {   // come cubic-bezier del CSS
+    if (x <= 0) return 0;
+    if (x >= 1) return 1;
+    const double cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx, cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+    auto sx = [&](double t) { return ((ax * t + bx) * t + cx) * t; };
+    double t = x;
+    for (int i = 0; i < 8; i++) {   // Newton, poi bisezione se non converge
+        const double err = sx(t) - x, d = (3 * ax * t + 2 * bx) * t + cx;
+        if (std::abs(err) < 1e-7) return ((ay * t + by) * t + cy) * t;
+        if (std::abs(d) < 1e-7) break;
+        t -= err / d;
+    }
+    double lo = 0, hi = 1; t = x;
+    for (int i = 0; i < 60; i++) { const double v = sx(t); if (std::abs(v - x) < 1e-7) break; if (v < x) lo = t; else hi = t; t = (lo + hi) / 2; }
+    return ((ay * t + by) * t + cy) * t;
+}
+static double caduta1(double u) { return bezier(0.4, 0.0, 1.0, 1.0, u); }    // accelera fino alla giunzione
+static double caduta2(double u) { return bezier(0.16, 1.0, 0.3, 1.0, u); }   // riparte lanciato e frena a lungo
+static const double CADUTA_GIUNZIONE = 0.28;
+static bool riduzioneCaduta() { return impostazioni::valori().riduzione == 1; }
+static double cadutaChiude(double x) {   // riduzione: tempo lineare -> p (crescente)
+    const double A = CADUTA_GIUNZIONE;
+    x = std::clamp(x, 0.0, 1.0);
+    return x <= A ? 0.5 * caduta1(x / A) : 0.5 + 0.5 * caduta2((x - A) / (1 - A));
+}
+static double cadutaApre(double x) {     // ripristino: tempo lineare -> p (decrescente)
+    const double A = CADUTA_GIUNZIONE;
+    x = std::clamp(x, 0.0, 1.0);
+    return x <= A ? 1.0 - 0.5 * caduta1(x / A) : 0.5 - 0.5 * caduta2((x - A) / (1 - A));
+}
+template <class F> static double invertiTempo(F f, double p, bool cresce) {   // f monotona su [0,1]: x con f(x) = p
+    double lo = 0, hi = 1;
+    for (int i = 0; i < 40; i++) {
+        const double m = (lo + hi) / 2;
+        if ((f(m) < p) == cresce) lo = m; else hi = m;
+    }
+    return (lo + hi) / 2;
+}
+// Curve della riduzione e del ripristino secondo lo stile scelto (il genio come sempre, oppure la caduta)
+static double curvaRiduzione(double x) { return riduzioneCaduta() ? cadutaChiude(x) : curvaGenio(x); }
+static double inversaRiduzione(double p) { return riduzioneCaduta() ? invertiTempo(cadutaChiude, p, true) : inversaCurvaGenio(p); }
+static double curvaRipristino(double x) { return riduzioneCaduta() ? cadutaApre(x) : std::pow(1.0 - std::clamp(x, 0.0, 1.0), 3); }
+static double inversaRipristino(double p) { return riduzioneCaduta() ? invertiTempo(cadutaApre, p, false) : 1.0 - std::cbrt(std::clamp(p, 0.0, 1.0)); }
+
 // Chiusura: la finestra si rimpicciolisce un poco sul posto e svanisce. La foto si fa quando si chiede di chiuderla
 // (pulsante chiudi dell'app o della capsula, Alt+F4); l'animazione parte solo quando la finestra sparisce davvero:
 // se l'app chiede "salvare?" e resta aperta, dopo qualche secondo la foto si butta e non succede niente.
@@ -2139,58 +2191,87 @@ static void rileggiFotoZoom(Anim& a, double t) {
 static double x0Genio(const Anim& a, double t) { return std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0); }
 
 // Riduzione e ripristino (1.3.0): lo stesso avanzamento p del genio (0 finestra, 1 dentro il dock), con i suoi tempi,
-// interruzioni e inversioni; cambia solo il disegno. Genio: la finestra si deforma verso l'icona. Caduta nel dock: nella
-// prima parte (p fino a CADUTA_P) la finestra si rimpicciolisce in un riquadro grande come l'icona sopra di lei, poi cade
-// (accelerando, come un oggetto) dietro le icone: la parte che entra nel dock non si disegna, e quando tocca le icone
-// quella dell'app e le vicine fanno un piccolo sobbalzo. Il ripristino e' lo stesso percorso all'indietro
-static const double CADUTA_P = 0.55;
+// interruzioni e inversioni; cambia solo il disegno. Genio: la finestra si deforma verso l'icona.
+// "Caduta nel dock", sul modello che l'utente ha dato (un suo progetto precedente, finestre che rientrano nelle icone):
+//  - due tratti senza pausa in mezzo. Riduzione: nel primo (28% del tempo) la finestra si ritira di colpo in un
+//    quadratino e intanto sale/scende a un punto intermedio sopra il dock (stessa x), accelerando fino alla fine del
+//    tratto (cubic-bezier 0.4,0,1,1); nel secondo il quadratino, gia' piccolo, vola al centro dell'icona partendo
+//    lanciato e frenando a lungo (cubic-bezier 0.16,1,0.3,1). Ripristino: dall'icona al punto intermedio da piccolo
+//    (accelerando), poi si allarga fino alla finestra frenando;
+//  - il quadratino e' un "chip": tinta piena con un bordo sottile, che prende il posto della foto mentre questa sfuma
+//    (nel primo tratto riducendo, nel secondo ripristinando), cosi' da piccolo resta leggibile;
+//  - a fine corsa e' grande meta' icona e centrato su di lei: "dentro" l'icona. L'overlay sta sopra il dock, quindi la
+//    parte sotto il bordo alto delle icone non si disegna (solo quando e' piccolo: da grande la finestra puo' coprire
+//    il dock senza perdere il fondo, R20261120-030534-S1); al contatto le icone fanno un piccolo sobbalzo.
+// Il disegno dipende solo da p (0..0,5 ritiro, 0,5..1 volo), uguale nei due versi; i tempi li danno cadutaChiude e
+// cadutaApre (curvaRiduzione, curvaRipristino), cosi' un'inversione a meta' riparte dallo stesso disegno
+static genio::Immagine gChipTinta, gChipBordo;   // tinte del chip (si rifanno se cambia il tema)
+static int gChipTema = -1;
 static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, double alfa, std::vector<genio::Elemento>& el) {
     if (impostazioni::valori().riduzione != 1 || a.a.right <= a.a.left || p <= 0.0) {
         el.push_back({img, a.da, a.a, p, alfa});
         return;
     }
-    const double iw = a.a.right - a.a.left, ih = a.a.bottom - a.a.top;
-    const double icx = (a.a.left + a.a.right) / 2.0;
-    // riquadro: grande come l'icona, con le proporzioni della finestra (almeno 2,6 raggi degli angoli: piu' piccolo
-    // diventa un dischetto con gli angoli molto tondi)
+    const bool riduce = a.tipo == Tipo::Riduci;
+    if (!riduce) a.sobbalzo = false;   // (ripristino: se torna a ridursi, sobbalza di nuovo)
     const double fw = std::max(1L, a.da.right - a.da.left), fh = std::max(1L, a.da.bottom - a.da.top);
-    const double lato = std::max(iw, 2.6 * raggioDi(a.hwnd));
-    const double s = lato / std::max(fw, fh), qw = fw * s, qh = fh * s;
-    const double sopraY = a.a.top - ih * 0.2 - qh;   // in cima: poco sopra l'icona
-    alfa = 1.0;   // (il genio sfuma alla fine; qui il riquadro sparisce dietro le icone)
-    double l, t, r, b;
-    if (p < CADUTA_P) {
-        const double k = std::clamp(p / CADUTA_P, 0.0, 1.0), m = k * k * (3 - 2 * k);
-        l = a.da.left + (icx - qw / 2 - a.da.left) * m;  r = a.da.right + (icx + qw / 2 - a.da.right) * m;
-        t = a.da.top + (sopraY - a.da.top) * m;           b = a.da.bottom + (sopraY + qh - a.da.bottom) * m;
-    } else {
-        const double k = (p - CADUTA_P) / (1.0 - CADUTA_P), g = k * k;   // accelera cadendo
-        l = icx - qw / 2; r = icx + qw / 2;
-        t = sopraY + (a.a.top + ih * 0.15 - sopraY) * g;   // fino a sparire sotto il bordo alto delle icone
-        b = t + qh;
+    const double fcx = (a.da.left + a.da.right) / 2.0, fcy = (a.da.top + a.da.bottom) / 2.0;
+    const double iw = a.a.right - a.a.left, ih = a.a.bottom - a.a.top;
+    const double icx = (a.a.left + a.a.right) / 2.0, icy = (a.a.top + a.a.bottom) / 2.0;
+    // a fine corsa: meta' icona (come nel modello, con icone da 72 px), ma almeno 30 px: con le icone del dock da 42 px
+    // meta' era un puntino di 21 px. Centrato sull'icona resta comunque sotto la linea del taglio
+    const double lato = std::min(std::max(0.5 * std::min(iw, ih), 30.0 * scalaFinestra(a.hwnd)), 0.7 * std::min(iw, ih));
+    const double myy = a.a.top - 4.0 * ih;                 // punto intermedio: sopra il dock, alla x della finestra
+    // il disegno dipende solo da p (vedi cadutaChiude/cadutaApre): uguale nei due versi
+    double cx, cy, w, h, contenuto;
+    bool piccolo;   // in volo da quadratino: si taglia dietro le icone
+    const double q = std::clamp(p, 0.0, 1.0);
+    if (q <= 0.5) {   // ritiro: dalla finestra al quadratino nel punto intermedio; la foto lascia il posto al chip
+        const double e = q * 2;
+        cx = fcx; cy = fcy + (myy - fcy) * e;
+        w = fw + (lato - fw) * e; h = fh + (lato - fh) * e;
+        contenuto = 1.0 - e; piccolo = false;
+    } else {          // volo: dal punto intermedio all'icona, da quadratino
+        const double e = q * 2 - 1;
+        cx = fcx + (icx - fcx) * e; cy = myy + (icy - myy) * e;
+        w = h = lato; contenuto = 0; piccolo = true;
     }
-    // dietro le icone: niente sotto questa linea (un poco piu' giu' del bordo alto, dove l'icona e' gia' piena)
-    const double taglio = a.a.top + ih * 0.15;
-    if (a.tipo != Tipo::Riduci) a.sobbalzo = false;   // (ripristino: se torna a ridursi, sobbalza di nuovo)
-    // taglio e contatto solo cadendo: rimpicciolendosi la foto e' sempre intera, anche quando la finestra arriva sotto
-    // la linea delle icone (alta o ingrandita: ne spariva subito il fondo e il sobbalzo partiva in anticipo, e al
-    // ripristino il fondo ricompariva di colpo a p = 0; R20261120-030534-S1)
-    const bool cade = p >= CADUTA_P;
-    if (cade && t >= taglio) return;
-    if (cade && !a.sobbalzo && b > taglio && a.tipo == Tipo::Riduci) {
+    const double x = q;   // (per il registro)
+    const double l = cx - w / 2, t = cy - h / 2, r = cx + w / 2, b = cy + h / 2;
+    const double taglio = a.a.top + ih * 0.15;   // poco sotto il bordo alto delle icone (dove sono gia' piene)
+    if (piccolo && t >= taglio) return;          // tutto dietro le icone
+    if (piccolo && riduce && !a.sobbalzo && b > taglio) {
         a.sobbalzo = true;
         if (gDockOk) gDock.sobbalza(a.hwnd);
-        logf("caduta nel dock %p: tocca le icone (p=%.2f)", a.hwnd, p);
+        logf("caduta nel dock %p: tocca le icone (x=%.2f)", a.hwnd, x);
     }
-    const double v = cade ? std::min(1.0, (taglio - t) / std::max(1.0, b - t)) : 1.0;
-    if (cade && b > taglio) b = taglio;
-    a.magliaC = {{(float)l, (float)t, 0, 0}, {(float)r, (float)t, 1, 0}, {(float)l, (float)b, 0, (float)v}, {(float)r, (float)b, 1, (float)v}};
-    const RECT rr = {(LONG)std::lround(l), (LONG)std::lround(t), (LONG)std::lround(r), (LONG)std::lround(b)};
-    genio::Elemento e{img, rr, rr, 0.0, alfa};
-    e.maglia = a.magliaC.data(); e.colonne = 2; e.righe = 2; e.finV = v;
-    // angoli in proporzione: la foto e' rimpicciolita (il raggio e' in pixel della foto)
-    e.raggio = raggioDi(a.hwnd) * std::max(1.0, fw / std::max(1.0, r - l));
-    el.push_back(e);
+    // chip: tinta e bordo secondo il tema (come il vetro di FluidWin)
+    const bool scuro = vetro::temaScuro();
+    if (gChipTema != (int)scuro || !gChipTinta.srv || !gChipBordo.srv) {
+        if (scuro) { gGenio.tinta(0.17f, 0.17f, 0.20f, 0.94f, gChipTinta); gGenio.tinta(1, 1, 1, 0.42f, gChipBordo); }
+        else       { gGenio.tinta(0.96f, 0.96f, 0.97f, 0.94f, gChipTinta); gGenio.tinta(0, 0, 0, 0.26f, gChipBordo); }
+        gChipTema = (int)scuro;
+    }
+    // angoli: quelli della finestra da grande, il 22% del lato da piccola; bordo di 2 px veri a ogni misura
+    const double sc = scalaFinestra(a.hwnd), rs = std::min((double)raggioDi(a.hwnd), 0.22 * std::min(w, h)), bw = 2.0 * sc;
+    // un elemento (rettangolo l,t,r,b sullo schermo) con la sua maglia 2x2, tagliato alla linea delle icone se piccolo
+    auto aggiungi = [&](std::vector<genio::Vertice>& m, const genio::Immagine* im, double L, double T, double R, double B, double al, double raggio) {
+        if (!im || !im->srv || al <= 0.002) return;
+        double v = 1.0, Bv = B;
+        if (piccolo && B > taglio) { v = std::clamp((taglio - T) / std::max(1.0, B - T), 0.0, 1.0); Bv = taglio; }
+        if (Bv <= T) return;
+        m = {{(float)L, (float)T, 0, 0}, {(float)R, (float)T, 1, 0}, {(float)L, (float)Bv, 0, (float)v}, {(float)R, (float)Bv, 1, (float)v}};
+        const RECT rr = {(LONG)std::lround(L), (LONG)std::lround(T), (LONG)std::lround(R), (LONG)std::lround(Bv)};
+        genio::Elemento e{im, rr, rr, 0.0, al};
+        e.maglia = m.data(); e.colonne = 2; e.righe = 2; e.finV = v;
+        e.raggio = raggio * im->w / std::max(1.0, R - L);        // (in pixel della texture)
+        e.raggioY = raggio * im->h / std::max(1.0, B - T);
+        el.push_back(e);
+    };
+    const double chip = 1.0 - contenuto;
+    aggiungi(a.magliaB, &gChipBordo, l - bw, t - bw, r + bw, b + bw, chip, rs + bw);
+    aggiungi(a.magliaT, &gChipTinta, l, t, r, b, chip, rs);
+    aggiungi(a.magliaC, img, l, t, r, b, contenuto, rs);
 }
 
 static void passo(double t) {
@@ -2228,7 +2309,7 @@ static void passo(double t) {
                 if (a.fase == 1 && t - a.tFase > ANNULLA_DOPO) annullaPronta(a, t);
                 else if (t - a.t0 > 5.0) annullaPronta(a, t);
             } else if (a.tipo == Tipo::Riduci) {
-                const double x = (t - a.t0) / DURATA_GENIO_RIDUCI, p = curvaGenio(x);
+                const double x = (t - a.t0) / DURATA_GENIO_RIDUCI, p = curvaRiduzione(x);
                 a.pGenio = p;
                 elementoRiduzione(a, &foto->second, p, 1.0 - morbido((p - 0.85) / 0.15), elementi);
                 if (++a.fotogrammiGenio > 3) chiudiMiniatura(a);
@@ -2266,7 +2347,7 @@ static void passo(double t) {
                 }
                 // al ripristino parte subito veloce e frena all'arrivo: cosi' risponde al clic senza attese
                 const double x = std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0);
-                const double p = std::pow(1.0 - x, 3);
+                const double p = curvaRipristino(x);
                 a.pGenio = p;
                 elementoRiduzione(a, &foto->second, p, 1.0 - morbido((p - 0.92) / 0.08), elementi);
                 if (gLog && ++a.fotogrammiGenio <= 6) logf("genio ripristino: fotogramma per t=%.3f p=%.3f", t, p);
@@ -2970,7 +3051,7 @@ static void suRiduci(HWND h) {
     if (a->genio) {
         // ripristino invertito: la foto riparte verso l'icona dal punto in cui era
         a->tipo = Tipo::Riduci; a->fase = 0; a->fotogrammiGenio = 0;
-        a->t0 = tempoProssimoFotogramma() - inversaCurvaGenio(a->pGenio) * DURATA_GENIO_RIDUCI;
+        a->t0 = tempoProssimoFotogramma() - inversaRiduzione(a->pGenio) * DURATA_GENIO_RIDUCI;
         RECT ic; if (iconaBarra(h, ic)) a->a = ic;
         alfaFinestra(h, 0);
         logf("riduci %p genio invertito da p=%.2f", h, a->pGenio);
@@ -3023,7 +3104,7 @@ static void suRipristina(HWND h) {
         Anim n;
         n.hwnd = h; n.tipo = Tipo::Ripristina; n.genio = true;
         n.da = i->visibile; n.a = ic; n.pGenio = pDa;
-        n.t0 = n.tFase = tempoProssimoFotogramma() - (1.0 - std::cbrt(pDa)) * DURATA_GENIO_RIPRISTINA;
+        n.t0 = n.tFase = tempoProssimoFotogramma() - inversaRipristino(pDa) * DURATA_GENIO_RIPRISTINA;
         gAnim.push_back(n);
         alfaFinestra(h, ALFA_INVISIBILE);   // (ridotta era ad alfa 0: ora e' al suo posto, deve ricevere i clic)
         logf("ripristino genio %p da p=%.2f", h, pDa);
