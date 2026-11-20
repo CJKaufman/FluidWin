@@ -5,6 +5,7 @@
 #include "testi.h"
 #include "cursori.h"
 #include "pool.h"
+#include "sfondi.h"
 #include <shellapi.h>   // DragAcceptFiles: il pacchetto di cursori si trascina nella finestra
 #include <windowsx.h>
 #include <commdlg.h>   // ChooseColorW: il colore del dock scelto a piacere
@@ -226,6 +227,9 @@ public:
         rileggiPacchetti();
         anim.clear();
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
+        // (lo sfondo puo' essere cambiato da fuori: si rilegge, e la miniatura del tuo si rifa')
+        sfondoAttuale = -2; sfondoErrore = false; provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; }
+        if (sfondoInCorso != -2 && vetro::ms() - sfondoDa >= 15000) sfondoInCorso = -2;   // (risposta persa: vedi scegliSfondo)
         if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
         v.alfa(daCentro ? 1 : 0);
         vetro::battito(v.fin, 1);
@@ -372,6 +376,11 @@ public:
                 const bool uno = DragQueryFileW(hd, 0, p, MAX_PATH) > 0;
                 DragFinish(hd);
                 if (uno) { vaiASezione(S_CURSORE); installa(p); }
+                return true;
+            }
+            case WM_SFONDO_FATTO: {   // lo sfondo scelto e' stato messo (o no): vedi scegliSfondo
+                auto* cb = (std::function<void(bool)>*)l;
+                (*cb)(w != 0); delete cb;
                 return true;
             }
             case WM_CURSORI_INSTALLATI: {
@@ -527,6 +536,55 @@ private:
     static constexpr int Z_MOSTRA_TUTTE = 650, Z_MOSTRA_APP = 10000;
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
+    // ---- sfondi (Generale, Fase 3): Z_SFONDO "Il tuo sfondo", Z_SFONDO + 1 + i gli sfondi di FluidWin (sfondi.h)
+    static constexpr UINT WM_SFONDO_FATTO = WM_APP + 51;
+    static constexpr int Z_SFONDO = 170;
+    ID2D1Bitmap* miniSfondi[sfondi::N + 1] = {};   // [0] il tuo, poi i nostri; fatte per il render target di giroSfondi
+    unsigned giroSfondi = ~0u;
+    int sfondoAttuale = -2;   // -2 da leggere, -1 il tuo (o un altro), 0..N-1 uno di FluidWin
+    int sfondoInCorso = -2;   // quello che si sta mettendo (-2 nessuno)
+    ULONGLONG sfondoDa = 0;   // da quando (vedi scegliSfondo) 
+    unsigned sfondoRichiesta = 0;   // numero dell'ultima scelta (vedi scegliSfondo)
+    bool sfondoErrore = false;
+    bool provataMini[sfondi::N + 1] = {};      // miniatura gia' provata (anche senza riuscirci)
+    bool tuoTinta = false; DWORD coloreTuo = 0;   // il tuo sfondo e' una tinta unita: il suo colore
+    void liberaSfondi() { for (auto*& b : miniSfondi) if (b) { b->Release(); b = nullptr; } for (bool& p : provataMini) p = false; }
+    // sceglie lo sfondo i (-1 il tuo); lo mette un thread (sfondi::scegli), la risposta arriva con WM_SFONDO_FATTO.
+    // Uno alla volta; se la risposta si perde (finestra distrutta, coda piena) dopo 15 s se ne puo' scegliere un altro: i
+    // lavori restano in fila (sfondi::scegli) e conta solo la risposta dell'ultimo
+    // (R20261120-210024-S5)
+    void scegliSfondo(int i) {
+        if (registro) { char b[96]; snprintf(b, 96, "sfondo: scelto %d (attuale %d, in corso %d)", i, sfondoAttuale, sfondoInCorso); registro(b); }
+        if ((sfondoInCorso != -2 && vetro::ms() - sfondoDa < 15000) || i == sfondoAttuale) return;   // (quello che c'e' gia': niente)
+        if (i == -1 && !tuoDisponibile()) return;
+        sfondoInCorso = i; sfondoErrore = false; sfondoDa = vetro::ms();
+        const unsigned n = ++sfondoRichiesta;   // (la risposta di una richiesta superata non cambia lo stato: R20261120-211010-S3)
+        if (!sfondi::scegli(i, v.fin, WM_SFONDO_FATTO, [this, i, n](bool ok) {
+                if (n != sfondoRichiesta) { if (registro) registro("sfondo: risposta di una scelta superata"); return; }
+                sfondoInCorso = -2;
+                if (registro) { char b[64]; snprintf(b, 64, "sfondo: %d %s", i, ok ? "messo" : "NON messo"); registro(b); }
+                if (ok) sfondoAttuale = i; else sfondoErrore = true;
+                if (ok && i >= 0) { provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; } }   // ("il tuo" ora e' quello ricordato)
+                vetro::battito(v.fin, 1);
+                disegna();
+            })) { sfondoInCorso = -2; sfondoErrore = true; }
+        disegna();
+    }
+    // il "tuo sfondo": quello ricordato, o quello di adesso se non e' di FluidWin. Immagine per la miniatura (vuota:
+    // nessuna) e, se e' una tinta unita, il colore
+    sfondi::Stato statoTuo() const {
+        sfondi::Stato t = sfondi::tuo();
+        if (t.tipo == sfondi::NESSUNO && sfondoAttuale == -1) sfondi::leggi(t);
+        return t;
+    }
+    std::wstring fileTuo() const {
+        const sfondi::Stato t = statoTuo();
+        std::wstring f = t.immagine();
+        // (il file di partenza puo' non esserci piu': Windows ne tiene una copia dello sfondo mostrato)
+        if (f.empty() && t.tipo == sfondi::IMMAGINI && sfondoAttuale == -1) f = sfondi::copiaDiWindows();
+        return f;
+    }
+    bool tuoDisponibile() const { return sfondi::tuo().tipo != sfondi::NESSUNO || sfondoAttuale == -1; }
     static constexpr int Z_PACCHETTO = 700, Z_WINDOWS = 710, Z_SCEGLI = 720, Z_RIMUOVI = 760, MAX_PACCHETTI = 30;
     std::vector<cursori::Pacchetto> pacchetti;
     std::vector<ID2D1Bitmap*> anteprime;   // la freccia di ogni pacchetto, fatta per il render target di giroAnteprime
@@ -674,6 +732,7 @@ private:
             disegna();
             return;
         }
+        if (id >= Z_SFONDO && id <= Z_SFONDO + sfondi::N) { scegliSfondo(id - Z_SFONDO - 1); return; }   // sfondo (Fase 3)
         if (id == 401) { if (esci) esci(); return; }   // "Esci da FluidWin" (#16)
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
@@ -945,6 +1004,60 @@ private:
                     v.testo(nomi[i], fCentro, r, inkS);
                 }
                 y += 70 * d;
+            }
+            {   // sfondo (1.3.0, Fase 3): il tuo e i tre di FluidWin, in fila; un clic lo mette (sfondi.h)
+                if (sfondoAttuale == -2) sfondoAttuale = sfondi::attualeNostro();
+                if (giroSfondi != v.giroRt) { liberaSfondi(); giroSfondi = v.giroRt; }
+                const int n = sfondi::N + 1;
+                const float gap = 12 * d, x0 = L + 16 * d, larg = (R - L - 32 * d - gap * (n - 1)) / n, alto = std::round(larg * 9 / 16);
+                const D2D1_RECT_F rs = {L, y, R, y + (44 + 30) * d + alto};
+                riquadro(rs, false);
+                v.testo(testi::t(L"Sfondo", L"Wallpaper"), fVoce, {rs.left + 16 * d, rs.top + 8 * d, rs.left + 200 * d, rs.top + 38 * d}, inkS);
+                if (sfondoErrore) v.testo(testi::t(L"Non messo: riprova", L"Not set: try again"), fSotto, {rs.left + 200 * d, rs.top + 8 * d, rs.right - 16 * d, rs.top + 38 * d}, tenueS);
+                const float yc = rs.top + 44 * d, rr = std::max(2.0f, 8 * d * raggio::fattore());
+                const bool haTuo = tuoDisponibile();
+                for (int k = 0; k < n; k++) {
+                    const int i = k - 1;   // -1 il tuo, poi 0..N-1
+                    const D2D1_RECT_F c = {x0 + k * (larg + gap), yc, x0 + k * (larg + gap) + larg, yc + alto};
+                    const bool usabile = i >= 0 || haTuo;
+                    if (usabile) zone.push_back({c, Z_SFONDO + k});
+                    if (!miniSfondi[k] && !provataMini[k] && usabile) {   // (una prova sola per apertura: niente letture a ogni fotogramma)
+                        provataMini[k] = true;
+                        const UINT pw = (UINT)std::lround(larg), ph = (UINT)std::lround(alto);
+                        if (i >= 0) { const void* dati = nullptr; DWORD nb = 0; if (sfondi::risorsa(i, dati, nb)) miniSfondi[k] = sfondi::miniatura(v.rt, dati, nb, L"", pw, ph); }
+                        else {
+                            const sfondi::Stato t = statoTuo();
+                            tuoTinta = t.tipo == sfondi::TINTA; coloreTuo = t.colore;
+                            const std::wstring f = fileTuo(); if (!f.empty()) miniSfondi[k] = sfondi::miniatura(v.rt, nullptr, 0, f, pw, ph);
+                        }
+                    }
+                    const float ea = (float)e * (usabile ? 1.0f : 0.4f);
+                    if (miniSfondi[k]) {
+                        ID2D1BitmapBrush* bb = nullptr;
+                        if (SUCCEEDED(v.rt->CreateBitmapBrush(miniSfondi[k], &bb)) && bb) {
+                            bb->SetTransform(D2D1::Matrix3x2F::Translation(c.left, c.top));
+                            bb->SetOpacity(ea);
+                            v.rt->FillRoundedRectangle({c, rr, rr}, bb);
+                            bb->Release();
+                        }
+                    } else if (i < 0 && tuoTinta) {   // il tuo e' una tinta unita: quel colore
+                        v.pen->SetColor(D2D1::ColorF(GetRValue(coloreTuo) / 255.0f, GetGValue(coloreTuo) / 255.0f, GetBValue(coloreTuo) / 255.0f, ea));
+                        v.rt->FillRoundedRectangle({c, rr, rr}, v.pen);
+                    } else {   // (nessuna immagine: un riquadro vuoto)
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * ea) : D2D1::ColorF(0, 0, 0, 0.06f * ea));
+                        v.rt->FillRoundedRectangle({c, rr, rr}, v.pen);
+                    }
+                    // scelto: anello blu; sotto il mouse: anello chiaro; mentre si mette: anello tratteggiato... qui pieno e tenue
+                    const bool scelto = sfondoAttuale == i, inCorso = sfondoInCorso == i;
+                    if (scelto || inCorso || (sopra == Z_SFONDO + k && usabile)) {
+                        v.pen->SetColor(scelto ? D2D1::ColorF(blu.r, blu.g, blu.b, (float)e) : inCorso ? D2D1::ColorF(blu.r, blu.g, blu.b, 0.45f * (float)e) : tenueS);
+                        const float o = 3 * d;
+                        v.rt->DrawRoundedRectangle({{c.left - o, c.top - o, c.right + o, c.bottom + o}, rr + o, rr + o}, v.pen, 2.0f * d);
+                    }
+                    const wchar_t* nome = i < 0 ? testi::t(L"Il tuo sfondo", L"Your wallpaper") : testi::t(sfondi::ELENCO[i].it, sfondi::ELENCO[i].en);
+                    v.testo(nome, fCentro, {c.left, c.bottom + 4 * d, c.right, c.bottom + 26 * d}, usabile ? inkS : tenueS);
+                }
+                y += rs.bottom - rs.top + 6 * d;
             }
             riga(L"FluidWin" + (ver.empty() ? std::wstring() : L" " + ver), testi::t(L"Windows reimmaginato · github.com/clooudfn/FluidWin", L"Windows reimagined · github.com/clooudfn/FluidWin"));
             // diagnostica: versione, Windows, schermi, scheda video, impostazioni (niente dati personali), per chi
