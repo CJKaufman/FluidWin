@@ -40,16 +40,29 @@ inline void chiudi() { if (aperti > 0) chiudiTutti = true; }
 inline bool animazioni() { return animazioniInCorso && passoAnimazioni && animazioniInCorso(); }
 // registro di FluidWin (solo con --log): alla chiusura di ogni menu, quanto arrivavano in ritardo i movimenti del mouse
 inline void (*registro)(const char*) = nullptr;
-// cima del dock su quello schermo (y dello schermo; INT_MAX se li' non c'e'): il dock non riserva spazio (la zona di
-// lavoro arriva in fondo allo schermo), e un menu lungo aperto dal centro di controllo finiva in parte sotto il dock,
-// con le ultime voci non cliccabili ("Ferma il timer", "Spegni")
-inline int (*cimaDock)(HMONITOR) = nullptr;
-inline int fondoLibero(HMONITOR m, const RECT& lavoro) {
-    const int c = cimaDock ? cimaDock(m) : INT_MAX;
-    // sopra il dock non c'e' posto (schermo basso, area di lavoro ridotta): meglio un menu che copre il dock di uno alto
-    // un pixel (R20261120-145131-S3)
-    if (c < lavoro.top + 160) return lavoro.bottom;
-    return std::min<int>(lavoro.bottom, c);
+// Fascia del dock a riposo su quello schermo (dal bordo dello schermo al lato interno del dock, lunga quanto il bordo;
+// vuota se li' non c'e' o resta giu'): il dock non riserva spazio (la zona di lavoro arriva fino al bordo), e un menu
+// lungo aperto dal centro di controllo finiva in parte sotto il dock, con le ultime voci non cliccabili ("Ferma il
+// timer", "Spegni"). Col dock in alto o ai lati (impostazione "Posizione") la fascia e' su quel bordo
+inline RECT (*fasciaDock)(HMONITOR) = nullptr;
+// zona di lavoro senza la fascia del dock. Se dopo non resta posto (schermo basso, area di lavoro ridotta): meglio un
+// menu che copre il dock di uno alto un pixel (R20261120-145131-S3)
+inline RECT areaLibera(HMONITOR m, const RECT& lavoro) {
+    RECT a = lavoro;
+    if (!fasciaDock) return a;
+    const RECT f = fasciaDock(m);
+    if (IsRectEmpty(&f)) return a;
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(m, &mi)) return a;
+    const RECT& s = mi.rcMonitor;
+    if (f.right - f.left >= f.bottom - f.top) {   // in basso o in alto
+        if (f.bottom >= s.bottom - 1) a.bottom = std::min(a.bottom, f.top); else a.top = std::max(a.top, f.bottom);
+        if (a.bottom - a.top < 160) { a.top = lavoro.top; a.bottom = lavoro.bottom; }
+    } else {                                       // a sinistra o a destra
+        if (f.left <= s.left + 1) a.left = std::max(a.left, f.right); else a.right = std::min(a.right, f.left);
+        if (a.right - a.left < 160) { a.left = lavoro.left; a.right = lavoro.right; }
+    }
+    return a;
 }
 
 struct Voce {
@@ -277,13 +290,14 @@ private:
         }
         // dentro lo schermo
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
-        const int fondo = fondoLibero(mon, mi.rcWork);   // (sopra il dock)
-        hMax = (int)(fondo - mi.rcWork.top);
+        const RECT al = areaLibera(mon, mi.rcWork);   // (fuori dalla fascia del dock, su qualsiasi lato)
+        hMax = (int)(al.bottom - al.top);
         H = std::min((int)std::ceil(hCompatto), hMax);
         int x = pt.x, y = versoAlto ? pt.y - H : pt.y;
-        if (x + W > mi.rcWork.right) x = std::max((int)mi.rcWork.left, (padre ? (int)padre->sinistraFin() - W : (int)mi.rcWork.right - W));
-        if (y + H > fondo) y = fondo - H;
-        if (y < mi.rcWork.top) y = mi.rcWork.top;
+        if (x < al.left) x = al.left;   // (dock a sinistra: il menu aperto su un'icona sta alla sua destra)
+        if (x + W > al.right) x = std::max((int)al.left, (padre ? (int)padre->sinistraFin() - W : (int)al.right - W));
+        if (y + H > al.bottom) y = al.bottom - H;
+        if (y < al.top) y = al.top;
         x0 = x; y0 = y;
         fin = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"FluidWin.Menu", L"", WS_POPUP,
                               x, y, W, H, proprietario, nullptr, GetModuleHandleW(nullptr), this);
@@ -315,7 +329,8 @@ private:
         const double e = 1 - std::pow(1 - kEsp, 3);
         const int h = std::min((int)std::ceil(hCompatto + (hPieno - hCompatto) * e), hMax);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
-        const int y = std::max((int)mi.rcWork.top, std::min(y0, fondoLibero(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), mi.rcWork) - h));
+        const RECT al = areaLibera(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), mi.rcWork);
+        const int y = std::max((int)al.top, std::min(y0, (int)al.bottom - h));
         if (alfa < 255) posa(1);   // (se l'apertura non era finita, la si chiude qui)
         SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
         H = h;

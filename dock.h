@@ -305,7 +305,7 @@ public:
         PAD = 8 * dpi; GAP = distanzaIcone * dpi; MARGINE = 8 * dpi;   // (GAP: impostazione, impostaDistanzaIcone)
         RAGGIO = raggio::vetro() * dpi;   // come gli angoli DWM del vetro: fondo e vetro devono coincidere
         altezzaDock = S + 2 * PAD;
-        W = schermo.right - schermo.left;
+        W = lunghezzaBordo();   // (ai lati: l'altezza dello schermo; lato si sceglie prima di inizializza)
         H = (int)std::ceil(altezzaDock + MARGINE + (M - S) + 64 * dpi);   // spazio per ingrandimento, rimbalzo ed etichetta
 
         // vetri: materiale acrilico di Windows 11 (sfocatura vera), sotto alle icone
@@ -320,7 +320,7 @@ public:
         wi.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassW(&wi);
         icone = CreateWindowExW(WS_EX_NOREDIRECTIONBITMAP | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                                wi.lpszClassName, L"Dock", WS_POPUP, schermo.left, schermo.bottom - H, W, H,
+                                wi.lpszClassName, L"Dock", WS_POPUP, origine().x, origine().y, finW(), finH(),
                                 nullptr, nullptr, inst, nullptr);
         BOOL niente = TRUE; DwmSetWindowAttribute(icone, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         if (!grafica()) return false;
@@ -336,7 +336,7 @@ public:
         notch.font(fontTesto, fontTitoli);
 
         // nessuno spazio riservato: le finestre ingrandite prendono tutto lo schermo e il dock si nasconde sotto il bordo
-        SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        posizionaFinestra();
 
         // la barra di Windows si nasconde da sola (impostazione ufficiale), si rimette com'era all'uscita
         APPBARDATA tb{}; tb.cbSize = sizeof(tb);
@@ -353,6 +353,7 @@ public:
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
 
         ShowWindow(icone, SW_SHOWNOACTIVATE);
+        notch.inBasso(lato == 1);   // (col dock in alto il notch scende dal bordo in basso)
         notch.posto(schermo, dpi);
         notch.mostra(true);
         dirty = true;
@@ -412,9 +413,9 @@ public:
         monitor = verso;
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
-        const int w = schermo.right - schermo.left;
+        const int w = lunghezzaBordo();
         if (w != W && w > 0) ridimensiona(w, H);
-        SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        posizionaFinestra();
         if (appbarOk) aggiornaAppbar();   // lo spazio riservato passa al nuovo schermo
         rettVetro = rettVetroStato = rettVetroOra = RECT{};          // i vetri si rimettono al prossimo fotogramma
         regioneDock = regioneIsola = regioneEtichetta = RECT{};
@@ -431,7 +432,9 @@ public:
         if (!sc || !dc || w <= 0 || h <= 0) return;
         dc->SetTarget(nullptr);
         if (bersaglio) { bersaglio->Release(); bersaglio = nullptr; }
-        if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)h, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = h; }
+        // (w lunghezza lungo il bordo, h spessore logico: la superficie e' quella della finestra, girata ai lati)
+        const int fw = verticale() ? h + extraLato() : w, fh = verticale() ? w : h;
+        if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)fw, (UINT)fh, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = h; }
         IDXGISurface* sup = nullptr;
         if (SUCCEEDED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup))) {
             D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
@@ -630,9 +633,9 @@ public:
                 // come i dock "intelligenti": si nasconde anche quando la finestra in primo piano gli finisce sopra
                 if (!n) {
                     RECT vis{}; if (FAILED(DwmGetWindowAttribute(r, DWMWA_EXTENDED_FRAME_BOUNDS, &vis, sizeof(vis)))) vis = w;
-                    const LONG topDock = schermo.bottom - H + (LONG)(yBaseRiposo() - S - PAD);
-                    const RECT dockR = {schermo.left + (LONG)zonaDockL, topDock, schermo.left + (LONG)zonaDockR, schermo.bottom};
-                    const RECT isolaR = {schermo.left + (LONG)isola.left, topDock, schermo.left + (LONG)isola.right, schermo.bottom};
+                    const float topDock = yBaseRiposo() - S - PAD;
+                    const RECT dockR = aSchermo({zonaDockL, topDock, zonaDockR, (float)H});
+                    const RECT isolaR = isola.right > isola.left ? aSchermo({isola.left, topDock, isola.right, (float)H}) : RECT{};
                     RECT x;
                     n = IntersectRect(&x, &vis, &dockR) || IntersectRect(&x, &vis, &isolaR);
                 }
@@ -664,20 +667,48 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
-    // cima del dock sullo schermo m (y dello schermo), per i menu; INT_MAX se li' non c'e' o resta giu'. E' la cima a
-    // riposo (dock su, icone non ingrandite), non quella del momento: un menu aperto mentre il dock risale finiva poi
-    // sotto di lui (R20261120-145131-S2)
-    int cimaSu(HMONITOR m) const {
-        if (!attivo || nascostoSchermoIntero || MonitorFromRect(&schermo, MONITOR_DEFAULTTONEAREST) != m) return INT_MAX;
+    // fascia del dock sullo schermo m (dal bordo al suo lato interno, lunga quanto il bordo), per i menu: vuota se li'
+    // non c'e' o resta giu'. E' quella a riposo (dock su, icone non ingrandite), non quella del momento: un menu aperto
+    // mentre il dock risale finiva poi sotto di lui (R20261120-145131-S2)
+    RECT fasciaSu(HMONITOR m) const {
+        if (!attivo || nascostoSchermoIntero || MonitorFromRect(&schermo, MONITOR_DEFAULTTONEAREST) != m) return RECT{};
         const bool restaGiu = vuoleNascondersi && !rivelato && nessunaScheda() && !dockSu && !lAperto;
-        if (restaGiu) return INT_MAX;
-        return (int)std::floor(schermo.bottom - H + yBaseRiposo() - S - PAD - 2 * dpi);
+        if (restaGiu) return RECT{};
+        return aSchermo({0, std::floor(yBaseRiposo() - S - PAD - 2 * dpi), (float)W, (float)H});
+    }
+    // lato del dock se r (schermo) e' una sua icona (il centro nella sua fascia a riposo), altrimenti 0: la curva del genio
+    // e la caduta vanno verso quel lato (verso la barra di Windows, in basso, se il bersaglio e' lei)
+    int latoPer(const RECT& r) const {
+        if (!attivo || lato == 0) return 0;
+        const RECT f = aSchermo({0, yBaseRiposo() - S - PAD - 2 * dpi, (float)W, (float)H});
+        const POINT c = {(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+        return PtInRect(&f, c) ? lato : 0;
     }
 
     // impostazioni: notch acceso o spento, e ora e data in fondo al dock, dopo il centro di controllo
     void impostaNotch(bool si) { notch.abilita(si); dirty = true; }   // (spento: musica e timer nella testa del dock)
     // impostazione "Angoli": raggio del fondo (il vetro lo cambia raggio::riapplica), notch e capsule
     void impostaAngoli() { RAGGIO = raggio::vetro() * dpi; notch.aggiornaAngoli(); dirty = true; }
+    // impostazione "Posizione": il dock passa su un altro bordo dello schermo (pannelli, launcher e anteprime aperti si
+    // chiudono: sono messi rispetto al lato di prima). Col dock in alto il notch scende dal bordo in basso
+    void impostaLato(int l) {
+        l = std::clamp(l, 0, 3);
+        if (l == lato) return;
+        if (!attivo) { lato = l; return; }   // (all'avvio lo legge inizializza)
+        chiudiTutte(); if (lAperto) chiudiLauncher(); ant.chiudi();
+        // spazio riservato: si toglie dal bordo di prima e si rifa' su quello nuovo
+        if (appbarOk) { const bool s = spazioRiservato; spazioRiservato = false; aggiornaAppbar(); spazioRiservato = s; }
+        lato = l;
+        ridimensiona(lunghezzaBordo(), H);   // (anche con la stessa lunghezza: ai lati la superficie e' girata)
+        posizionaFinestra();
+        rettVetro = rettVetroStato = rettVetroOra = RECT{};
+        regioneDock = regioneIsola = regioneEtichetta = RECT{};
+        if (spazioRiservato) aggiornaAppbar();
+        notch.inBasso(lato == 1); notch.posto(schermo, dpi);
+        controllaFinestre(true);
+        if (registro) { char b[64]; snprintf(b, 64, "dock: lato %d", lato); scrivi(b); }
+        dirty = true;
+    }
     void impostaOraNelDock(bool si) {
         if (si == oraNelDock) return;
         oraNelDock = si;
@@ -710,7 +741,7 @@ public:
         altezzaDock = S + 2 * PAD;
         const int h = (int)std::ceil(altezzaDock + MARGINE + (M - S) + 64 * dpi);
         if (h != H) ridimensiona(W, h);
-        SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        posizionaFinestra();
         rettVetro = rettVetroStato = rettVetroOra = RECT{};
         regioneDock = regioneIsola = regioneEtichetta = RECT{};
         if (appbarOk) aggiornaAppbar();
@@ -804,8 +835,7 @@ private:
         if (vuoleNascondersi) { rivelaFino = adesso() + 1.4; dirty = true; posizionaVetri(); }
         const auto pos = posizioniRiposo();
         if (i >= pos.size()) return false;
-        out = {(LONG)(schermo.left + pos[i]), (LONG)(schermo.bottom - H + yBaseRiposo() - S),
-               (LONG)(schermo.left + pos[i] + S), (LONG)(schermo.bottom - H + yBaseRiposo())};
+        out = aSchermo({pos[i], yBaseRiposo() - S, pos[i] + S, yBaseRiposo()});   // (sul lato del dock)
         return true;
     }
 
@@ -926,12 +956,24 @@ private:
             RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", REG_DWORD, &v, sizeof(v));
         }
         const int alto = (int)std::ceil(S + 2 * PAD + 2 * MARGINE);
-        ab.uEdge = ABE_BOTTOM;
-        ab.rc = {schermo.left, schermo.bottom - alto, schermo.right, schermo.bottom};
-        SHAppBarMessage(ABM_QUERYPOS, &ab);   // (Windows puo' spostarla sopra altre appbar in basso)
-        ab.rc.top = ab.rc.bottom - alto;
+        // (sul lato del dock: in alto e ai lati lo spazio si riserva su quel bordo)
+        static const UINT BORDI[4] = {ABE_BOTTOM, ABE_TOP, ABE_LEFT, ABE_RIGHT};
+        ab.uEdge = BORDI[std::clamp(lato, 0, 3)];
+        switch (lato) {
+            case 1: ab.rc = {schermo.left, schermo.top, schermo.right, schermo.top + alto}; break;
+            case 2: ab.rc = {schermo.left, schermo.top, schermo.left + alto, schermo.bottom}; break;
+            case 3: ab.rc = {schermo.right - alto, schermo.top, schermo.right, schermo.bottom}; break;
+            default: ab.rc = {schermo.left, schermo.bottom - alto, schermo.right, schermo.bottom};
+        }
+        SHAppBarMessage(ABM_QUERYPOS, &ab);   // (Windows puo' spostarla accanto ad altre appbar sullo stesso bordo)
+        switch (lato) {
+            case 1: ab.rc.bottom = ab.rc.top + alto; break;
+            case 2: ab.rc.right = ab.rc.left + alto; break;
+            case 3: ab.rc.left = ab.rc.right - alto; break;
+            default: ab.rc.top = ab.rc.bottom - alto;
+        }
         SHAppBarMessage(ABM_SETPOS, &ab);
-        if (registro) { char b[120]; snprintf(b, 120, "spazio del dock: %ld px in basso (%ld,%ld-%ld,%ld)", (long)alto, ab.rc.left, ab.rc.top, ab.rc.right, ab.rc.bottom); scrivi(b); }
+        if (registro) { char b[120]; snprintf(b, 120, "spazio del dock: %ld px sul lato %d (%ld,%ld-%ld,%ld)", (long)alto, lato, ab.rc.left, ab.rc.top, ab.rc.right, ab.rc.bottom); scrivi(b); }
     }
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
@@ -1018,7 +1060,7 @@ private:
         IDXGIFactory2* fab = nullptr;
         if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&fab))) { dd->Release(); return false; }
         DXGI_SWAP_CHAIN_DESC1 sd{};
-        sd.Width = W; sd.Height = H; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
+        sd.Width = finW(); sd.Height = finH(); sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
         sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
         const HRESULT hsc = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &sc);
@@ -1446,6 +1488,94 @@ private:
         for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineFissate.emplace_back(p);
     }
 
+    // ---- lato dello schermo (impostazione "Posizione", 1.3.0, Fase 3) ----
+    // Il dock si calcola sempre come se stesse in basso: x lungo il dock (0..W, W = lunghezza del bordo), y di traverso
+    // (0..H, il bordo dello schermo a y = H). Queste funzioni lo portano sul lato scelto: sfondi, separatori, pallini e
+    // ritagli si girano con la trasformazione base(); icone, testi e simboli restano dritti (dritto: si sposta solo il
+    // loro centro). Ai lati la finestra e' piu' spessa di extraLato, lo spazio dell'etichetta accanto alle icone
+    int lato = 0;   // 0 in basso, 1 in alto, 2 a sinistra, 3 a destra
+    bool verticale() const { return lato >= 2; }
+    int extraLato() const { return verticale() ? (int)std::ceil(360 * dpi) : 0; }
+    int Hf() const { return H + extraLato(); }
+    int finW() const { return verticale() ? Hf() : W; }
+    int finH() const { return verticale() ? W : H; }
+    int lunghezzaBordo() const { return verticale() ? (int)(schermo.bottom - schermo.top) : (int)(schermo.right - schermo.left); }
+    D2D1_MATRIX_3X2_F base() const {   // logico -> finestra (Matrix3x2F: m11, m12, m21, m22, dx, dy)
+        switch (lato) {
+            case 1: return D2D1::Matrix3x2F(1, 0, 0, -1, 0, (float)H);
+            case 2: return D2D1::Matrix3x2F(0, 1, -1, 0, (float)H, 0);
+            case 3: return D2D1::Matrix3x2F(0, 1, 1, 0, (float)(Hf() - H), 0);
+            default: return D2D1::Matrix3x2F::Identity();
+        }
+    }
+    D2D1_POINT_2F fis(float x, float y) const {
+        switch (lato) {
+            case 1: return {x, H - y};
+            case 2: return {H - y, x};
+            case 3: return {y + (Hf() - H), x};
+            default: return {x, y};
+        }
+    }
+    D2D1_RECT_F fis(const D2D1_RECT_F& r) const {
+        const D2D1_POINT_2F a = fis(r.left, r.top), b = fis(r.right, r.bottom);
+        return {std::min(a.x, b.x), std::min(a.y, b.y), std::max(a.x, b.x), std::max(a.y, b.y)};
+    }
+    // finestra -> logico (il mouse)
+    void logico(float X, float Y, float& x, float& y) const {
+        switch (lato) {
+            case 1: x = X; y = H - Y; break;
+            case 2: x = Y; y = H - X; break;
+            case 3: x = Y; y = X - (Hf() - H); break;
+            default: x = X; y = Y;
+        }
+    }
+    // angolo in alto a sinistra della finestra delle icone sullo schermo
+    POINT origine() const {
+        switch (lato) {
+            case 1: case 2: return {schermo.left, schermo.top};
+            case 3: return {schermo.right - Hf(), schermo.top};
+            default: return {schermo.left, schermo.bottom - H};
+        }
+    }
+    // rettangolo logico -> schermo
+    RECT aSchermo(const D2D1_RECT_F& r) const {
+        const D2D1_RECT_F f = fis(r); const POINT o = origine();
+        return {o.x + (LONG)std::lround(f.left), o.y + (LONG)std::lround(f.top), o.x + (LONG)std::lround(f.right), o.y + (LONG)std::lround(f.bottom)};
+    }
+    // punto dello schermo -> logico
+    void logicoSchermo(POINT pt, float& x, float& y) const { const POINT o = origine(); logico((float)(pt.x - o.x), (float)(pt.y - o.y), x, y); }
+    // disegno dritto attorno al centro logico (cx, cy), con una scala; piano() torna alla trasformazione del lato
+    void dritto(float cx, float cy, float s = 1) {
+        const D2D1_POINT_2F p = fis(cx, cy);
+        dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {cx, cy}) * D2D1::Matrix3x2F::Translation(p.x - cx, p.y - cy));
+    }
+    void piano() { dc->SetTransform(base()); }
+    void posizionaFinestra() { const POINT o = origine(); SetWindowPos(icone, HWND_TOPMOST, o.x, o.y, finW(), finH(), SWP_NOACTIVATE); }
+    // il punto p dello schermo e' sul bordo del dock (o oltre, verso l'esterno) dello schermo r?
+    bool sulBordo(POINT p, const RECT& r) const {
+        switch (lato) {
+            case 1: return p.y <= r.top + 1;
+            case 2: return p.x <= r.left + 1;
+            case 3: return p.x >= r.right - 2;
+            default: return p.y >= r.bottom - 2;
+        }
+    }
+    // dove si apre un menu del dock (pt: il clic, schermo): fuori dal dock, dal suo lato interno. In basso sopra il clic
+    // (verso l'alto), in alto sotto il dock, ai lati accanto (a destra il menu lo sposta a sinistra, vedi menu::areaLibera).
+    // Prima era sempre 100 px a sinistra del clic: col dock a sinistra finiva fuori dallo schermo, o su quello accanto
+    POINT puntoMenu(POINT pt) const {
+        const POINT o = origine();
+        const D2D1_POINT_2F bi = fis(0, yBaseRiposo() - S - PAD - 2 * dpi);   // bordo interno del dock a riposo
+        switch (lato) {
+            case 1: return {pt.x - (LONG)(100 * dpi), o.y + (LONG)std::lround(bi.y + 6 * dpi)};
+            case 2: return {o.x + (LONG)std::lround(bi.x + 6 * dpi), pt.y - (LONG)(20 * dpi)};
+            case 3: return {o.x + (LONG)std::lround(bi.x - 6 * dpi), pt.y - (LONG)(20 * dpi)};
+            default: return {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)};
+        }
+    }
+    // posizione lungo il bordo del punto p dello schermo (x logica)
+    float lungoBordo(POINT p) const { return verticale() ? (float)(p.y - schermo.top) : (float)(p.x - schermo.left); }
+
     // ---- disposizione ----
     float yBaseRiposo() const { return H - MARGINE - PAD; }                       // bordo inferiore delle icone, dock visibile
     float yBaseIcone() const { return yBaseRiposo() + (float)yNascosto; }        // ... e dove sono adesso (coordinate finestra)
@@ -1478,30 +1608,30 @@ private:
     void controllaBordo() {
         controllaClicFuori();
         POINT pt; GetCursorPos(&pt);
-        // un altro schermo: col mouse fermo sul suo bordo in basso (e nessun tasto premuto, per non spostarlo
+        // un altro schermo: col mouse fermo sul suo bordo dal lato del dock (e nessun tasto premuto, per non spostarlo
         // trascinando una finestra) il dock va li'
         if (!(pt.x >= schermo.left && pt.x < schermo.right && pt.y >= schermo.top && pt.y < schermo.bottom)) {
             const HMONITOR m = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
             MONITORINFO mi{}; mi.cbSize = sizeof(mi);
             const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
-            if (m && altriSchermi && !tasti && !nascostoSchermoIntero && GetMonitorInfoW(m, &mi) && pt.y >= mi.rcMonitor.bottom - 2) {
+            if (m && altriSchermi && !tasti && !nascostoSchermoIntero && GetMonitorInfoW(m, &mi) && sulBordo(pt, mi.rcMonitor)) {
                 if (m != bordoAltro) { bordoAltro = m; bordoAltroDa = adesso(); }
                 else if (adesso() - bordoAltroDa > 0.2) { bordoAltro = nullptr; spostaVerso(m); }
             } else bordoAltro = nullptr;
             // il dock e l'isola rivelati sullo schermo lasciato tornano giu' come al solito (il mouse e' lontano)
         } else bordoAltro = nullptr;
-        const float x = (float)(pt.x - schermo.left);
+        float x = 0, ly = 0; logicoSchermo(pt, x, ly);   // (x lungo il bordo del dock, ly di traverso)
         // sul bordo in basso le zone sono solo due: sotto il dock (risale il dock) e da sotto l'isola di stato fino
         // all'angolo destro (risale l'isola). Lo spazio vuoto fra i due e i lati non fanno nulla
         // (isola tolta: mai. L'ora nel dock fa da isola per il mouse ma sta nel dock: la fa risalire la zona del dock)
         const bool zonaIsola = !oraNelDock && isola.right > isola.left && x >= isola.left - 10 * dpi;
         const bool zonaDock = x >= zonaDockL - 10 * dpi && x <= zonaDockR + 10 * dpi;
-        if (pt.y >= schermo.bottom - 2 && pt.x >= schermo.left && pt.x < schermo.right && (zonaIsola || zonaDock)) {
+        if (sulBordo(pt, schermo) && PtInRect(&schermo, pt) && (zonaIsola || zonaDock)) {
             bool &r = zonaIsola ? rivelatoI : rivelato;
             // risalendo torna sopra a tutto (anche alle finestre "sempre in primo piano" ingrandite dopo di lui)
             if (!r) { r = true; (zonaIsola ? fuoriDalI : fuoriDal) = -1; dirty = true; posizionaVetri(); }
         }
-        const bool alto = pt.y >= schermo.bottom - H + (LONG)(yBaseRiposo() - M - PAD - 30 * dpi);
+        const bool alto = ly >= yBaseRiposo() - M - PAD - 30 * dpi;   // (vicino al dock, dal lato interno)
         if (rivelato) {
             // "sopra al dock" dalla posizione vera del mouse (mouseDentro puo' restare vero se Windows non avvisa dell'uscita)
             const bool sopraIcone = WindowFromPoint(pt) == icone;
@@ -1537,11 +1667,17 @@ private:
     }
 
     // ora e data in fondo al dock: separatore e testo (larghezzaOra la misura render quando il testo cambia)
-    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + (larghezzaOra + 16 * dpi) * scalaOra() : 0; }
+    // (ai lati l'ora e la data stanno una sopra l'altra nello spessore del dock: lungo il dock conta l'altezza delle due righe)
+    float larghezzaCoda() const {
+        if (!oraNelDock || larghezzaOra <= 0) return 0;
+        return GAP * 2 + 1 + (verticale() ? (2 * 20 * dpi + 6 * dpi) * kOra() : (larghezzaOra + 16 * dpi) * kOra());
+    }
     // testa del dock (musica e timer): capsula e separatore, scalati con la comparsa
     float larghezzaTesta() const { return testaK > 0.001 && largTesta > 0 ? (float)((largTesta + GAP * 2 + 1) * testaK) : 0; }
     // le due righe dell'ora (~34 px) devono stare nell'altezza delle icone: con icone piccole il testo si rimpicciolisce
     float scalaOra() const { return std::clamp((S - 6 * dpi) / (34 * dpi), 0.7f, 1.0f); }
+    // ... e ai lati anche la larghezza del testo nello spessore del dock
+    float kOra() const { return verticale() ? std::min(scalaOra(), (S - 2 * dpi) / std::max(1.0f, larghezzaOra + 16 * dpi)) : scalaOra(); }
 
     // x di ogni icona a riposo; lo spazio prima di un'icona cresce e cala con lei
     std::vector<float> posizioniRiposo() const { return disponi(std::vector<float>(voci.size(), S)); }
@@ -1672,6 +1808,7 @@ private:
 
         dc->BeginDraw();
         dc->Clear(D2D1::ColorF(0, 0, 0, 0));
+        piano();   // (il lato dello schermo: vedi base)
         // fondo del dock, sopra al vetro acrilico e con la sua stessa forma. Mentre risale si allunga con la
         // velocita' e all'arrivo si schiaccia un poco
         const float allunga = (float)std::clamp(-velNascosto * 0.010, -3.0 * dpi, 7.0 * dpi);
@@ -1716,6 +1853,7 @@ private:
             v.rett = {x, yb - d, x + d, yb};
             if (d < 0.5f) continue;
             const float alfa = (premuto < 1 ? 0.8f : 1.0f) * std::min(1.0f, sc * 1.5f);
+            dritto((r.left + r.right) / 2, (r.top + r.bottom) / 2);   // (icona e numero dritti anche ai lati e in alto)
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
@@ -1734,6 +1872,7 @@ private:
                 pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
                 scrivi(b, fmtNome, {bx, by, bx + lb, by + 2 * rb});
             }
+            piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
             // (uno anche sotto App e il centro di controllo mentre sono aperti)
             if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
@@ -1758,12 +1897,13 @@ private:
             if (e != evidenza[ORA]) movimento = true;
             evidenza[ORA] = e;
             const float s = statoPremuto == ORA ? 0.92f : 1.0f;   // si "schiaccia" un poco alla pressione
-            const float k = scalaOra();                          // icone piccole: testo piu' piccolo (vedi scalaOra)
+            const float k = kOra();                              // icone piccole (e ai lati, testo largo): piu' piccolo (vedi kOra)
             const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
             const float h2 = 17 * dpi;                           // altezza di una riga (a grandezza piena)
             // capsula attorno al testo: la stessa per il fondo e per l'evidenza del mouse
             const float pw = (larghezzaOra / 2 + 8 * dpi) * k * s, ph = (h2 + 3 * dpi) * k * s;
             const D2D1_ROUNDED_RECT capsula = {{cx - pw, cy - ph, cx + pw, cy + ph}, std::min(9 * dpi, ph) * raggio::fattore(), std::min(9 * dpi, ph) * raggio::fattore()};
+            dritto(cx, cy);   // (capsula e testo dritti: ai lati stanno nello spessore del dock)
             // fondo: compare solo quanto il vetro del dock e' trasparente (opacita' nelle impostazioni), cosi' l'ora si legge
             // anche sopra una finestra chiara; col vetro pieno non c'e'. Lo dice la trasparenza della finestra del vetro
             {
@@ -1780,14 +1920,14 @@ private:
                 dc->FillRoundedRectangle(capsula, pennello);
             }
             // testo disegnato a grandezza piena e rimpicciolito attorno al centro (pressione e icone piccole)
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(s * k, s * k, {cx, cy}));
+            dritto(cx, cy, s * k);
             const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f);
             const float lt = larghezzaOra / 2 + 8 * dpi;
             pennello->SetColor(ink);
             dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {cx - lt, cy - h2 - 1 * dpi, cx + lt, cy + 1 * dpi}, pennello);
             pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.72f});
             dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {cx - lt, cy + 1 * dpi, cx + lt, cy + h2 - 1 * dpi}, pennello);
-            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            piano();
         }
 
         // testa del dock (musica e timer, notch a scomparsa): all'inizio, prima della prima icona
@@ -1832,6 +1972,7 @@ private:
         if (et != etichettaAlfa) movimento = true;
         etichettaAlfa = et;
         if (etichettaAlfa > 0.01 && !etichettaTesto.empty()) disegnaEtichetta(scuro);
+        dc->SetTransform(D2D1::Matrix3x2F::Identity());   // (lo stesso contesto disegna launcher e pannelli: senza il giro del lato)
         controllaGpu(dc->EndDraw());
         inMovimento = movimento;
 
@@ -1845,8 +1986,14 @@ private:
         // solo se cambia: ogni SetWindowRgn genera un WM_MOUSEMOVE, che farebbe ridisegnare il dock all'infinito
         // la regione ritaglia anche il disegno: l'etichetta, finche' e' visibile, deve starci dentro
         // (dock nascosto: regioni vuote, nessun clic rubato alle finestre a schermo intero)
-        const RECT rd = {(int)fondoL - 2, std::min((int)regTop - 2, H), (int)fondoR + 2, H};
-        const RECT rs = isola.right > isola.left ? RECT{(int)isola.left - 2, std::min((int)isola.top - 2, H), (int)isola.right + 2, H} : RECT{};
+        // (rettangoli logici portati sul lato della finestra; l'etichetta e' gia' nelle coordinate della finestra)
+        auto rettFin = [&](float l, float t, float r, float b) -> RECT {
+            if (t >= b || l >= r) return RECT{};
+            const D2D1_RECT_F f = fis(D2D1_RECT_F{l, t, r, b});
+            return {(int)std::floor(f.left), (int)std::floor(f.top), (int)std::ceil(f.right), (int)std::ceil(f.bottom)};
+        };
+        const RECT rd = rettFin(fondoL - 2, std::min(regTop - 2, (float)H), fondoR + 2, (float)H);
+        const RECT rs = isola.right > isola.left ? rettFin(isola.left - 2, std::min(isola.top - 2, (float)H), isola.right + 2, (float)H) : RECT{};
         RECT re{};
         if (etichettaAlfa > 0.01) re = {(int)rettEtichetta.left - 2, (int)rettEtichetta.top - 2, (int)rettEtichetta.right + 2, (int)rettEtichetta.bottom + 2};
         if (!EqualRect(&rd, &regioneDock) || !EqualRect(&rs, &regioneIsola) || !EqualRect(&re, &regioneEtichetta)) {
@@ -1960,12 +2107,18 @@ private:
         return rettTesta.right > rettTesta.left && x >= rettTesta.left && x < rettTesta.right && y >= rettTesta.top - 6 * dpi && y <= rettTesta.bottom + PAD;
     }
     // tasto della testa sotto il mouse: 0 indietro, 1 play/pausa, 2 avanti, 3 +1 min, 4 stop; -1 nessuno
+    // il punto logico (x, y) e' sul tasto r? Il tasto e' disegnato dritto attorno al suo centro (dritto): si confronta
+    // sullo schermo, cosi' ai lati la pillola "+1 min", larga e bassa, si prende dove la si vede (R20261120-190507-S1)
+    bool sulTasto(const D2D1_RECT_F& r, float x, float y) const {
+        const D2D1_POINT_2F p = fis(x, y), c = fis((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+        return std::abs(p.x - c.x) <= (r.right - r.left) / 2 && std::abs(p.y - c.y) <= (r.bottom - r.top) / 2;
+    }
     int tastoTestaIn(float x, float y) const {
         for (int i = 0; i < 5; i++) {
             // (solo ad allargamento finito: prima i tasti stanno gia' al posto finale, oltre lo spazio concesso, e potevano
             // finire sopra il timer, R20261120-145131-S1)
             const bool vale = i <= 2 ? kMus > 0.98 : kTim > 0.98;
-            if (vale && dentro(tastoTesta[i], x, y)) return i;
+            if (vale && sulTasto(tastoTesta[i], x, y)) return i;
         }
         return -1;
     }
@@ -2001,7 +2154,7 @@ private:
     // un tasto rotondo della testa (evidenza col mouse sopra, piu' scuro premuto)
     void fondoTasto(int i, bool scuro, float a) {
         const D2D1_RECT_F& r = tastoTesta[i];
-        const bool sopraT = mouseDentro && dentro(r, mouseX, mouseY);
+        const bool sopraT = mouseDentro && sulTasto(r, mouseX, mouseY);
         if (!sopraT && tastoPremuto != i) return;
         const float q = tastoPremuto == i ? 0.22f : 0.12f;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, q * a) : D2D1::ColorF(0, 0, 0, q * 0.6f * a));
@@ -2059,9 +2212,9 @@ private:
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.5f * (1 - o)});
                 dc->DrawEllipse({{cx, cy}, (7 + 9 * o) * d, (7 + 9 * o) * d}, pennello, 1.2f * d);
             }
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(sc * sp * (0.6f + 0.4f * p), sc * sp * (0.6f + 0.4f * p), {cx, cy}));
+            dritto(cx, cy, sc * sp * (0.6f + 0.4f * p));
             segnoTesta(i == 0, cx, cy, ink);   // (disegnato a grandezza 1 attorno al centro: lo scala la trasformazione)
-            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            piano();
             x += 20 * d * p;
         }
         prima = std::min(1.0f, (float)(pSv + pSi));
@@ -2073,6 +2226,7 @@ private:
             dc->PushAxisAlignedClip({x1, r.top, x1 + largo * p, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             const float q = Ss * 0.62f;
             const D2D1_RECT_F rc = {x, cy - q / 2, x + q, cy + q / 2};
+            dritto((rc.left + rc.right) / 2, cy);   // (copertina dritta)
             ID2D1BitmapBrush* bb = nullptr;
             if (bTesta && SUCCEEDED(dc->CreateBitmapBrush(bTesta, &bb)) && bb) {
                 const D2D1_SIZE_F bs = bTesta->GetSize();
@@ -2090,9 +2244,11 @@ private:
                 dc->DrawLine({nx, ny + 3.5f * d}, {nx, ny - 5.5f * d}, pennello, 1.3f * d);
                 dc->DrawLine({nx, ny - 5.5f * d}, {nx + 4 * d, ny - 3.5f * d}, pennello, 1.3f * d);
             }
+            piano();
             // barrette: ballano mentre suona, ferme e basse in pausa (come nel notch)
             const musica::Brano& br = notch.musicaOra();
             const float bx = rc.right + 8 * d, lb = 2.4f * d, passo = (14 * d - lb) / 3;
+            dritto(bx + 7 * d, cy);   // (barrette in piedi anche ai lati)
             pennello->SetColor(ink);
             for (int i = 0; i < 4; i++) {
                 float kb = 0.25f;
@@ -2100,6 +2256,7 @@ private:
                 const float hb = std::max(2.4f * d, 12 * d * kb);
                 dc->FillRoundedRectangle({{bx + i * passo, cy - hb / 2, bx + i * passo + lb, cy + hb / 2}, lb / 2, lb / 2}, pennello);
             }
+            piano();
             x = bx + 14 * d;
             // tasti (col mouse sopra): indietro, play/pausa, avanti; disegnati solo nello spazio gia' concesso
             const float km = (float)std::clamp(kMus, 0.0, 1.0);
@@ -2109,6 +2266,7 @@ private:
                 tastoTesta[i] = {tc - 12 * d, cy - 12 * d, tc + 12 * d, cy + 12 * d};
                 if (km < 0.02f) continue;
                 fondoTasto(i, scuro, km * k * p);
+                dritto(tc, cy);   // (simboli dritti: ai lati i tasti stanno in colonna)
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * km});
                 const float tr = 4.2f * d;
                 auto triangolo = [&](float ax, bool destra) {   // punta a destra o a sinistra
@@ -2133,6 +2291,7 @@ private:
                     triangolo(tc + (destra ? -2.5f : 2.5f) * d, destra);
                     triangolo(tc + (destra ? 2.5f : -2.5f) * d, destra);
                 }
+                piano();
             }
             dc->PopAxisAlignedClip();
             dc->PopAxisAlignedClip();
@@ -2148,6 +2307,7 @@ private:
             const D2D1_COLOR_F ink = {ink0.r, ink0.g, ink0.b, ink0.a * p};
             // anello che si svuota e il tempo che resta, in arancio come nel notch
             const float rr = 7 * d, ax = x + rr + 2 * d;
+            dritto(ax, cy);   // (l'arco parte sempre dall'alto)
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f * k * p) : D2D1::ColorF(0, 0, 0, 0.16f * k * p));
             dc->DrawEllipse({{ax, cy}, rr, rr}, pennello, 2.2f * d);
             const float av = std::clamp((float)comodita::timerAvanzamento(), 0.0f, 1.0f);
@@ -2166,13 +2326,16 @@ private:
                 if (sk) sk->Release();
                 if (g) g->Release();
             }
+            piano();
             // tempo che resta (scritto a grandezza 1 e scalato attorno al suo inizio)
             const std::wstring cifre = comodita::durata(comodita::timerResto());
             const float tw = cifreTimer();
             const float xt = ax + rr + 6 * d;
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {xt, cy}));
-            dc->DrawText(cifre.c_str(), (UINT32)cifre.size(), fmtOra, {xt, cy - 10 * dpi, xt + tw, cy + 10 * dpi}, pennello);
-            dc->SetTransform(D2D1::Matrix3x2F::Identity());
+            // (dritto attorno al centro della scritta: ai lati sta in mezzo allo spessore del dock)
+            const float tcx = xt + tw * sc / 2;
+            dritto(tcx, cy, sc);
+            dc->DrawText(cifre.c_str(), (UINT32)cifre.size(), fmtOra, {tcx - tw / 2, cy - 10 * dpi, tcx + tw / 2, cy + 10 * dpi}, pennello);
+            piano();
             x = xt + tw * sc;
             // tasti (col mouse sopra): +1 min e stop, disegnati solo nello spazio gia' concesso
             const float kt = (float)std::clamp(kTim, 0.0, 1.0);
@@ -2181,16 +2344,17 @@ private:
             if (kt > 0.02f) {
                 dc->PushAxisAlignedClip({x, r.top, x + kt * (44 + 6 + 26 + 4) * d, r.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 const D2D1_RECT_F& rp = tastoTesta[3];
-                const bool sopraP = mouseDentro && dentro(rp, mouseX, mouseY);
+                const bool sopraP = mouseDentro && sulTasto(rp, mouseX, mouseY);
+                dritto((rp.left + rp.right) / 2, cy);   // (pillola e scritta dritte anche ai lati)
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, (tastoPremuto == 3 ? 0.30f : sopraP ? 0.22f : 0.14f) * kt * k * p)
                                          : D2D1::ColorF(0, 0, 0, (tastoPremuto == 3 ? 0.18f : sopraP ? 0.13f : 0.08f) * kt * k * p));
                 dc->FillRoundedRectangle({rp, 11 * d, 11 * d}, pennello);
                 pennello->SetColor({ink.r, ink.g, ink.b, ink.a * kt});
                 const std::wstring piu = testi::t(L"+1 min", L"+1 min");
                 const float pcx = (rp.left + rp.right) / 2;
-                dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, {pcx, cy}));
+                dritto(pcx, cy, sc);
                 dc->DrawText(piu.c_str(), (UINT32)piu.size(), fmtData, {pcx - 22 * dpi, cy - 11 * dpi, pcx + 22 * dpi, cy + 11 * dpi}, pennello);
-                dc->SetTransform(D2D1::Matrix3x2F::Identity());
+                piano();
                 const D2D1_RECT_F& rs = tastoTesta[4];
                 const float scx = (rs.left + rs.right) / 2;
                 pennello->SetColor(D2D1::ColorF(1.0f, 0.42f, 0.32f, (tastoPremuto == 4 ? 1.0f : 0.85f) * kt * k * p));
@@ -2226,11 +2390,25 @@ private:
         IDWriteTextLayout* lay = nullptr;
         if (FAILED(fdw->CreateTextLayout(etichettaTesto.c_str(), (UINT32)etichettaTesto.size(), testo, 800, 40, &lay))) return;
         DWRITE_TEXT_METRICS tm{}; lay->GetMetrics(&tm);
-        const float lw = tm.widthIncludingTrailingWhitespace + 22 * dpi, lh = 28 * dpi;
-        // dentro lo schermo anche per gli elementi vicino al bordo destro
-        const float cx = std::clamp(etichettaCx, lw / 2 + 6 * dpi, W - lw / 2 - 6 * dpi), top = etichettaTop - lh;
-        D2D1_RECT_F rr = {cx - lw / 2, top, cx + lw / 2, top + lh};
+        float lw = tm.widthIncludingTrailingWhitespace + 22 * dpi;
+        const float lh = 28 * dpi;
+        // Disegnata dritta nelle coordinate della finestra, dal lato interno dell'icona: sopra (dock in basso), sotto
+        // (in alto), a destra o a sinistra (ai lati, dove la finestra ha extraLato in piu' per lei). Dentro lo schermo
+        // anche per gli elementi vicino al bordo
+        const D2D1_POINT_2F p = fis(etichettaCx, etichettaTop);
+        D2D1_RECT_F rr{};
+        if (verticale()) {
+            lw = std::min(lw, (float)extraLato() - 6 * dpi);   // (un titolo lunghissimo si taglia: lo spazio e' quello)
+            const float cy = std::clamp(p.y, lh / 2 + 6 * dpi, finH() - lh / 2 - 6 * dpi);
+            const float x0 = lato == 2 ? p.x : p.x - lw;
+            rr = {x0, cy - lh / 2, x0 + lw, cy + lh / 2};
+            lay->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+        } else {
+            const float cx = std::clamp(p.x, lw / 2 + 6 * dpi, W - lw / 2 - 6 * dpi), top = lato == 1 ? p.y : p.y - lh;
+            rr = {cx - lw / 2, top, cx + lw / 2, top + lh};
+        }
         rettEtichetta = rr;
+        dc->SetTransform(D2D1::Matrix3x2F::Identity());
         pennello->SetColor(scuro ? D2D1::ColorF(0.18f, 0.18f, 0.2f, 0.92f * a) : D2D1::ColorF(0.96f, 0.96f, 0.97f, 0.95f * a));
         dc->FillRoundedRectangle({rr, 7 * dpi * raggio::fattore(), 7 * dpi * raggio::fattore()}, pennello);
         pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.15f * a));
@@ -2238,6 +2416,7 @@ private:
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, a) : D2D1::ColorF(0.1f, 0.1f, 0.1f, a));
         lay->SetMaxWidth(lw); lay->SetMaxHeight(lh);
         dc->DrawTextLayout({rr.left, rr.top}, lay, pennello);
+        piano();
         lay->Release();
     }
 
@@ -2666,7 +2845,11 @@ private:
     // altezza del centro di controllo rifatta se le sue righe sono cambiate a pannello aperto
     void riadattaControllo() {
         const float nuova = std::min(altezzaControllo(), altezzaMassimaP());
-        if (nuova != PH) { PH = nuova; rettPannello.top = rettPannello.bottom - (int)PH; posizionaPannello(pK < 0 ? 1 : pK); }
+        if (nuova != PH) {   // (col dock in alto resta fermo il bordo in alto, sotto il dock)
+            PH = nuova;
+            if (lato == 1) rettPannello.bottom = rettPannello.top + (int)PH; else rettPannello.top = rettPannello.bottom - (int)PH;
+            posizionaPannello(pK < 0 ? 1 : pK);
+        }
     }
 
     void nascondiPannello();
@@ -2764,8 +2947,8 @@ private:
     }
     void apriPila(const Voce& v) {
         if (pilaDownload.aperta()) { pilaDownload.chiudi(); return; }
-        const RECT r = {schermo.left + (LONG)v.rett.left, schermo.bottom - H + (LONG)v.rett.top, schermo.left + (LONG)v.rett.right, schermo.bottom - H + (LONG)v.rett.bottom};
-        pilaDownload.apri(r, cartellaDownload(), v.nome);
+        const RECT r = aSchermo(v.rett);   // (sul lato del dock)
+        pilaDownload.apri(r, cartellaDownload(), v.nome, lato);
     }
     // trascinamento di file sul dock: sul cestino si spostano nel Cestino di Windows (come trascinarli sull'icona del desktop)
     struct Bersaglio : IDropTarget {
@@ -2779,7 +2962,7 @@ private:
             return DragOver(0, pt, e);
         }
         HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt, DWORD* e) override {
-            const float x = (float)(pt.x - d->schermo.left), y = (float)(pt.y - (d->schermo.bottom - d->H));
+            float x = 0, y = 0; d->logicoSchermo({pt.x, pt.y}, x, y);
             d->mouseDentro = true; d->mouseSulDock = true; d->mouseX = x; d->mouseY = y;   // la lente segue il trascinamento
             const int i = d->iconaInPunto(x, y);
             const int s = (file && i >= 0 && d->voci[i].avvio == AVVIO_CESTINO) ? i : -1;
@@ -2923,7 +3106,7 @@ private:
 
     // il vetro acrilico segue il fondo, con la stessa forma
     void aggiornaVetro(HWND h, RECT& ultimo, float l, float t, float r, float b) {
-        RECT nuovo = {schermo.left + (int)l, schermo.bottom - H + (int)t, schermo.left + (int)r, schermo.bottom - H + (int)b};
+        RECT nuovo = aSchermo({l, t, r, b});   // (sul lato del dock)
         if (!EqualRect(&nuovo, &ultimo)) {
             ultimo = nuovo;
             SetWindowPos(h, icone, nuovo.left, nuovo.top, nuovo.right - nuovo.left, nuovo.bottom - nuovo.top, SWP_NOACTIVATE | SWP_NOREDRAW);
@@ -3131,10 +3314,11 @@ private:
         }
         for (int k = -1; k <= 1; k++) dc->DrawLine({cx + k * bw * 0.42f, top + d * 0.07f}, {cx + k * bw * 0.34f, bot - d * 0.06f}, pennello, sp, tratto);
         const float alza = sopraDrop ? d * 0.07f : 0;
-        dc->SetTransform(D2D1::Matrix3x2F::Rotation(sopraDrop ? -14.0f : 0.0f, {cx - bw * 1.2f, top - d * 0.04f}) * D2D1::Matrix3x2F::Translation(0, -alza));
+        D2D1_MATRIX_3X2_F prima{}; dc->GetTransform(&prima);   // (quella dell'icona dritta: il coperchio si gira dentro di lei)
+        dc->SetTransform(D2D1::Matrix3x2F::Rotation(sopraDrop ? -14.0f : 0.0f, {cx - bw * 1.2f, top - d * 0.04f}) * D2D1::Matrix3x2F::Translation(0, -alza) * prima);
         dc->DrawLine({cx - bw * 1.2f, top - d * 0.04f}, {cx + bw * 1.2f, top - d * 0.04f}, pennello, sp * 1.5f, tratto);
         dc->DrawLine({cx - bw * 0.3f, top - d * 0.10f}, {cx + bw * 0.3f, top - d * 0.10f}, pennello, sp * 1.5f, tratto);
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc->SetTransform(prima);
     }
 
     void disegnaIconaControllo(const D2D1_RECT_F& r, float alfa, bool scuro) {
@@ -3164,7 +3348,8 @@ private:
     // il mouse e' sull'icona App del dock?
     bool mouseSuIconaApp() const {
         POINT pt; GetCursorPos(&pt);
-        const int i = iconaInPunto((float)(pt.x - schermo.left), (float)(pt.y - (schermo.bottom - H)));
+        float x = 0, y = 0; logicoSchermo(pt, x, y);
+        const int i = iconaInPunto(x, y);
         return i >= 0 && voci[i].avvio == AVVIO_LAUNCHER;
     }
     int iconaInPunto(float x, float y) const {
@@ -3288,12 +3473,14 @@ private:
         // sopra il piu' alto dei due bordi, cosi' non coprono l'icona ingrandita
         const auto pos = posizioniRiposo();
         if ((size_t)i >= pos.size()) return;
-        const RECT ic = {schermo.left + (LONG)pos[i], schermo.bottom - H + (LONG)(yBaseRiposo() - S),
-                         schermo.left + (LONG)(pos[i] + S), schermo.bottom - H + (LONG)yBaseRiposo()};
-        const LONG cima = std::min(ic.top, schermo.bottom - H + (LONG)v.rett.top);
+        const RECT ic = aSchermo({pos[i], yBaseRiposo() - S, pos[i] + S, yBaseRiposo()});
+        // bordo interno: il piu' interno fra l'icona a riposo e quella ingrandita (una y, o ai lati una x)
+        const D2D1_POINT_2F pc = fis(pos[i], std::min(yBaseRiposo() - S, v.rett.top));
+        const POINT o = origine();
+        const LONG cima = verticale() ? o.x + std::lround(pc.x) : o.y + std::lround(pc.y);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-        if (!GetMonitorInfoW(MonitorFromPoint({(ic.left + ic.right) / 2, ic.top}, MONITOR_DEFAULTTONEAREST), &mi)) return;
-        ant.apri(finestreInOrdine(v), ic, cima, mi.rcWork, i, icone);
+        if (!GetMonitorInfoW(MonitorFromPoint({(ic.left + ic.right) / 2, (ic.top + ic.bottom) / 2}, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        ant.apri(finestreInOrdine(v), ic, cima, mi.rcWork, i, icone, lato);
         antFuoriT = -1;
         if (registro) { char b[64]; snprintf(b, 64, "dock: anteprime di %zu finestre", v.finestre.size()); scrivi(b); }
     }
@@ -3410,7 +3597,7 @@ private:
             vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
             // (con la barra di Windows nascosta l'icona nell'area di notifica non si vede: qui l'uscita si trova, #16)
             if (esci) vv.push_back(menu::voce(testi::t(L"Esci da FluidWin", L"Quit FluidWin"), 4));
-            const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (sub) DestroyMenu(sub);
             if (s == 1 && impostazioni) impostazioni(nullptr);
             else if (s == 4 && esci) esci();
@@ -3429,7 +3616,7 @@ private:
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
             if (c) { auto x = menu::voce(testi::t(L"Svuota il cestino…", L"Empty Recycle Bin…"), 2); x.disattivata = !cestinoPieno; vv.push_back(menu::separatore()); vv.push_back(x); }
             SetForegroundWindow(icone);
-            const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (s == 1) ShellExecuteW(nullptr, L"open", c ? L"shell:RecycleBinFolder" : cartellaDownload().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             if (s == 2) { SHEmptyRecycleBinW(icone, nullptr, 0); cestinoPieno = false; giroCestino = 0; dirty = true; }   // (chiede conferma Windows)
             return;
@@ -3514,7 +3701,7 @@ private:
         }
         SetForegroundWindow(icone);   // cosi' la tastiera (Esc, frecce) arriva al menu
         // sopra il dock, centrato sull'icona (il punto e' quello del clic)
-        const int s = (int)menu::mostra(voci, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+        const int s = (int)menu::mostra(voci, puntoMenu(pt), icone, lato == 0);
         if (s >= 1000 && s - 1000 < (int)comandi.size()) {
             // come dalla barra di Windows; la finestra che ne nasce e' un lancio dell'app (rimbalzo, animazione d'apertura)
             segnaLancio(v);
@@ -3562,9 +3749,10 @@ private:
                 d->diagMosse++;
                 if (!d->mouseDentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, h, 0}; TrackMouseEvent(&tm); }
                 // movimenti finti (stessa posizione, per esempio dopo un cambio di regione): niente da ridisegnare
-                if (d->mouseDentro && d->mouseX == (float)GET_X_LPARAM(l) && d->mouseY == (float)GET_Y_LPARAM(l)) return 0;
+                float lx = 0, ly = 0; d->logico((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l), lx, ly);   // (coordinate "come in basso": vedi base)
+                if (d->mouseDentro && d->mouseX == lx && d->mouseY == ly) return 0;
                 d->mouseDentro = true;
-                d->mouseX = (float)GET_X_LPARAM(l); d->mouseY = (float)GET_Y_LPARAM(l);
+                d->mouseX = lx; d->mouseY = ly;
                 const bool isola = d->sullIsola(d->mouseX, d->mouseY);
                 // (l'ora in fondo al dock e' parte del dock: l'ingrandimento resta, altrimenti il dock si stringerebbe
                 // e l'ora scapperebbe da sotto il mouse, per poi tornare)
@@ -3590,7 +3778,7 @@ private:
                 d->statoSopra = -1; d->statoPremuto = -1; d->tastoPremuto = -1; d->dirty = true;
                 return 0;
             case WM_LBUTTONDOWN: {
-                const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                float x = 0, y = 0; d->logico((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l), x, y);
                 if (d->inTesta(x, y)) { d->tastoPremuto = d->tastoTestaIn(x, y); if (d->tastoPremuto < 0) d->tastoPremuto = -2; d->ant.chiudi(); d->dirty = true; return 0; }   // musica e timer
                 if (d->sullIsola(x, y)) d->statoPremuto = d->statoInPunto(x, y);
                 else {
@@ -3602,7 +3790,7 @@ private:
                 d->dirty = true; return 0;
             }
             case WM_LBUTTONUP: {
-                const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                float x = 0, y = 0; d->logico((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l), x, y);
                 if (d->trascinando) { d->fineTrascina(); d->statoPremuto = -1; return 0; }   // (posata: niente clic)
                 if (GetCapture() == h) ReleaseCapture();
                 if (d->tastoPremuto != -1) {   // testa: il tasto premuto, se il mouse e' ancora sopra
@@ -3625,7 +3813,8 @@ private:
             case WM_MOUSEWHEEL: {   // rotella sul volume: +-2% per scatto
                 POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)}; ScreenToClient(h, &pt);
                 // (sull'icona del centro di controllo, come prima sulla pillola dell'isola)
-                const int iv = d->iconaInPunto((float)pt.x, (float)pt.y);
+                float x = 0, y = 0; d->logico((float)pt.x, (float)pt.y, x, y);
+                const int iv = d->iconaInPunto(x, y);
                 if (iv >= 0 && d->voci[iv].avvio == AVVIO_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f);
                 return 0;
             }
@@ -3648,8 +3837,9 @@ private:
                 return 0;
             case WM_RBUTTONUP: {
                 POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
-                if (d->sullIsola((float)pt.x, (float)pt.y)) return 0;
-                const int i = d->iconaInPunto((float)pt.x, (float)pt.y);
+                float x = 0, y = 0; d->logico((float)pt.x, (float)pt.y, x, y);
+                if (d->sullIsola(x, y)) return 0;
+                const int i = d->iconaInPunto(x, y);
                 ClientToScreen(h, &pt); d->menu(i, pt); return 0;
             }
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;

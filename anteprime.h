@@ -29,18 +29,23 @@ public:
     bool mouseSopra() const { for (const auto& s : schede) if (s->dentro) return true; return false; }
     int icona() const { return iconaDi; }        // indice dell'icona del dock per cui sono aperte (-1 nessuna)
 
-    // Apre (o rifa' per un'altra icona) sopra l'icona (rettangolo a riposo, coordinate dello schermo; cima: il bordo
-    // sopra il quale stanno le schede), dentro l'area di lavoro, con le finestre nell'ordine dato (al massimo quelle che
+    // Apre (o rifa' per un'altra icona) dal lato interno del dock, accanto all'icona (rettangolo a riposo, coordinate dello
+    // schermo; cima: il bordo interno del dock, una y o ai lati una x; latoDock_: vedi latoDock) e oltre il quale stanno le schede,
+    // dentro l'area di lavoro, con le finestre nell'ordine dato (al massimo quelle che
     // entrano in larghezza). dietro: la finestra delle icone del dock, sotto la quale le schede escono e rientrano
-    void apri(const std::vector<HWND>& finestre, RECT icona, LONG cima, RECT area, int indiceIcona, HWND dietro) {
+    void apri(const std::vector<HWND>& finestre, RECT icona, LONG cima, RECT area, int indiceIcona, HWND dietro, int latoDock_ = 0) {
         for (auto& s : schede) s->togliMiniatura();
-        const POINT ancora = {(icona.left + icona.right) / 2, cima};
+        // (cima: per il dock ai lati e' una x, il bordo interno; l'ancora sta li', all'altezza dell'icona)
+        const POINT ancora = latoDock_ >= 2 ? POINT{cima, (icona.top + icona.bottom) / 2} : POINT{(icona.left + icona.right) / 2, cima};
         iconaR = icona; hDietro = dietro;
         const HMONITOR mon = MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST);
         dpi = vetro::dpiMonitor(mon);
         // quante entrano: n schede larghe largoScheda() con n-1 spazi, piu' 4 px per lato (xGiusta). Prima si contava
         // LARGO senza i bordi: 7 schede a 125% su 1920 px, larghe 1980 (R20261119-205727-S4)
-        const int entrano = std::max(1, (int)(((area.right - area.left) - 8 + GAP * dpi) / (largoScheda() + GAP * dpi)));
+        // (ai lati in colonna: quante ne entrano in altezza)
+        latoDock = std::clamp(latoDock_, 0, 3);
+        const int spazio = latoDock >= 2 ? (int)(area.bottom - area.top) : (int)(area.right - area.left);
+        const int entrano = std::max(1, (int)((spazio - 8 + GAP * dpi) / (lungoScheda() + GAP * dpi)));
         n = 0;
         for (HWND h : finestre) {
             if (n >= std::min(entrano, MAX)) break;
@@ -71,8 +76,15 @@ public:
             fTitolo = schede[0]->v.formato(12.0f * dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fDpi = dpi;
         }
-        ancoraX = ancora.x; areaL = area.left; areaR = area.right;
-        y0 = std::max((int)area.top + 4, (int)ancora.y - (int)(12 * dpi) - altoScheda());
+        // (ai lati la fila e' una colonna: ancoraX, areaL e areaR sono y, y0 e' la x delle schede)
+        const bool vert = latoDock >= 2;
+        ancoraX = vert ? ancora.y : ancora.x; areaL = vert ? area.top : area.left; areaR = vert ? area.bottom : area.right;
+        switch (latoDock) {
+            case 1: y0 = std::min((int)area.bottom - 4 - altoScheda(), (int)ancora.y + (int)(12 * dpi)); break;
+            case 2: y0 = std::min((int)area.right - 4 - largoScheda(), (int)ancora.x + (int)(12 * dpi)); break;
+            case 3: y0 = std::max((int)area.left + 4, (int)ancora.x - (int)(12 * dpi) - largoScheda()); break;
+            default: y0 = std::max((int)area.top + 4, (int)ancora.y - (int)(12 * dpi) - altoScheda());
+        }
         iconaDi = indiceIcona;
         mostrata = true; chiudendo = false;
         g = std::min(g, 1.0);   // (riaperte mentre si chiudevano: si riparte da dov'erano)
@@ -178,6 +190,7 @@ private:
     IDWriteTextFormat* fTitolo = nullptr;
     float fDpi = 0, dpi = 1;
     int y0 = 0, iconaDi = -1;
+    int latoDock = 0;          // lato del dock (0 basso, 1 alto, 2 sinistra, 3 destra): le schede escono dal lato interno
     LONG ancoraX = 0, areaL = 0, areaR = 0;
     RECT iconaR{};             // l'icona a riposo, da dove escono le schede
     HWND hDietro = nullptr;    // la finestra delle icone del dock: sotto di lei mentre escono e rientrano
@@ -189,10 +202,13 @@ private:
     int largoScheda() const { return (int)std::lround((LARGO + 2 * PAD) * dpi); }
     int altoScheda() const { return (int)std::lround((PAD + TESTA + ALTO + PAD) * dpi); }
 
-    // posizione giusta della scheda i: in fila, centrate sull'icona, dentro l'area di lavoro
+    // posizione giusta della scheda i lungo la fila: centrate sull'icona, dentro l'area di lavoro (ai lati, in colonna:
+    // ancoraX, areaL e areaR sono allora y)
+    int lungoScheda() const { return latoDock >= 2 ? altoScheda() : largoScheda(); }   // lungo la fila (ai lati: in colonna)
     double xGiusta(int i) const {
-        const double tot = n * largoScheda() + (n - 1) * GAP * dpi;
+        const double tot = n * lungoScheda() + (n - 1) * GAP * dpi;
         const double x0 = std::clamp((double)ancoraX - tot / 2, (double)areaL + 4, std::max((double)areaL + 4, (double)areaR - 4 - tot));
+        return x0 + i * (lungoScheda() + GAP * dpi);
         return x0 + i * (largoScheda() + GAP * dpi);
     }
     D2D1_RECT_F rettX() const { return {(LARGO + 2 * PAD - 30) * dpi, (PAD - 2) * dpi, (LARGO + 2 * PAD - 6) * dpi, (PAD + 22) * dpi}; }
@@ -248,9 +264,13 @@ private:
             // fotogramma dopo, e accanto al quadrato piccolo si vedeva una falce di vetro chiaro), poi si allarga
             const double cresce = vetro::uscita(std::clamp((r - 0.35) / 0.65, 0.0, 1.0));
             const int alza = (int)std::lround(SALITA * dpi * s.su);
-            const double fx = s.x + LW / 2.0, fy = y0 - alza + LH / 2.0;      // centro della scheda intera
+            // (dal lato interno del dock: sopra, sotto, a destra o a sinistra; s.x e' la posizione lungo la fila)
+            double fx = s.x + LW / 2.0, fy = y0 - alza + LH / 2.0;            // centro della scheda intera
+            if (latoDock == 1) fy = y0 + alza + LH / 2.0;
+            else if (latoDock >= 2) { fx = y0 + (latoDock == 2 ? alza : -alza) + LW / 2.0; fy = s.x + LH / 2.0; }
             const double w = lato + (LW - lato) * cresce, h = lato + (LH - lato) * cresce;
-            const double cx = icx + (fx - icx) * cresce, cy = icy + (fy - icy) * sale;
+            const bool vert = latoDock >= 2;   // (ai lati la scheda esce di traverso subito e si allarga lungo la colonna)
+            const double cx = icx + (fx - icx) * (vert ? sale : cresce), cy = icy + (fy - icy) * (vert ? cresce : sale);
             const int iw = std::max(1, (int)std::lround(w)), ih = std::max(1, (int)std::lround(h));
             s.piena = r >= 1 && iw == LW && ih == LH;
             // dietro le icone mentre esce o rientra; intera, in cima (la finestra del dock e' piu' alta delle icone e,

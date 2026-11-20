@@ -33,6 +33,7 @@ struct Valori {
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
     bool notch = true;            // il notch in alto al centro sempre visibile (spento: a scomparsa, scende solo per volume, notifiche e avvisi; musica e timer nel dock)
     bool oraDock = false;         // ora e data in fondo al dock, dopo il centro di controllo
+    int dockLato = 0;             // bordo del dock: 0 in basso, 1 in alto, 2 a sinistra, 3 a destra (1.3.0, Fase 3; il notch va in basso col dock in alto)
     bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
     int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
     int dockIcone = 42;           // lato delle icone del dock a riposo, px a 100% (ICONE_MIN..ICONE_MAX); l'altezza segue
@@ -123,6 +124,7 @@ inline void carica() {
     v.winS = leggiDword(L"WinS", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
     v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
+    { const DWORD l = leggiDword(L"DockLato", 0); v.dockLato = l <= 3 ? (int)l : 0; }
     v.dockOpacita = std::clamp((int)leggiDword(L"DockOpacita", 100), OPACITA_MIN, 100);
     v.dockIcone = std::clamp((int)leggiDword(L"DockIcone", 42), ICONE_MIN, ICONE_MAX);
     v.dockDistanza = std::clamp((int)leggiDword(L"DockDistanza", 6), DISTANZA_MIN, DISTANZA_MAX);
@@ -148,7 +150,7 @@ inline void salva() {
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
-    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
+    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
     scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
@@ -681,6 +683,7 @@ private:
         if (id >= 300 && id < 300 + SEZIONI) { vaiASezione(id - 300); return; }
         if (id == 120 || id == 121) valori().riduzione = id - 120;   // stile della riduzione a icona (1.3.0)
         else if (id >= 130 && id <= 132) valori().angoli = id - 130;   // angoli (1.3.0, Fase 3)
+        else if (id >= 140 && id <= 143) valori().dockLato = id - 140;   // posizione del dock (1.3.0, Fase 3)
         else if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
@@ -1002,6 +1005,28 @@ private:
             y += 60 * d;
         }
         if (sezione == S_DOCK) {
+            {   // posizione (1.3.0, Fase 3): il bordo dello schermo dove sta il dock; quattro scelte
+                const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
+                riquadro(ra, false);
+                v.testo(testi::t(L"Posizione", L"Position"), fVoce, {ra.left + 16 * d, ra.top, ra.left + 160 * d, ra.bottom}, inkS);
+                const float x0 = ra.left + 170 * d, larg = ra.right - 16 * d - x0, h = 34 * d, yl = ra.top + 15 * d;
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const wchar_t* nomi[4] = {testi::t(L"In basso", L"Bottom"), testi::t(L"In alto", L"Top"), testi::t(L"A sinistra", L"Left"), testi::t(L"A destra", L"Right")};
+                for (int i = 0; i < 4; i++) {
+                    const D2D1_RECT_F r = {x0 + larg * i / 4 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 4 - 3 * d, yl + h - 3 * d};
+                    zone.push_back({r, 140 + i});
+                    if (valori().dockLato == i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == 140 + i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[i], fCentro, r, inkS);
+                }
+                y += 70 * d;
+            }
             // colore del dock: automatico (meta' chiaro e meta' scuro), i colori pronti, e "+" per sceglierne uno
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);

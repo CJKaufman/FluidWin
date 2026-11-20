@@ -125,6 +125,9 @@ public:
     }
     bool fisso() const { return abilitato; }
     void aggiornaAngoli() { ridisegna(); }   // impostazione "Angoli" cambiata (vedi ridisegna)
+    // col dock in alto il notch sta sul bordo in basso (impostazione "Posizione" del dock)
+    bool basso = false;
+    void inBasso(bool b) { if (b != basso) { basso = b; ridisegna(); } }
 
     // musica e timer per la capsula del dock (notch a scomparsa)
     const musica::Brano& musicaOra() const { return brano; }
@@ -354,11 +357,16 @@ private:
 
     RECT corpo() const {   // la forma sullo schermo (coordinate dello schermo)
         const int x = posX() + (int)((W2 - mw.x) / 2);
-        const int b = schermo.top + (int)(mh.x - salita());   // (a scomparsa la parte salita sopra il bordo non c'e')
-        return {x, schermo.top, x + (int)mw.x, std::max<int>(schermo.top, b)};
+        const int alto = std::max(0, (int)(mh.x - salita()));   // (a scomparsa la parte salita oltre il bordo non c'e')
+        if (basso) return {x, (int)schermo.bottom - alto, x + (int)mw.x, (int)schermo.bottom};
+        return {x, schermo.top, x + (int)mw.x, schermo.top + alto};
     }
     double salita() const { return std::max(0.0, my.x); }   // (la molla puo' scendere un poco sotto lo 0: niente stacco)
     int posX() const { return schermo.left + (schermo.right - schermo.left - W2) / 2; }
+    int yFin() const { return basso ? (int)schermo.bottom - H2 : (int)schermo.top; }   // cima della finestra sullo schermo
+    // col notch in basso i contenuti della scena s stanno contro il bordo in basso della finestra: quanto scendono
+    // rispetto al notch in alto (i contenuti si calcolano sempre come in alto)
+    float scesa(int s) const { if (!basso) return 0; float w, h, R; misura(s, w, h, R); return (float)H2 - h; }
 
     void controlla() {
         if (!visibile) return;
@@ -389,6 +397,7 @@ private:
         RECT c = corpo();
         const int m = (int)(4 * dpi);
         RECT largo = {c.left - m, c.top, c.right + m, c.bottom + m};
+        if (basso) largo = {c.left - m, c.top - m, c.right + m, c.bottom};   // (in basso si allarga verso l'alto)
         const bool dentro = c.bottom > c.top + 2 && PtInRect(&largo, p) != FALSE;   // (salito sopra il bordo: mai)
         const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
         // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
@@ -400,7 +409,7 @@ private:
             if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
         }
         // tasto sotto il mouse (aperto) e x della notifica
-        const POINT pc = {p.x - posX(), p.y - schermo.top};
+        const POINT pc = {p.x - posX(), p.y - yFin() - (int)scesa(scena)};   // (coordinate dei contenuti)
         const int ps = scena == APERTO ? pulsante(pc.x, pc.y) : scena == TIMER_APERTO ? tastoTimerIn(pc.x, pc.y) : -1;
         const bool sx = scena == NOTIFICA && dentro && sullaX(pc.x, pc.y);
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
@@ -616,7 +625,11 @@ private:
         const float su = (float)salita();
         const bool tutta = su < h + 1;
         base = su > 0 ? D2D1::Matrix3x2F::Translation(0, -su) : D2D1::Matrix3x2F::Identity();
-        rt->SetTransform(base);
+        // in basso (dock in alto): la forma si capovolge contro il bordo in basso e scende oltre; i contenuti restano
+        // dritti (base sposta solo, vedi contenuto)
+        if (basso) base = D2D1::Matrix3x2F::Translation(0, su);
+        const D2D1_MATRIX_3X2_F forma = basso ? D2D1::Matrix3x2F(1, 0, 0, -1, 0, (float)H2 + su) : base;
+        rt->SetTransform(forma);
         ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
         if (tutta && f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
             // (archi solo se hanno una misura: a raggio zero un lato dritto fino all'angolo)
@@ -654,9 +667,10 @@ private:
             // bordo anche col notch salito: dicono chi sta usando microfono e webcam)
             const sensori::Sensori& se = sensori::Sensori::io();
             if (w < 330 * dpi) {
+                const float yPunti = basso ? (float)H2 - 6 * dpi : 6 * dpi;   // (sul bordo dello schermo, anche in basso)
                 float px = x1 + f + 7 * dpi;
-                if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); px += 10 * dpi; }
-                if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); }
+                if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, 1); rt->FillEllipse({{px, yPunti}, 3.5f * dpi, 3.5f * dpi}, pen); px += 10 * dpi; }
+                if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, 1); rt->FillEllipse({{px, yPunti}, 3.5f * dpi, 3.5f * dpi}, pen); }
             }
         }
         if (g) g->Release();
@@ -671,6 +685,7 @@ private:
         if (scena == MUSICA) o = {L + w - 25 * d, h / 2};
         else if (scena == APERTO) o = {L + w - 35 * d, 24 * d};
         else return false;
+        o.y += scesa(scena);   // (notch in basso: contro il bordo in basso)
         r = {std::floor(o.x - 2), std::floor(o.y - 8 * d), std::ceil(o.x + 13 * d + 2), std::ceil(o.y + 8 * d)};
         return true;
     }
@@ -692,13 +707,22 @@ private:
     void mostraAlfa(const RECT* sporco = nullptr) {
         if (!mem) return;
         GdiFlush();
-        POINT pos = {posX(), schermo.top}, zero = {0, 0}; SIZE sz = {W2, H2};
+        POINT pos = {posX(), yFin()}, zero = {0, 0}; SIZE sz = {W2, H2};
         BLENDFUNCTION bl = {AC_SRC_OVER, 0, (BYTE)std::lround(255 * std::clamp(alfa, 0.0f, 1.0f)), AC_SRC_ALPHA};
         UPDATELAYEREDWINDOWINFO u{sizeof(u), nullptr, &pos, &sz, mem, &zero, 0, &bl, ULW_ALPHA, sporco};
         UpdateLayeredWindowIndirect(fin, &u);
     }
 
+    // contenuti della scena s: in basso scendono contro il bordo in basso (base li sposta, e chi la compone la segue)
     void contenuto(int s, float a) {
+        if (!basso) { contenutoScena(s, a); return; }
+        const D2D1_MATRIX_3X2_F b0 = base;
+        base = D2D1::Matrix3x2F::Translation(0, scesa(s)) * b0;
+        rt->SetTransform(base);
+        contenutoScena(s, a);
+        base = b0;
+    }
+    void contenutoScena(int s, float a) {
         if (a <= 0.001f) return;
         float w, h, R; misura(s, w, h, R);
         const float L = sinistra(s), d = dpi;
@@ -1209,13 +1233,13 @@ private:
         switch (m) {
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
             case WM_TIMER: if (n && w == 2) n->controlla(); return 0;
-            case WM_LBUTTONDOWN: if (n) { n->premutoX = (short)LOWORD(l); n->premutoY = (short)HIWORD(l); n->premutoS = n->scena == SCAFFALE ? n->oggettoIn(n->premutoX, n->premutoY) : -1; } return 0;
+            case WM_LBUTTONDOWN: if (n) { n->premutoX = (short)LOWORD(l); n->premutoY = (short)HIWORD(l) - (int)n->scesa(n->scena); n->premutoS = n->scena == SCAFFALE ? n->oggettoIn(n->premutoX, n->premutoY) : -1; } return 0;
             case WM_MOUSEMOVE:   // trascinamento fuori dallo scaffale
-                if (n && n->premutoS != -1 && (w & MK_LBUTTON) && (std::abs((short)LOWORD(l) - n->premutoX) > 5 || std::abs((short)HIWORD(l) - n->premutoY) > 5)) {
+                if (n && n->premutoS != -1 && (w & MK_LBUTTON) && (std::abs((short)LOWORD(l) - n->premutoX) > 5 || std::abs((short)HIWORD(l) - (int)n->scesa(n->scena) - n->premutoY) > 5)) {
                     const int s = n->premutoS; n->premutoS = -1; n->trascinaFuori(s);
                 }
                 return 0;
-            case WM_LBUTTONUP: if (n) { const bool premuto = n->premutoS != -1 || n->scena != SCAFFALE; n->premutoS = -1; if (premuto) n->clicca((short)LOWORD(l), (short)HIWORD(l)); } return 0;
+            case WM_LBUTTONUP: if (n) { const bool premuto = n->premutoS != -1 || n->scena != SCAFFALE; n->premutoS = -1; if (premuto) n->clicca((short)LOWORD(l), (short)HIWORD(l) - (int)n->scesa(n->scena)); } return 0;
             case WM_CLOSE: return 0;
         }
         return DefWindowProcW(h, m, w, l);

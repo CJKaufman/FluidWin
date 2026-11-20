@@ -461,16 +461,39 @@ inline auto Motore::apriLauncher() -> void {
     primaDelLauncher = GetForegroundWindow();
     query.clear(); filtra(); lSopra = -1; lScroll = 0; lFileH = 0;   // (la sezione dei file riparte chiusa)
     lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false; lRipreso = false;
-    // sopra il dock, al centro; la finestra scende fino all'icona "App"
-    const int x0 = schermo.left + (int)std::round((W - LW) / 2);
-    const int y1 = schermo.bottom - H + (int)std::round(yBaseRiposo() - S - PAD - 18 * dpi);
-    // schermi bassi (1366x768 al 125%: ~520 punti sopra il dock): il launcher si accorcia invece di uscire in alto
-    LH = std::clamp((float)(y1 - schermo.top) - 12 * dpi, 300 * dpi, LHMAX);
-    rettLauncher = {x0, y1 - (int)LH, x0 + (int)LW, y1};
+    // sopra il dock, al centro; la finestra scende fino all'icona "App". Col dock in alto: sotto, al centro; ai lati:
+    // accanto al dock, a meta' altezza. Li' la finestra non arriva all'icona: cresce dal suo bordo piu' vicino all'icona
     float ax = W / 2.0f;
     const auto pos = posizioniRiposo();
     for (size_t i = 0; i < voci.size(); i++) if (voci[i].avvio == AVVIO_LAUNCHER) ax = pos[i] + S / 2;
-    ancora = {(LONG)std::clamp(schermo.left + ax - x0, 40 * dpi, LW - 40 * dpi), (LONG)std::min(LH + LEXTRA - 4, (float)(schermo.bottom - H + yBaseRiposo() - S / 2 - rettLauncher.top))};
+    const RECT ic = aSchermo({ax - S / 2, yBaseRiposo() - S, ax + S / 2, yBaseRiposo()});   // l'icona App a riposo
+    const POINT o = origine();
+    const D2D1_POINT_2F bi = fis(0, yBaseRiposo() - S - PAD);   // bordo interno del dock (nella finestra del dock)
+    const int stacco = (int)std::round(18 * dpi);
+    int x0 = schermo.left + (int)std::round((schermo.right - schermo.left - LW) / 2), y0 = 0;
+    if (lato == 0) {
+        const int y1 = o.y + (int)std::round(bi.y) - stacco;
+        // schermi bassi (1366x768 al 125%: ~520 punti sopra il dock): il launcher si accorcia invece di uscire in alto
+        LH = std::clamp((float)(y1 - schermo.top) - 12 * dpi, 300 * dpi, LHMAX);
+        y0 = y1 - (int)LH;
+    } else if (lato == 1) {
+        y0 = o.y + (int)std::round(bi.y) + stacco;
+        LH = std::clamp((float)(schermo.bottom - y0) - 12 * dpi, 300 * dpi, LHMAX);
+    } else {
+        LH = std::clamp((float)(schermo.bottom - schermo.top) - 24 * dpi, 300 * dpi, LHMAX);
+        y0 = schermo.top + (int)std::round((schermo.bottom - schermo.top - LH) / 2);
+        x0 = lato == 2 ? o.x + (int)std::round(bi.x) + stacco : o.x + (int)std::round(bi.x) - stacco - (int)LW;
+        // (schermo stretto: dentro lo schermo anche a costo di coprire un poco il dock, R20261120-190507-S2)
+        x0 = std::clamp(x0, (int)schermo.left + 8, std::max((int)schermo.left + 8, (int)schermo.right - 8 - (int)LW));
+    }
+    rettLauncher = {x0, y0, x0 + (int)LW, y0 + (int)LH};
+    const float icx = (ic.left + ic.right) / 2.0f - x0, icy = (ic.top + ic.bottom) / 2.0f - y0;
+    switch (lato) {
+        case 1: ancora = {(LONG)std::clamp(icx, 40 * dpi, LW - 40 * dpi), 0}; break;
+        case 2: ancora = {0, (LONG)std::clamp(icy, 40 * dpi, LH - 40 * dpi)}; break;
+        case 3: ancora = {(LONG)LW, (LONG)std::clamp(icy, 40 * dpi, LH - 40 * dpi)}; break;
+        default: ancora = {(LONG)std::clamp(icx, 40 * dpi, LW - 40 * dpi), (LONG)std::min(LH + LEXTRA - 4, icy)};
+    }
     SetWindowRgn(launcher, nullptr, FALSE);
     SetWindowPos(launcher, HWND_TOPMOST, x0, rettLauncher.top, (int)LW, (int)(LH + LEXTRA), SWP_NOACTIVATE);
     posizionaLauncher();

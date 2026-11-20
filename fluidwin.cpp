@@ -2208,21 +2208,29 @@ static double x0Genio(const Anim& a, double t) { return std::clamp((t - a.t0) / 
 // cadutaApre (curvaRiduzione, curvaRipristino), cosi' un'inversione a meta' riparte dallo stesso disegno
 static genio::Immagine gChipTinta, gChipBordo;   // tinte del chip (si rifanno se cambia il tema)
 static int gChipTema = -1;
+// lato del dock verso cui va (o da cui esce) l'animazione: quello del dock se il bersaglio e' una sua icona, altrimenti
+// 0 (la barra di Windows, in basso). Genio e caduta si calcolano con il dock in basso e si girano (genio::canonico)
+static int latoBersaglio(const RECT& ic) { return gDockOk ? gDock.latoPer(ic) : 0; }
 static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, double alfa, std::vector<genio::Elemento>& el) {
+    const int ld = latoBersaglio(a.a);
     if (impostazioni::valori().riduzione != 1 || a.a.right <= a.a.left || p <= 0.0) {
-        el.push_back({img, a.da, a.a, p, alfa});
+        genio::Elemento e{img, a.da, a.a, p, alfa};
+        e.lato = ld;
+        el.push_back(e);
         return;
     }
     const bool riduce = a.tipo == Tipo::Riduci;
     if (!riduce) a.sobbalzo = false;   // (ripristino: se torna a ridursi, sobbalza di nuovo)
-    const double fw = std::max(1L, a.da.right - a.da.left), fh = std::max(1L, a.da.bottom - a.da.top);
-    const double fcx = (a.da.left + a.da.right) / 2.0, fcy = (a.da.top + a.da.bottom) / 2.0;
-    const double iw = a.a.right - a.a.left, ih = a.a.bottom - a.a.top;
-    const double icx = (a.a.left + a.a.right) / 2.0, icy = (a.a.top + a.a.bottom) / 2.0;
+    // (nel sistema canonico: il dock in basso, vedi genio::canonico)
+    const RECT da = genio::rettCanonico(ld, a.da), aa = genio::rettCanonico(ld, a.a);
+    const double fw = std::max(1L, da.right - da.left), fh = std::max(1L, da.bottom - da.top);
+    const double fcx = (da.left + da.right) / 2.0, fcy = (da.top + da.bottom) / 2.0;
+    const double iw = aa.right - aa.left, ih = aa.bottom - aa.top;
+    const double icx = (aa.left + aa.right) / 2.0, icy = (aa.top + aa.bottom) / 2.0;
     // a fine corsa: meta' icona (come nel modello, con icone da 72 px), ma almeno 30 px: con le icone del dock da 42 px
     // meta' era un puntino di 21 px. Centrato sull'icona resta comunque sotto la linea del taglio
     const double lato = std::min(std::max(0.5 * std::min(iw, ih), 30.0 * scalaFinestra(a.hwnd)), 0.7 * std::min(iw, ih));
-    const double myy = a.a.top - 4.0 * ih;                 // punto intermedio: sopra il dock, alla x della finestra
+    const double myy = aa.top - 4.0 * ih;                 // punto intermedio: sopra il dock, alla x della finestra
     // il disegno dipende solo da p (vedi cadutaChiude/cadutaApre): uguale nei due versi
     double cx, cy, w, h, contenuto;
     bool piccolo;   // in volo da quadratino: si taglia dietro le icone
@@ -2239,7 +2247,7 @@ static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, dou
     }
     const double x = q;   // (per il registro)
     const double l = cx - w / 2, t = cy - h / 2, r = cx + w / 2, b = cy + h / 2;
-    const double taglio = a.a.top + ih * 0.15;   // poco sotto il bordo alto delle icone (dove sono gia' piene)
+    const double taglio = aa.top + ih * 0.15;    // poco sotto il bordo alto delle icone (dove sono gia' piene)
     if (piccolo && t >= taglio) return;          // tutto dietro le icone
     if (piccolo && riduce && !a.sobbalzo && b > taglio) {
         a.sobbalzo = true;
@@ -2255,18 +2263,32 @@ static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, dou
     }
     // angoli: quelli della finestra da grande, il 22% del lato da piccola; bordo di 2 px veri a ogni misura
     const double sc = scalaFinestra(a.hwnd), rs = std::min((double)raggioDi(a.hwnd), 0.22 * std::min(w, h)), bw = 2.0 * sc;
-    // un elemento (rettangolo l,t,r,b sullo schermo) con la sua maglia 2x2, tagliato alla linea delle icone se piccolo
+    // un elemento (rettangolo L,T,R,B canonico) con la sua maglia 2x2, tagliato alla linea delle icone se piccolo. I
+    // vertici tornano sullo schermo; u e v sono quelli della foto vera (intera) o, tagliato, quelli canonici: tagliato e'
+    // solo il chip, di tinta unita, e la parte usata resta da 0 a v come col dock in basso
     auto aggiungi = [&](std::vector<genio::Vertice>& m, const genio::Immagine* im, double L, double T, double R, double B, double al, double raggio) {
         if (!im || !im->srv || al <= 0.002) return;
         double v = 1.0, Bv = B;
         if (piccolo && B > taglio) { v = std::clamp((taglio - T) / std::max(1.0, B - T), 0.0, 1.0); Bv = taglio; }
         if (Bv <= T) return;
-        m = {{(float)L, (float)T, 0, 0}, {(float)R, (float)T, 1, 0}, {(float)L, (float)Bv, 0, (float)v}, {(float)R, (float)Bv, 1, (float)v}};
-        const RECT rr = {(LONG)std::lround(L), (LONG)std::lround(T), (LONG)std::lround(R), (LONG)std::lround(Bv)};
+        const double cxs[4] = {L, R, L, R}, cys[4] = {T, T, Bv, Bv};
+        const float ca[4] = {0, 1, 0, 1}, cb[4] = {0, 0, (float)v, (float)v};
+        m.resize(4);
+        double sl = 1e9, st = 1e9, sr = -1e9, sb = -1e9;
+        for (int k = 0; k < 4; k++) {
+            const genio::P2 s = genio::dalCanonico(ld, cxs[k], cys[k]);
+            float u = ca[k], vv = cb[k];
+            if (v >= 1.0) genio::uvDalCanonico(ld, ca[k], cb[k], u, vv);
+            m[k] = {(float)s.x, (float)s.y, u, vv};
+            sl = std::min(sl, s.x); st = std::min(st, s.y); sr = std::max(sr, s.x); sb = std::max(sb, s.y);
+        }
+        const RECT rr = {(LONG)std::lround(sl), (LONG)std::lround(st), (LONG)std::lround(sr), (LONG)std::lround(sb)};
         genio::Elemento e{im, rr, rr, 0.0, al};
         e.maglia = m.data(); e.colonne = 2; e.righe = 2; e.finV = v;
-        e.raggio = raggio * im->w / std::max(1.0, R - L);        // (in pixel della texture)
-        e.raggioY = raggio * im->h / std::max(1.0, B - T);
+        // (in pixel della texture; ai lati la larghezza della foto e' l'altezza canonica)
+        const bool giro = ld >= 2;
+        e.raggio = raggio * im->w / std::max(1.0, giro ? B - T : R - L);
+        e.raggioY = raggio * im->h / std::max(1.0, giro ? R - L : B - T);
         el.push_back(e);
     };
     // Il bordo sfuma con il contenuto; la tinta invece resta piena sotto la foto finche' questa non e' piena: due strati
@@ -3865,8 +3887,8 @@ static std::wstring diagnostica() {
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
-    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d", v.dockAuto, v.dockOpacita, v.dockSpazio,
-         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi);
+    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
+         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockLato);
     riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
     return t;
 }
@@ -3904,7 +3926,7 @@ static void applicaImpostazioni() {
     gTastoWin = v.tastoWin;
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
-    if (gDockOk) { gDock.impostaNotch(v.notch); gDock.impostaOraNelDock(v.oraDock); }
+    if (gDockOk) { gDock.impostaNotch(v.notch); gDock.impostaOraNelDock(v.oraDock); gDock.impostaLato(v.dockLato); }
     // angoli di FluidWin (raggio.h): le finestre di vetro aperte cambiano subito, le altre nascono gia' cosi'
     if (raggio::stile() != v.angoli) {
         raggio::stile() = v.angoli;
@@ -4497,6 +4519,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     cursori::pulisciAvanzi();   // installazioni di cursori interrotte: recupero (prima di leggere quale pacchetto e' scelto)
     impostazioni::carica();   // prima di tutto: la lingua dei testi (dock compreso)
     gDock.altriSchermi = impostazioni::valori().dockSchermi;   // (spento: il dock nasce sul principale)
+    gDock.impostaLato(impostazioni::valori().dockLato);   // (prima di inizializza: il dock nasce gia' sul suo lato)
     gDockOk = gDock.inizializza(inst);
     if (!gDockOk) { gDock.chiudi(); ripristinaBarra(); }
     else { mostraBarreWindows(false); gDock.controllaFinestre(); }
@@ -4618,7 +4641,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     menu::animazioniInCorso = daDisegnare;
     menu::passoAnimazioni = unFotogramma;
     if (gLog) menu::registro = [](const char* s) { logf("%s", s); };
-    menu::cimaDock = [](HMONITOR m) { return gDockOk ? gDock.cimaSu(m) : INT_MAX; };   // (i menu lunghi restano sopra il dock)
+    menu::fasciaDock = [](HMONITOR m) { return gDockOk ? gDock.fasciaSu(m) : RECT{}; };   // (i menu lunghi restano fuori dal dock, su ogni lato)
 
     // ciclo principale: messaggi quando non c'e' niente da animare, un passo per fotogramma del compositore quando si anima
     MSG msg;

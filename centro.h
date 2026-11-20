@@ -108,17 +108,23 @@ inline auto Motore::apriPannello(int tipo) -> void {
     dirty = true;   // il dock risale subito con il pannello (aperto anche dal notch o da Win+N: senza, aspettava il suo timer)
     pSopra = pPremuto = -1; evidP.clear(); trascinaVolume = false; pMouseDentro = false;
     PW = PWMAX;
-    // spazio vero sopra l'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
-    // nessuna vista lo supera
-    const D2D1_RECT_F rc = rettCentro();
-    const int y1 = schermo.bottom - H + (int)std::round(rc.top - PAD - 10 * dpi);
-    phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
+    // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
+    // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
+    // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
+    const RECT ic = aSchermo(rettCentro());
+    const int stacco = (int)std::round(PAD + 10 * dpi);
+    int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
+    if (lato == 1) y1 = ic.bottom + stacco;
+    else if (verticale()) y1 = std::min((int)ic.bottom + (int)PAD, (int)schermo.bottom - 8);
+    phDisponibile = std::max(200 * dpi, (float)(lato == 1 ? schermo.bottom - y1 : y1 - schermo.top) - 12 * dpi);
     preparaVista(tipo);
     PH = altezzaVista(tipo);
     phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
-    // sopra l'icona, allineato al suo bordo destro (dentro lo schermo)
-    const int x1 = std::clamp(schermo.left + (int)std::round(rc.right + PAD), schermo.left + (int)PW + 8, schermo.right - 8);
-    rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
+    // in basso e in alto: allineato al bordo destro dell'icona (dentro lo schermo); ai lati: accanto al dock
+    int x1 = std::clamp((int)ic.right + (int)std::round(PAD), (int)schermo.left + (int)PW + 8, (int)schermo.right - 8);
+    if (lato == 2) x1 = ic.right + stacco + (int)PW;
+    else if (lato == 3) x1 = ic.left - stacco;
+    rettPannello = lato == 1 ? RECT{x1 - (int)PW, y1, x1, y1 + (int)PH} : RECT{x1 - (int)PW, y1 - (int)PH, x1, y1};
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
     posizionaPannello(0);
     ShowWindow(vetroPannello, SW_SHOWNOACTIVATE);
@@ -324,10 +330,13 @@ inline auto Motore::posizionaPannello(double k) -> void {
     float tx = 0;
     double alfa = std::min(1.0, k * 2.2);
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
+    {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const D2D1_RECT_F rc = rettCentro();
-        const float ax = std::clamp((float)(schermo.left + (rc.left + rc.right) / 2 - r.left), 0.0f, pw);
-        m = D2D1::Matrix3x2F::Scale(s, s, {ax, ph});   // dal bordo in basso, sopra l'icona
+        const RECT ic = aSchermo(rettCentro());
+        const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
+        const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
+        m = D2D1::Matrix3x2F::Scale(s, s, p);
+    }
     }
     const float pd = (float)(posDietro * posDietro * (3 - 2 * posDietro));
     const float sb = 1 - 0.06f * pd;
@@ -367,11 +376,13 @@ inline auto Motore::renderPannello() -> bool {
         k = 1 - x * x; pAnimazione = x < 1 || posaInMoto;
         if (x >= 1) { nascondiPannello(); return false; }
     }
-    // altezza: va verso quella della vista con una molla appena morbida (il bordo in basso resta fermo, sopra il dock)
+    // altezza: va verso quella della vista con una molla appena morbida (il bordo dal lato del dock resta fermo)
     if (phVis <= 0) phVis = PH;
     if (molla(phVis, phVel, PH, 210, 0.86, 0.3)) pAnimazione = true;
     const LONG alto = (LONG)std::lround(phVis);
-    if (rettPannello.bottom - rettPannello.top != alto) rettPannello.top = rettPannello.bottom - alto;
+    if (rettPannello.bottom - rettPannello.top != alto) {   // (col dock in alto resta fermo il bordo in alto, sotto il dock)
+        if (lato == 1) rettPannello.bottom = rettPannello.top + alto; else rettPannello.top = rettPannello.bottom - alto;
+    }
     posizionaPannello(k); pK = k;
 
     // cambio di vista in corso: 0..1
@@ -2450,7 +2461,7 @@ inline auto Motore::rettCentro() const -> D2D1_RECT_F {
 // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
 inline auto Motore::rettIsolaSchermo() const -> RECT {
     const D2D1_RECT_F r = rettCentro();
-    return {schermo.left + (LONG)r.left, schermo.bottom - H + (LONG)(r.top - PAD), schermo.left + (LONG)r.right, schermo.bottom - H + (LONG)(r.bottom + PAD)};
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});   // (sul lato del dock)
 }
 
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
