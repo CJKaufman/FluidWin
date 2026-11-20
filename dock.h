@@ -131,6 +131,7 @@ struct Voce {
     double scala = 1;          // 0..1: le icone nuove crescono, quelle delle app chiuse si restringono (niente scatti)
     bool uscente = false;      // app chiusa: si restringe e poi sparisce
     D2D1_RECT_F rett{};        // ultima posizione disegnata (coordinate della finestra delle icone)
+    double dx = 0;             // scostamento orizzontale che torna a 0: l'icona scivola al suo posto nuovo (riordino)
 };
 
 static std::wstring minuscolo(std::wstring s) { for (auto& c : s) c = (wchar_t)towlower(c); return s; }
@@ -341,6 +342,7 @@ public:
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
+        leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -814,6 +816,15 @@ private:
     double tiroX = 0, tiroY = 0, velTiroX = 0, velTiroY = 0;
     int sopra = -1;                  // icona sotto il mouse
     int premuta = -1;
+    // Riordino trascinando (issue #23): premuta un'icona e spostato il mouse di qualche pixel, l'icona segue il mouse e
+    // le vicine scivolano a farle posto. Le app aggiunte alla barra fra loro, le altre aperte fra loro; App e le icone
+    // di fondo restano ferme. L'ordine delle aggiunte si salva in HKCU\Software\FluidWin (OrdineFissate, i loro
+    // collegamenti; i file di Windows non si toccano), quello delle altre resta per la sessione (ordineAperte)
+    float premutaX = 0;              // x della pressione (coordinate della finestra delle icone)
+    bool trascinando = false;
+    int trascinata = -1;             // indice della voce trascinata
+    float presa = 0.5f;              // dove la si e' presa, 0..1 della larghezza dell'icona
+    std::vector<std::wstring> ordineFissate;   // collegamenti delle app aggiunte, nell'ordine scelto (vuoto: quello di Windows)
     RECT rettVetro{}, rettVetroStato{}, rettVetroOra{}, regioneDock{}, regioneIsola{}, regioneEtichetta{};
     D2D1_RECT_F rettEtichetta{};
     // etichetta (una sola, per il dock o per l'isola di stato)
@@ -1020,6 +1031,10 @@ private:
     }
 
     static std::wstring chiave(const Voce& v) { return v.exe.empty() ? v.avvio : v.exe; }
+    // la voce trascinata, senza ambiguita': le aggiunte per collegamento (due collegamenti allo stesso exe, per esempio
+    // due profili di un browser, sono due icone: con chiave() si ritrovava l'ultima, R20261120-013029-S1); le altre per
+    // chiave, come le raggruppa aggiornaApp
+    static std::wstring identita(const Voce& v) { return v.fissata ? L"F:" + v.avvio : L"A:" + chiave(v); }
 
     // cache di aggiornaApp (gira a ogni cambio di primo piano)
     std::vector<Voce> fissateCache;                 // le app fissate (senza icone ne' finestre)
@@ -1031,8 +1046,9 @@ private:
     void aggiornaApp() {
         Cronometro cr(this, "aggiornaApp");
         appDaAggiornare = false; ultimoAggiornamento = ultimoT;
-        // icona premuta: la si ritrova per nome, gli indici possono cambiare
+        // icona premuta (e trascinata): la si ritrova per nome, gli indici possono cambiare
         const std::wstring chiavePremuta = (premuta >= 0 && premuta < (int)voci.size()) ? chiave(voci[premuta]) : L"";
+        const std::wstring chiaveTrascinata = (trascinando && trascinata >= 0 && trascinata < (int)voci.size()) ? identita(voci[trascinata]) : L"";
         std::vector<Voce> nuove;
         // 0) prima icona: il launcher di tutte le app (disegnata dal dock, senza finestre)
         { Voce l; l.fissata = true; l.avvio = AVVIO_LAUNCHER; l.nome = L"App"; nuove.push_back(std::move(l)); }
@@ -1096,6 +1112,11 @@ private:
             if (!valida) { fissateCache.assign(nuove.begin() + 1, nuove.end()); fissateOk = letta; }
         }
         const size_t fissate = nuove.size();
+        // aggiunte nell'ordine scelto trascinandole (#23); quelle non ancora in elenco (aggiunte dopo) in fondo, nel loro
+        if (!ordineFissate.empty())
+            std::stable_sort(nuove.begin() + 1, nuove.begin() + fissate, [&](const Voce& a, const Voce& b) {
+                return std::find(ordineFissate.begin(), ordineFissate.end(), a.avvio) < std::find(ordineFissate.begin(), ordineFissate.end(), b.avvio);
+            });
         // 2) finestre aperte: si agganciano all'app fissata corrispondente, o creano una nuova voce
         struct Ctx { std::vector<HWND> v; } ctxF;
         EnumWindows([](HWND h, LPARAM l) -> BOOL { if (finestraDaDock(h)) ((Ctx*)l)->v.push_back(h); return TRUE; }, (LPARAM)&ctxF);
@@ -1145,7 +1166,7 @@ private:
                 if (vecchia.avvio == v.avvio || (!v.exe.empty() && vecchia.exe == v.exe)) {
                     v.icona = vecchia.icona; vecchia.icona = nullptr;
                     v.rimbalzoT0 = v.finestre.empty() ? vecchia.rimbalzoT0 : -1;   // l'app si e' aperta: fine del rimbalzo
-                    v.scala = vecchia.scala;
+                    v.scala = vecchia.scala; v.dx = vecchia.dx;
                     ritrovata[j] = true; vecchiaTrovata = true;
                     break;
                 }
@@ -1180,8 +1201,115 @@ private:
         premuta = -1;
         if (!chiavePremuta.empty())
             for (size_t i = 0; i < voci.size(); i++) if (!voci[i].uscente && chiave(voci[i]) == chiavePremuta) premuta = (int)i;
+        if (trascinando) {   // (l'app trascinata si e' chiusa nel frattempo: il trascinamento finisce)
+            trascinata = -1;
+            for (size_t i = 0; i < voci.size(); i++) if (!voci[i].uscente && identita(voci[i]) == chiaveTrascinata) { trascinata = (int)i; break; }
+            if (trascinata < 0) fineTrascina();
+        }
         sopra = -1;   // si ricalcola al prossimo fotogramma
         dirty = true;
+    }
+
+    // ---- riordino trascinando (#23) ----
+    // x di ogni icona come la disegnerebbe adesso render (lente compresa, senza gli scostamenti dx)
+    std::vector<float> posizioniAdesso() const { return disponi(dimensioni(posizioniRiposo())); }
+    // gruppo della voce i: [inizio, fine) delle aggiunte alla barra o delle altre aperte (vuoto: non si sposta)
+    std::pair<size_t, size_t> gruppo(int i) const {
+        if (i < 1 || i >= (int)primaFine || voci[i].uscente) return {0, 0};
+        return (size_t)i < primaNonFissata ? std::make_pair((size_t)1, primaNonFissata) : std::make_pair(primaNonFissata, primaFine);
+    }
+    bool trascinabile(int i) const { const auto [a, b] = gruppo(i); return b > a + 1; }
+
+    void iniziaTrascina() {
+        trascinando = true; trascinata = premuta;
+        premuta = -1;   // (da qui conta trascinata: niente clic al rilascio)
+        const D2D1_RECT_F& r = voci[trascinata].rett;
+        presa = r.right > r.left ? std::clamp((premutaX - r.left) / (r.right - r.left), 0.0f, 1.0f) : 0.5f;
+        ant.chiudi();
+        if (registro) { char b[200]; snprintf(b, 200, "dock: trascino %ls", voci[trascinata].nome.c_str()); scrivi(b); }
+        dirty = true;
+    }
+
+    // la voce trascinata passa davanti alle vicine quando il suo centro supera il loro; le vicine scivolano (dx)
+    void passoTrascina() {
+        if (trascinata < 0 || trascinata >= (int)voci.size()) return;
+        const auto [a, b] = gruppo(trascinata);
+        if (b <= a) return;
+        for (int giri = 0; giri < 40; giri++) {
+            const auto riposo = posizioniRiposo();
+            const float c = mouseX - presa * S + S / 2;   // centro dell'icona trascinata
+            int j = -1;
+            if ((size_t)trascinata + 1 < b && c > riposo[trascinata + 1] + S / 2) j = trascinata + 1;
+            else if ((size_t)trascinata > a && c < riposo[trascinata - 1] + S / 2) j = trascinata - 1;
+            if (j < 0) break;
+            const float primaX = voci[j].rett.left;   // dove si vede adesso la vicina (ultimo disegno, lente compresa)
+            std::swap(voci[trascinata], voci[j]);
+            const auto dopo = posizioniAdesso();
+            voci[trascinata].dx = primaX - dopo[trascinata];   // (la vicina e' ora all'indice trascinata): parte da li'
+            trascinata = j;
+            ricordaOrdine();
+            dirty = true;
+        }
+    }
+
+    // l'ordine di adesso diventa quello che aggiornaApp rispetta
+    void ricordaOrdine() {
+        std::vector<std::wstring> f;
+        for (size_t i = 1; i < primaNonFissata && i < voci.size(); i++) if (voci[i].fissata) f.push_back(voci[i].avvio);
+        // (anche quelle in elenco ma non trovate adesso, per esempio collegamenti spariti per un attimo: restano in fondo)
+        for (const auto& k : ordineFissate) if (std::find(f.begin(), f.end(), k) == f.end()) f.push_back(k);
+        ordineFissate = std::move(f);
+        // aperte: le chiavi del gruppo, nell'ordine nuovo, al posto della prima di loro in ordineAperte
+        std::vector<std::wstring> g;
+        for (size_t i = primaNonFissata; i < primaFine && i < voci.size(); i++) g.push_back(chiave(voci[i]));
+        size_t pos = ordineAperte.size();
+        for (size_t k = 0; k < ordineAperte.size(); k++)
+            if (std::find(g.begin(), g.end(), ordineAperte[k]) != g.end()) { pos = std::min(pos, k); }
+        std::vector<std::wstring> r;
+        for (size_t k = 0; k < ordineAperte.size(); k++) {
+            if (k == pos) r.insert(r.end(), g.begin(), g.end());
+            if (std::find(g.begin(), g.end(), ordineAperte[k]) == g.end()) r.push_back(ordineAperte[k]);
+        }
+        if (pos == ordineAperte.size()) r.insert(r.end(), g.begin(), g.end());
+        ordineAperte = std::move(r);
+    }
+
+    // fine: l'icona si posa al suo posto scivolando da dove la si e' lasciata; l'ordine delle aggiunte si salva
+    void fineTrascina() {
+        if (!trascinando) return;
+        trascinando = false;
+        if (trascinata >= 0 && trascinata < (int)voci.size()) {
+            voci[trascinata].dx = voci[trascinata].rett.left - posizioniAdesso()[trascinata];   // da dove la si vede
+            const bool fissata = (size_t)trascinata < primaNonFissata;
+            if (registro) { char b[200]; snprintf(b, 200, "dock: %ls posata al posto %d", voci[trascinata].nome.c_str(), trascinata); scrivi(b); }
+            if (fissata) salvaOrdineFissate();
+        }
+        trascinata = -1; premuta = -1;
+        if (GetCapture() == icone) ReleaseCapture();
+        // il WM_MOUSELEAVE arrivato durante il trascinamento e' stato ignorato: se il mouse ora e' fuori, si esce adesso;
+        // se e' dentro, si riarma l'avviso di uscita
+        POINT p; GetCursorPos(&p);
+        if (WindowFromPoint(p) != icone) { mouseDentro = false; mouseSulDock = false; sopra = -1; statoSopra = -1; }
+        else { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, icone, 0}; TrackMouseEvent(&tm); }
+        dirty = true;
+    }
+
+    // REG_MULTI_SZ: un collegamento per stringa
+    void salvaOrdineFissate() const {
+        std::wstring s;
+        for (const auto& k : ordineFissate) { s += k; s.push_back(L'\0'); }
+        s.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", REG_MULTI_SZ, s.data(), (DWORD)(s.size() * sizeof(wchar_t)));
+    }
+    void leggiOrdineFissate() {
+        ordineFissate.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < 4 || n > 256 * 1024) return;
+        // (due zeri in piu' in fondo: la lista finisce anche se il valore e' stato scritto senza il doppio zero)
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, L'\0');
+        DWORD cap = (DWORD)((b.size() - 2) * sizeof(wchar_t));
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &cap) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineFissate.emplace_back(p);
     }
 
     // ---- disposizione ----
@@ -1246,7 +1374,8 @@ private:
             const bool vicino = (sopraIcone && mouseSulDock) || (alto && x >= zonaDockL - 40 * dpi && x <= zonaDockR + 40 * dpi);
             // (pannello, impostazioni o anteprime delle finestre aperti: il dock resta su; le anteprime senza il dock
             // sotto restavano sospese a mezz'aria)
-            if (vicino || lAperto || !nessunaScheda() || dockSu || ant.aperta()) fuoriDal = -1;
+            // (anche durante il riordino delle icone: il mouse puo' salire, il dock non deve scendere, R20261120-013029-S2)
+            if (vicino || lAperto || !nessunaScheda() || dockSu || ant.aperta() || trascinando) fuoriDal = -1;
             else if (fuoriDal < 0) fuoriDal = adesso();
             else if (adesso() - fuoriDal > 0.35) { rivelato = false; fuoriDal = -1; dirty = true; }
         }
@@ -1338,8 +1467,17 @@ private:
                 voci.erase(voci.begin() + i);
                 if (i < primaNonFissata) primaNonFissata--;
                 if (i < primaFine) primaFine--;
+                if (trascinando && (int)i < trascinata) trascinata--;   // (la trascinata non e' mai uscente)
                 premuta = -1; sopra = -1;
             } else i++;
+        }
+
+        // riordino (#23): le icone spostate scivolano al posto nuovo (la trascinata no: segue il mouse)
+        for (size_t i = 0; i < voci.size(); i++) {
+            Voce& v = voci[i];
+            if (v.dx == 0 || (trascinando && (int)i == trascinata)) continue;
+            v.dx = std::abs(v.dx) < 0.5 ? 0 : verso(v.dx, 0, 0.07);
+            movimento = true;
         }
 
         // molla dell'ingrandimento: solo col mouse sul dock (non sull'isola di stato)
@@ -1404,12 +1542,17 @@ private:
         aggiornaVetro(vetro, rettVetro, fondoL, fondoT, fondoR, fondoB);
         zonaDockL = fondoL; zonaDockR = fondoR;
 
-        // icone
-        for (size_t i = 0; i < voci.size(); i++) {
+        // icone (la trascinata per ultima, sopra le altre)
+        const bool conTrascinata = trascinando && trascinata >= 0 && trascinata < (int)voci.size();
+        for (size_t k = 0; k < voci.size(); k++) {
+            const size_t i = !conTrascinata ? k : k < (size_t)trascinata ? k : k + 1 < voci.size() ? k + 1 : (size_t)trascinata;
             Voce& v = voci[i];
-            const float sc = (float)v.scala, d = dim[i] * sc, x = xs[i];
+            const bool presa_ = conTrascinata && (int)i == trascinata;
+            const float sc = (float)v.scala, d = dim[i] * sc;
+            // trascinata: dove la tiene il mouse (dentro il dock); le altre: al loro posto piu' lo scostamento che scivola
+            const float x = presa_ ? std::clamp(mouseX - presa * d, sinistra - d / 2, sinistra + tot - d / 2) : xs[i] + (float)v.dx;
             if (sepPrima(i) > 0) {
-                const float sep = sepPrima(i), sx = x - (sep + GAP * sc) / 2;
+                const float sep = sepPrima(i), sx = xs[i] - (sep + GAP * sc) / 2;
                 pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * sep / (GAP * 2 + 1)));
                 dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
             }
@@ -1419,6 +1562,7 @@ private:
                 if (e > 3.0) v.rimbalzoT0 = -1;
                 else { salto = (float)(std::abs(std::sin(e * M_PI / 0.55)) * S * 0.45 * std::exp(-e * 0.35)); movimento = true; }
             }
+            if (presa_) salto = 6 * dpi;   // trascinata: un poco sollevata
             const float premuto = (premuta == (int)i) ? 0.86f : 1.0f;   // un attimo piu' scura e piccola mentre la premi
             const float dd = d * premuto;
             D2D1_RECT_F r = {x + (d - dd) / 2, yb - dd - salto, x + (d - dd) / 2 + dd, yb - salto};
@@ -1508,7 +1652,7 @@ private:
         // etichetta: nome dell'app, oppure descrizione dell'elemento di stato
         bool etichettaVoluta = false;
         // (non con le anteprime aperte: le coprirebbe, e il nome e' gia' nei loro titoli)
-        if (sopra >= 0 && premuta < 0 && !ant.aperta()) {
+        if (sopra >= 0 && premuta < 0 && !trascinando && !ant.aperta()) {
             const Voce& v = voci[sopra];
             etichettaTesto = v.nome; etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
             etichettaVoluta = true;
@@ -1527,6 +1671,9 @@ private:
         // la regione della finestra limita i clic al dock (con le icone ingrandite) e all'isola di stato
         float regTop = fondoT;
         for (auto& v : voci) regTop = std::min(regTop, v.rett.top);
+        // l'icona trascinata e' disegnata 6 px piu' su del suo rett (che resta quello per il mouse): dentro anche lei
+        // (R20261120-013029-S3)
+        if (trascinando && trascinata >= 0 && trascinata < (int)voci.size()) regTop = std::min(regTop, voci[trascinata].rett.top - 6 * dpi);
         // solo se cambia: ogni SetWindowRgn genera un WM_MOUSEMOVE, che farebbe ridisegnare il dock all'infinito
         // la regione ritaglia anche il disegno: l'etichetta, finche' e' visibile, deve starci dentro
         // (dock nascosto: regioni vuote, nessun clic rubato alle finestre a schermo intero)
@@ -2632,7 +2779,7 @@ private:
 
     void controllaAnteprime() {
         const double ora = adesso();
-        const bool libero = premuta < 0 && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
+        const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
                                  voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO;
@@ -2877,22 +3024,35 @@ private:
                 if (d->statoSopra == ORA && statoPrima != ORA && GetTickCount64() - d->chiestaN > 3000) d->chiediNotifiche();
                 // anteprime delle finestre: il controllo gira mentre il mouse e' sul dock (vedi controllaAnteprime)
                 if (d->anteprimeAccese && !d->antTimer) { SetTimer(h, TIMER_ANTEPRIME, 80, nullptr); d->antTimer = true; }
+                // riordino (#23): icona premuta e mouse spostato di 8 px -> la si trascina
+                if (!d->trascinando && d->premuta >= 0 && (w & MK_LBUTTON) && std::abs(d->mouseX - d->premutaX) > 8 * d->dpi &&
+                    d->trascinabile(d->premuta))
+                    d->iniziaTrascina();
+                if (d->trascinando) d->passoTrascina();
                 d->dirty = true;
                 return 0;
             }
+            case WM_CAPTURECHANGED: if (d->trascinando && (HWND)l != h) d->fineTrascina(); return 0;   // (Esc, un'altra finestra)
             case WM_MOUSELEAVE:
+                if (d->trascinando) return 0;   // (con la cattura il mouse puo' uscire: il trascinamento continua)
                 d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->premuta = -1;
                 d->statoSopra = -1; d->statoPremuto = -1; d->dirty = true;
                 return 0;
             case WM_LBUTTONDOWN: {
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
                 if (d->sullIsola(x, y)) d->statoPremuto = d->statoInPunto(x, y);
-                else d->premuta = d->iconaInPunto(x, y);
+                else {
+                    d->premuta = d->iconaInPunto(x, y);
+                    // (cattura: il trascinamento segue il mouse anche se esce un poco dal dock)
+                    if (d->premuta >= 0) { d->premutaX = x; SetCapture(h); }
+                }
                 d->ant.chiudi();   // (clic su un'icona: le anteprime se ne vanno)
                 d->dirty = true; return 0;
             }
             case WM_LBUTTONUP: {
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                if (d->trascinando) { d->fineTrascina(); d->statoPremuto = -1; return 0; }   // (posata: niente clic)
+                if (GetCapture() == h) ReleaseCapture();
                 if (d->statoPremuto >= 0) {
                     const int i = d->statoInPunto(x, y);
                     if (i == d->statoPremuto) d->azioneStato(i);
