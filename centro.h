@@ -1038,24 +1038,36 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(tenue);
     scrivi(data, fmtVoce, {m + 2 * dpi, 52 * dpi, PW - m, 72 * dpi});
 
-    // calendario del mese, la settimana inizia di lunedi', oggi in un cerchio blu
+    // calendario del mese, oggi in un cerchio blu. Gregoriano: la settimana inizia di lunedi', come sempre. Con un
+    // altro calendario scelto in Windows (persiano, hijri, ebraico, giapponese...; issue #24) mese, giorni e oggi sono
+    // i suoi (calendario.h, ICU di Windows) e la settimana parte dal primo giorno scelto in Windows
     const float ct = N_TESTA * dpi, cb = ct + (N_CAL - 10) * dpi;
     pennello->SetColor(scheda);
     dc->FillRoundedRectangle({{m, ct, PW - m, cb}, 12 * dpi, 12 * dpi}, pennello);
     SYSTEMTIME oggi; GetLocalTime(&oggi);
-    wchar_t mese[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", mese, 64, nullptr);
-    if (mese[0]) mese[0] = (wchar_t)towupper(mese[0]);
+    const calendario::Mese& cm = calendario::meseUtente(testi::locale());
+    std::wstring mese;
+    int giorni = 0, inizio = 0, oggiG = oggi.wDay, primoSett = 0;   // inizio: colonna del primo del mese
+    if (cm.ok) {
+        mese = cm.titolo; giorni = cm.giorni; oggiG = cm.oggi;
+        primoSett = calendario::primoGiornoUtente();
+        inizio = (cm.lunediPrimo - primoSett + 7) % 7;
+    } else {
+        wchar_t b[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", b, 64, nullptr);
+        mese = b;
+        if (!mese.empty()) mese[0] = (wchar_t)towupper(mese[0]);
+        SYSTEMTIME primo = oggi; primo.wDay = 1;
+        FILETIME fp; SystemTimeToFileTime(&primo, &fp); FileTimeToSystemTime(&fp, &primo);   // giorno della settimana del primo
+        inizio = (primo.wDayOfWeek + 6) % 7;   // 0 = lunedi'
+        static const int giorniMese[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        giorni = giorniMese[oggi.wMonth - 1];
+        if (oggi.wMonth == 2 && ((oggi.wYear % 4 == 0 && oggi.wYear % 100 != 0) || oggi.wYear % 400 == 0)) giorni = 29;
+    }
     pennello->SetColor(ink);
     scrivi(mese, fmtVoce, {m + 12 * dpi, ct + 8 * dpi, PW - m, ct + 28 * dpi});
-    SYSTEMTIME primo = oggi; primo.wDay = 1;
-    FILETIME fp; SystemTimeToFileTime(&primo, &fp); FileTimeToSystemTime(&fp, &primo);   // giorno della settimana del primo
-    const int inizio = (primo.wDayOfWeek + 6) % 7;   // 0 = lunedi'
-    static const int giorniMese[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    int giorni = giorniMese[oggi.wMonth - 1];
-    if (oggi.wMonth == 2 && ((oggi.wYear % 4 == 0 && oggi.wYear % 100 != 0) || oggi.wYear % 400 == 0)) giorni = 29;
     const float cw = (PW - 2 * m - 16 * dpi) / 7, x0 = m + 8 * dpi, rh = 18 * dpi, y0 = ct + 54 * dpi;
-    for (int g = 0; g < 7; g++) {   // iniziali dei giorni nella lingua dell'utente (lunedi' 1/1/2024)
-        SYSTEMTIME s{}; s.wYear = 2024; s.wMonth = 1; s.wDay = (WORD)(1 + g);
+    for (int g = 0; g < 7; g++) {   // iniziali dei giorni nella lingua dell'utente (lunedi' 1/1/2024), dal primo giorno
+        SYSTEMTIME s{}; s.wYear = 2024; s.wMonth = 1; s.wDay = (WORD)(1 + (g + primoSett) % 7);
         wchar_t n[16] = L""; GetDateFormatEx(testi::locale(), 0, &s, L"ddd", n, 16, nullptr);
         std::wstring iniziale(1, (wchar_t)towupper(n[0]));
         pennello->SetColor(tenue);
@@ -1064,11 +1076,11 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     for (int d = 1; d <= giorni; d++) {
         const int cella = inizio + d - 1;
         const float x = x0 + (cella % 7) * cw, y = y0 + (cella / 7) * rh;
-        if (d == oggi.wDay) {
+        if (d == oggiG) {
             pennello->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1));
             dc->FillEllipse({{x + cw / 2, y + rh / 2}, 9 * dpi, 9 * dpi}, pennello);
             pennello->SetColor(D2D1::ColorF(1, 1, 1, 1));
-        } else pennello->SetColor((cella % 7) >= 5 ? tenue : ink);
+        } else pennello->SetColor((cella + primoSett) % 7 >= 5 ? tenue : ink);   // sabato e domenica piu' tenui
         scrivi(std::to_wstring(d), fmtNome, {x, y, x + cw, y + rh});
     }
 

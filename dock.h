@@ -32,6 +32,7 @@
 #include "widget.h"
 #include "jumplist.h"
 #include "anteprime.h"
+#include "calendario.h"
 #include "wifi.h"
 #include "indice.h"
 #include <mmdeviceapi.h>
@@ -1747,6 +1748,9 @@ private:
             const wchar_t* loc = testi::locale();
             if (GetDateFormatEx(loc, 0, &st, testi::t(L"ddd d MMM", L"ddd, MMM d"), b, 96, nullptr)) testoData = b;
             if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM yyyy", L"dddd, MMMM d, yyyy"), b, 96, nullptr)) { testoDataLunga = b; if (!testoDataLunga.empty()) testoDataLunga[0] = (wchar_t)towupper(testoDataLunga[0]); }
+            // con un calendario non gregoriano scelto in Windows la data del pannello (sopra il calendario) e' nel suo
+            // (issue #24); ora, data breve del dock e notch restano quelle di sempre
+            if (const calendario::Mese& cm = calendario::meseUtente(loc); cm.ok && !cm.dataLunga.empty()) testoDataLunga = cm.dataLunga;
             if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM", L"dddd, MMMM d"), b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
             notch.testi(testoOra, testoNotch);   // il notch mostra ora e data
         }
