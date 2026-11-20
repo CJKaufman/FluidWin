@@ -96,7 +96,8 @@ static const int    LARGHEZZA_BARRA  = 72;     // px: dimensione della finestra 
 static const double SFUMA_OMBRA      = 0.080;  // s: mentre il pulsante e' premuto l'ombra vera sfuma sotto la copia
 static const double ANNULLA_DOPO     = 0.150;  // s: pulsante rilasciato senza riduzione = clic annullato
 static const double RAMPA_FINESTRA   = 0.150;  // s: la finestra vera (e la sua ombra) ricompare sotto la miniatura
-static const double SFUMA_FOTO       = 0.120;  // s: la foto del genio sfuma (comincia a meta' della rampa)
+static const double SFUMA_FOTO       = 0.120;  // s: la foto del genio sfuma (solo a finestra vera gia' opaca)
+static const double MARGINE_OPACA    = 0.035;  // s: ~2 fotogrammi: DWM applica l'alfa della finestra un poco dopo
 static const double ALZA_OMBRA       = 0.20;   // s: l'ombra della gelatina passa da posata a sollevata (e indietro)
 static const double DISSOLVENZA_MINI = 0.050;  // s: la miniatura sfuma sulla finestra vera
 static const double ATTESA_STILE     = 0.150;  // s: poi si toglie lo stile layered
@@ -2248,8 +2249,8 @@ static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, dou
     // chip: tinta e bordo secondo il tema (come il vetro di FluidWin)
     const bool scuro = vetro::temaScuro();
     if (gChipTema != (int)scuro || !gChipTinta.srv || !gChipBordo.srv) {
-        if (scuro) { gGenio.tinta(0.17f, 0.17f, 0.20f, 0.94f, gChipTinta); gGenio.tinta(1, 1, 1, 0.42f, gChipBordo); }
-        else       { gGenio.tinta(0.96f, 0.96f, 0.97f, 0.94f, gChipTinta); gGenio.tinta(0, 0, 0, 0.26f, gChipBordo); }
+        if (scuro) { gGenio.tinta(0.17f, 0.17f, 0.20f, 1.0f, gChipTinta); gGenio.tinta(1, 1, 1, 0.42f, gChipBordo); }
+        else       { gGenio.tinta(0.96f, 0.96f, 0.97f, 1.0f, gChipTinta); gGenio.tinta(0, 0, 0, 0.26f, gChipBordo); }
         gChipTema = (int)scuro;
     }
     // angoli: quelli della finestra da grande, il 22% del lato da piccola; bordo di 2 px veri a ogni misura
@@ -2268,9 +2269,12 @@ static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, dou
         e.raggioY = raggio * im->h / std::max(1.0, B - T);
         el.push_back(e);
     };
+    // Il bordo sfuma con il contenuto; la tinta invece resta piena sotto la foto finche' questa non e' piena: due strati
+    // che sfumano insieme (foto a, tinta 1 - a) coprono solo 1 - a(1 - a), il 75% a meta', e la finestra grande
+    // sembrava diventare semitrasparente per un istante (l'utente, crescendo fino a schermo intero)
     const double chip = 1.0 - contenuto;
     aggiungi(a.magliaB, &gChipBordo, l - bw, t - bw, r + bw, b + bw, chip, rs + bw);
-    aggiungi(a.magliaT, &gChipTinta, l, t, r, b, chip, rs);
+    aggiungi(a.magliaT, &gChipTinta, l, t, r, b, contenuto < 0.999 ? 1.0 : 0.0, rs);
     aggiungi(a.magliaC, img, l, t, r, b, contenuto, rs);
 }
 
@@ -2354,11 +2358,13 @@ static void passo(double t) {
                 if (x >= 1.0) { a.fase = 1; a.tFase = t; }
             } else if (a.fase == 1 || a.fase == 2) {
                 // la finestra vera, con la sua ombra, ricompare sotto la foto in 150 ms (ombra morbida, non uno scatto);
-                // a meta' la foto comincia a sfumare (in 120 ms): niente attesa in piu' con la foto ferma sullo schermo
+                // solo quando e' opaca la foto sfuma (in 120 ms). Prima la foto cominciava a sfumare a meta' rampa: per
+                // un paio di fotogrammi foto e finestra erano entrambe parziali e dietro si vedeva lo sfondo (lampo
+                // semitrasparente ~0,47 s dopo il clic, misurato su Edge e segnalato su Brave, genio e caduta)
                 a.pGenio = 0;
                 const double e = t - a.tFase;
                 const double k = morbido(e / RAMPA_FINESTRA);
-                const double kf = morbido((e - RAMPA_FINESTRA / 2) / SFUMA_FOTO);
+                const double kf = morbido((e - RAMPA_FINESTRA - MARGINE_OPACA) / SFUMA_FOTO);
                 if (a.fase == 1) alfaFinestra(a.hwnd, (BYTE)std::max<long>(ALFA_INVISIBILE, std::lround(k * 255)));
                 if (k >= 1.0) a.fase = 2;   // (finestra vera piena)
                 elementi.push_back({&foto->second, a.da, a.a, 0.0, 1.0 - kf});
