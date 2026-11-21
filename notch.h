@@ -373,7 +373,7 @@ private:
         }
         if (!abilitato) {
             if (s == SCAFFALE && scaffale.empty()) { w = 196 * d; h = 32 * d; }
-            if (s == VOLUME) { w = 216 * d; h = 28 * d; }
+            if (s == VOLUME) { w = 200 * d; h = 28 * d; }   // (prima 216: compatto, vedi volumeScena)
             if (s == AVVISO && simboloAvviso != sensori::S_PUNTINA) { w = std::min(w, 316 * d); h = 28 * d; }
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
@@ -736,17 +736,25 @@ private:
                 const bool pieno = stile == VELO && !scaffale.empty();
                 const float stesa = (float)std::clamp(distensione.x / 100.0, 0.0, 1.0);
                 const bool notificaGrande = scena == NOTIFICA;
-                const float piano = w * (pieno || notificaGrande ? 0.48f : 0.39f);
-                const float riposo = piano + (pieno ? 85.0f : notificaGrande ? 70.0f : 43.0f) * dpi;
+                // marea (volume, alimentazione): fondo piatto largo quanto i contenuti e ali corte, come un angolo che
+                // si raccorda al bordo; prima il fondo era il 39% della misura e le ali larghe 43 px (forma a trapezio
+                // con i contenuti sopra le ali)
+                const bool marea = stile == MAREA;
+                // (marea: il fondo piatto comincia 8 px dentro, la curva ne prende 26: angolo tondo, contenuti fuori)
+                const float piano = marea ? w * 0.5f - 8 * dpi : w * (pieno || notificaGrande ? 0.48f : 0.39f);
+                const float riposo = piano + (pieno ? 85.0f : notificaGrande ? 70.0f : marea ? 26.0f : 43.0f) * dpi;
                 const float fine = std::min(centro - dpi, riposo + (centro - dpi - riposo) * stesa);
                 const float ala = std::max(dpi, fine - piano);
                 const float fase = (float)std::clamp((adesso() - tOnda) / DURATA_ECO, 0.0, 1.0);
                 s->BeginFigure({centro - fine, 0}, D2D1_FIGURE_BEGIN_FILLED);
                 for (int j = 0; j <= 160; ++j) {
                     const float x = fine * (j / 80.0f - 1.0f);
-                    const float k = std::clamp((std::abs(x) - piano) / ala, 0.0f, 1.0f);
+                    float k = std::clamp((std::abs(x) - piano) / ala, 0.0f, 1.0f);
+                    // marea: la curva gira presto (angolo in basso piccolo e tondo) e poi scende piano verso il bordo
+                    // (raccordo concavo lungo); con lo smoothstep semplice il fianco sembrava una rampa dritta
+                    if (marea) k = 1 - std::pow(1 - k, 1.6f);
                     const float arco = std::min(1.0f, std::abs(x) / std::max(dpi, piano));
-                    float y = h * (1 - (pieno ? 0.0f : 0.08f)*arco*arco) * (1 - k*k*(3-2*k));
+                    float y = h * (1 - (pieno || marea ? 0.0f : 0.08f)*arco*arco) * (1 - k*k*(3-2*k));
                     if (stile == ECO && fase < 1 && k > 0) {
                         const float z = (k - fase) * 6;
                         y += 11 * dpi * std::exp(-z*z) * std::sin(3.14159f*k) * (1-fase);
@@ -1364,42 +1372,53 @@ private:
         rt->FillGeometry(g, pen); g->Release();
     }
 
+    // Notch a scomparsa (impostazione Notch spenta): margine m uguale ai due lati; simbolo (largo 17 px a 100%), spazio,
+    // barra, spazio, numero allineato a destra. La barra prende il resto: il numero (o "Muto", piu' lungo in altre
+    // lingue) ha lo spazio che gli serve. Prima: simbolo a 22 px dal bordo, barra fra 52 e w-58 e numero in una casella
+    // fissa di 38 px, con 30 px vuoti a destra del numero. Con il notch acceso la disposizione resta quella di prima.
     void volumeScena(float L, float w, float h, float a) {
-        const float d = dpi, cy = h / 2, sx = L + 22 * d;
+        const bool fisso = abilitato;   // notch acceso: misure di prima
+        const float d = dpi, cy = h / 2, m = 14 * d, s = (fisso ? 1.0f : 0.85f) * d;   // s: scala del simbolo
+        const float sx = fisso ? L + 22 * d : L + m + 6 * s;            // (il simbolo va da sx-6s a sx+13.5s, onda grande)
         colore(1, 1, 1, a);
-        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
-        if (SUCCEEDED(fabbriche::d2d()->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {   // altoparlante
-            s->BeginFigure({sx - 6 * d, cy - 3.2f * d}, D2D1_FIGURE_BEGIN_FILLED);
-            const D2D1_POINT_2F p[] = {{sx - 2 * d, cy - 3.2f * d}, {sx + 3 * d, cy - 7.5f * d}, {sx + 3 * d, cy + 7.5f * d}, {sx - 2 * d, cy + 3.2f * d}, {sx - 6 * d, cy + 3.2f * d}};
-            s->AddLines(p, 5); s->EndFigure(D2D1_FIGURE_END_CLOSED); s->Close(); s->Release();
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* gs = nullptr;
+        if (SUCCEEDED(fabbriche::d2d()->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&gs))) {   // altoparlante
+            gs->BeginFigure({sx - 6 * s, cy - 3.2f * s}, D2D1_FIGURE_BEGIN_FILLED);
+            const D2D1_POINT_2F p[] = {{sx - 2 * s, cy - 3.2f * s}, {sx + 3 * s, cy - 7.5f * s}, {sx + 3 * s, cy + 7.5f * s}, {sx - 2 * s, cy + 3.2f * s}, {sx - 6 * s, cy + 3.2f * s}};
+            gs->AddLines(p, 5); gs->EndFigure(D2D1_FIGURE_END_CLOSED); gs->Close(); gs->Release();
             rt->FillGeometry(g, pen);
         }
         if (g) g->Release();
-        const float liv = muto ? 0.0f : livelloVis;
+        const float liv = muto ? 0.0f : livelloVis, tratto = (fisso ? 1.7f : 1.6f) * d, xm = fisso ? 14.0f : 13.0f;
         if (muto) {
-            rt->DrawLine({sx + 7 * d, cy - 4 * d}, {sx + 14 * d, cy + 4 * d}, pen, 1.7f * d);
-            rt->DrawLine({sx + 14 * d, cy - 4 * d}, {sx + 7 * d, cy + 4 * d}, pen, 1.7f * d);
+            rt->DrawLine({sx + 7 * s, cy - 4 * s}, {sx + xm * s, cy + 4 * s}, pen, tratto);
+            rt->DrawLine({sx + xm * s, cy - 4 * s}, {sx + 7 * s, cy + 4 * s}, pen, tratto);
         } else {
             for (int i = 0; i < 2; i++) {
                 if (liv < (i == 0 ? 0.01f : 0.5f)) break;
-                const float r = (i == 0 ? 6.0f : 10.5f) * d;
+                const float r = (i == 0 ? 6.0f : 10.5f) * s;
                 ID2D1PathGeometry* ar = nullptr; ID2D1GeometrySink* as = nullptr;
                 if (FAILED(fabbriche::d2d()->CreatePathGeometry(&ar)) || FAILED(ar->Open(&as))) { if (ar) ar->Release(); break; }
-                as->BeginFigure({sx + 3 * d + r * 0.6f, cy - r * 0.8f}, D2D1_FIGURE_BEGIN_HOLLOW);
-                as->AddArc(D2D1::ArcSegment({sx + 3 * d + r * 0.6f, cy + r * 0.8f}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                as->BeginFigure({sx + 3 * s + r * 0.6f, cy - r * 0.8f}, D2D1_FIGURE_BEGIN_HOLLOW);
+                as->AddArc(D2D1::ArcSegment({sx + 3 * s + r * 0.6f, cy + r * 0.8f}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
                 as->EndFigure(D2D1_FIGURE_END_OPEN); as->Close(); as->Release();
-                rt->DrawGeometry(ar, pen, 1.7f * d); ar->Release();
+                rt->DrawGeometry(ar, pen, tratto); ar->Release();
             }
         }
-        const D2D1_RECT_F b = {L + 52 * d, cy - 3.5f * d, L + w - 58 * d, cy + 3.5f * d};
+        wchar_t t[16]; swprintf(t, 16, muto ? testi::t(L"Muto", L"Muted") : L"%d", (int)std::lround(livello * 100));
+        const float destra = fisso ? L + w - 18 * d : L + w - m;
+        const float largoNum = fisso ? 0.0f : std::max(larghezza(L"100", fNumero), larghezza(t, fNumero));
+        const float bl = fisso ? L + 52 * d : sx + 13.5f * s + 10 * d;
+        const float br = fisso ? L + w - 58 * d : std::max(bl + 20 * d, destra - largoNum - 10 * d);
+        const float bh = (fisso ? 3.5f : 2.5f) * d;   // mezza altezza della barra
+        const D2D1_RECT_F b = {bl, cy - bh, br, cy + bh};
         colore(1, 1, 1, 0.2f * a);
-        rt->FillRoundedRectangle({b, 3.5f * d, 3.5f * d}, pen);
+        rt->FillRoundedRectangle({b, bh, bh}, pen);
         if (liv > 0.005f) {
             colore(1, 1, 1, a);
-            rt->FillRoundedRectangle({{b.left, b.top, b.left + std::max(7 * d, (b.right - b.left) * liv), b.bottom}, 3.5f * d, 3.5f * d}, pen);
+            rt->FillRoundedRectangle({{b.left, b.top, b.left + std::max(2 * bh, (b.right - b.left) * liv), b.bottom}, bh, bh}, pen);
         }
-        wchar_t t[16]; swprintf(t, 16, muto ? testi::t(L"Muto", L"Muted") : L"%d", (int)std::lround(livello * 100));
-        scrivi(t, fNumero, {L + w - 56 * d, 0, L + w - 18 * d, h}, a);
+        scrivi(t, fNumero, {fisso ? L + w - 56 * d : br + 6 * d, 0, destra, h}, a);
     }
 
     void notificaScena(float L, float w, float h, float a) {

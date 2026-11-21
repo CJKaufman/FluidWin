@@ -121,6 +121,15 @@ language (seven of them), the shape of the corners, where the dock sits, and one
 
 ...and a lot more.
 
+## What's new in 1.3.1
+
+A quick fix release.
+
+- **Pinned apps match the Windows taskbar:** apps from the Microsoft Store (WhatsApp, Outlook...) now show up, and
+  there are no more blank icons or duplicate icons (for example Discord after an update).
+- **Full-screen apps:** the dock now comes back when you move the mouse to the screen edge (games are unchanged).
+- **Volume in the hidden notch:** smaller and tidier.
+
 ## What's new in 1.3.0
 
 The biggest FluidWin update so far: new features, a lot of what you asked for in the Issues, and the most thorough
