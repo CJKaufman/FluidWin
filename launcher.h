@@ -895,6 +895,293 @@ inline auto Motore::scaricaIconaGiocoOnline(const AppL& a, const std::wstring& a
     return L"";
 }
 
+struct CandidatoIcona {
+    std::wstring thumbUrl;
+    std::wstring fullUrl;
+};
+
+static inline int punteggioUrlIcona(const std::wstring& u) {
+    if (u.rfind(L"https://", 0) != 0 && u.rfind(L"http://", 0) != 0) return 0;
+    const size_t q = u.find_first_of(L"?#");
+    const std::wstring base = minuscolo(q == std::wstring::npos ? u : u.substr(0, q));
+    if (finisceCon(base, L".png") || finisceCon(base, L".ico")) return 3;
+    if (finisceCon(base, L".jpg") || finisceCon(base, L".jpeg") || finisceCon(base, L".webp")) return 2;
+    return 1;
+}
+
+static inline void estraiCandidatiDataJson(const std::wstring& json,
+                                           std::vector<CandidatoIcona>& out,
+                                           std::unordered_set<std::wstring>& visti,
+                                           int limite) {
+    if (limite <= 0) return;
+    size_t i = trovaChiaveJson(json, L"data");
+    if (i == std::wstring::npos || i >= json.size() || json[i] != L'[') return;
+    i++;
+    int arrDepth = 1;
+    int objDepth = 0;
+    std::wstring curUrl, curThumb;
+    std::vector<std::pair<int, CandidatoIcona>> trovati;
+
+    while (i < json.size() && arrDepth > 0) {
+        const wchar_t ch = json[i];
+        if (ch == L'"') {
+            std::wstring s;
+            if (!leggiStringaJson(json, i, s)) break;
+            if (arrDepth == 1 && objDepth == 1) {
+                size_t j = i;
+                while (j < json.size() && iswspace(json[j])) j++;
+                if (j < json.size() && json[j] == L':') {
+                    j++;
+                    while (j < json.size() && iswspace(json[j])) j++;
+                    if ((s == L"url" || s == L"thumb") && j < json.size() && json[j] == L'"') {
+                        std::wstring val;
+                        if (leggiStringaJson(json, j, val)) {
+                            if (s == L"url") curUrl = std::move(val);
+                            else curThumb = std::move(val);
+                        }
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        } else if (ch == L'{') {
+            if (arrDepth == 1 && objDepth == 0) {
+                curUrl.clear();
+                curThumb.clear();
+            }
+            objDepth++;
+            i++;
+        } else if (ch == L'}') {
+            if (objDepth > 0) {
+                objDepth--;
+                if (arrDepth == 1 && objDepth == 0) {
+                    const int pUrl = punteggioUrlIcona(curUrl);
+                    if (pUrl > 0) {
+                        std::wstring th = punteggioUrlIcona(curThumb) > 0 ? curThumb : curUrl;
+                        trovati.push_back({pUrl, {std::move(th), std::move(curUrl)}});
+                    }
+                    curUrl.clear();
+                    curThumb.clear();
+                }
+            }
+            i++;
+        } else if (ch == L'[') {
+            arrDepth++;
+            i++;
+        } else if (ch == L']') {
+            arrDepth--;
+            i++;
+        } else {
+            i++;
+        }
+    }
+
+    std::stable_sort(trovati.begin(), trovati.end(),
+        [](const auto& a, const auto& b) { return a.first > b.first; });
+
+    int aggiunti = 0;
+    for (auto& [punti, cand] : trovati) {
+        (void)punti;
+        if (aggiunti >= limite) break;
+        if (visti.insert(cand.fullUrl).second) {
+            out.push_back(std::move(cand));
+            aggiunti++;
+        }
+    }
+}
+
+static inline auto estraiIdArrayJson(const std::wstring& json, const wchar_t* chiaveArray, int maxId) -> std::vector<std::wstring> {
+    std::vector<std::wstring> out;
+    if (maxId <= 0) return out;
+    size_t i = trovaChiaveJson(json, chiaveArray);
+    if (i == std::wstring::npos || i >= json.size() || json[i] != L'[') return out;
+    i++;
+    int arrDepth = 1;
+    int objDepth = 0;
+    std::unordered_set<std::wstring> visti;
+
+    while (i < json.size() && arrDepth > 0 && (int)out.size() < maxId) {
+        const wchar_t ch = json[i];
+        if (ch == L'"') {
+            std::wstring s;
+            if (!leggiStringaJson(json, i, s)) break;
+            if (arrDepth == 1 && objDepth == 1 && s == L"id") {
+                size_t j = i;
+                while (j < json.size() && iswspace(json[j])) j++;
+                if (j < json.size() && json[j] == L':') {
+                    j++;
+                    while (j < json.size() && iswspace(json[j])) j++;
+                    if (j < json.size() && iswdigit(json[j])) {
+                        std::wstring id;
+                        while (j < json.size() && iswdigit(json[j])) id.push_back(json[j++]);
+                        if (!id.empty() && visti.insert(id).second) out.push_back(std::move(id));
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        } else if (ch == L'{') {
+            objDepth++;
+            i++;
+        } else if (ch == L'}') {
+            if (objDepth > 0) objDepth--;
+            i++;
+        } else if (ch == L'[') {
+            arrDepth++;
+            i++;
+        } else if (ch == L']') {
+            arrDepth--;
+            i++;
+        } else {
+            i++;
+        }
+    }
+    return out;
+}
+
+template <class Gioco>
+static inline auto cercaCandidatiIconaOnline(const Gioco& a, const std::wstring& apiKey, int maxRis = 16) -> std::vector<CandidatoIcona> {
+    std::vector<CandidatoIcona> out;
+    if (maxRis <= 0) return out;
+    std::unordered_set<std::wstring> visti;
+
+    auto estraiCifre = [](const std::wstring& s, size_t pos) -> std::wstring {
+        std::wstring r;
+        while (pos < s.size() && iswdigit(s[pos])) r.push_back(s[pos++]);
+        return r;
+    };
+
+    const std::wstring avv = minuscolo(a.avvio);
+    std::wstring platform, pid;
+    if (avv.rfind(L"steam://rungameid/", 0) == 0) {
+        platform = L"steam";
+        pid = estraiCifre(avv, 18);
+    } else if (avv.rfind(L"uplay://launch/", 0) == 0) {
+        platform = L"uplay";
+        pid = estraiCifre(avv, 15);
+    } else if (avv.rfind(L"goggalaxy://opengameview/", 0) == 0) {
+        platform = L"gog";
+        pid = estraiCifre(avv, 25);
+    }
+
+    if (!apiKey.empty()) {
+        auto aggiungiSgdb = [&](const std::wstring& ep, int lim) {
+            const int spazio = std::min(lim, maxRis - (int)out.size());
+            if (spazio <= 0) return;
+            const std::string body = httpPrendi(L"https://www.steamgriddb.com/api/v2/" + ep, apiKey, 2 * 1024 * 1024);
+            if (!body.empty()) estraiCandidatiDataJson(utf8AWide(body), out, visti, spazio);
+        };
+
+        if (!platform.empty() && !pid.empty()) {
+            aggiungiSgdb(L"icons/" + platform + L"/" + pid, 12);
+            aggiungiSgdb(L"grids/" + platform + L"/" + pid + L"?dimensions=512x512,1024x1024", 6);
+        }
+        if ((int)out.size() < 4 && !a.nome.empty()) {
+            const std::string sr = httpPrendi(L"https://www.steamgriddb.com/api/v2/search/autocomplete/" + codificaUrl(a.nome), apiKey, 2 * 1024 * 1024);
+            const std::wstring gid = sr.empty() ? L"" : primoIdInArrayJson(utf8AWide(sr), L"data");
+            if (!gid.empty()) {
+                aggiungiSgdb(L"icons/game/" + gid, 12);
+                aggiungiSgdb(L"grids/game/" + gid + L"?dimensions=512x512,1024x1024", 6);
+            }
+        }
+    }
+
+    if ((apiKey.empty() || (int)out.size() < 4) && (int)out.size() < maxRis) {
+        auto aggiungiSteamUrl = [&](const std::wstring& u) {
+            if ((int)out.size() >= maxRis) return;
+            if (visti.insert(u).second) out.push_back({u, u});
+        };
+        auto aggiungiSteamId = [&](const std::wstring& sid, bool conCapsule) {
+            if (sid.empty() || (int)out.size() >= maxRis) return;
+            const std::wstring pref = L"https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/" + sid + L"/";
+            aggiungiSteamUrl(pref + L"library_600x900.jpg");
+            aggiungiSteamUrl(pref + L"header.jpg");
+            if (conCapsule) aggiungiSteamUrl(pref + L"capsule_616x353.jpg");
+        };
+
+        if (platform == L"steam" && !pid.empty()) {
+            aggiungiSteamId(pid, true);
+        }
+        if ((int)out.size() < maxRis && !a.nome.empty()) {
+            const std::string sr = httpPrendi(L"https://store.steampowered.com/api/storesearch/?term=" + codificaUrl(a.nome) + L"&l=english&cc=US", L"", 2 * 1024 * 1024);
+            if (!sr.empty()) {
+                const auto ids = estraiIdArrayJson(utf8AWide(sr), L"items", 4);
+                for (const auto& sid : ids) {
+                    if ((int)out.size() >= maxRis) break;
+                    aggiungiSteamId(sid, false);
+                }
+            }
+        }
+    }
+
+    return out;
+}
+
+static inline bool decodificaImmagineMemoria(const std::string& bytes, int lato, std::vector<BYTE>& out) {
+    out.clear();
+    if (bytes.empty() || lato <= 0 || bytes.size() > 32 * 1024 * 1024) return false;
+
+    IWICImagingFactory* wic = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapDecoder* dec = nullptr;
+    IWICBitmapFrameDecode* fr = nullptr;
+    IWICBitmapClipper* cl = nullptr;
+    IWICBitmapScaler* sc = nullptr;
+    IWICFormatConverter* cv = nullptr;
+    bool ok = false;
+
+    if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) && wic &&
+        SUCCEEDED(wic->CreateStream(&stream)) && stream &&
+        SUCCEEDED(stream->InitializeFromMemory((BYTE*)bytes.data(), (DWORD)bytes.size())) &&
+        SUCCEEDED(wic->CreateDecoderFromStream(stream, nullptr, WICDecodeMetadataCacheOnDemand, &dec)) && dec) {
+        UINT cnt = 0;
+        dec->GetFrameCount(&cnt);
+        UINT best = 0;
+        ULONGLONG bestArea = 0;
+        for (UINT idx = 0; idx < cnt; idx++) {
+            IWICBitmapFrameDecode* tf = nullptr;
+            if (SUCCEEDED(dec->GetFrame(idx, &tf)) && tf) {
+                UINT tw = 0, th = 0;
+                if (SUCCEEDED(tf->GetSize(&tw, &th)) && (ULONGLONG)tw * th > bestArea) {
+                    bestArea = (ULONGLONG)tw * th;
+                    best = idx;
+                }
+                tf->Release();
+            }
+        }
+        UINT fw = 0, fh = 0;
+        if (SUCCEEDED(dec->GetFrame(best, &fr)) && fr && SUCCEEDED(fr->GetSize(&fw, &fh)) && fw && fh) {
+            IWICBitmapSource* src = fr;
+            if (fw != fh) {
+                const UINT q = std::min(fw, fh);
+                const WICRect rc{(INT)(fw - q) / 2, (INT)(fh - q) / 2, (INT)q, (INT)q};
+                if (SUCCEEDED(wic->CreateBitmapClipper(&cl)) && cl && SUCCEEDED(cl->Initialize(fr, &rc))) src = cl;
+                else src = nullptr;
+            }
+            if (src && SUCCEEDED(wic->CreateBitmapScaler(&sc)) && sc) {
+                HRESULT hrScale = sc->Initialize(src, (UINT)lato, (UINT)lato, WICBitmapInterpolationModeFant);
+                if (FAILED(hrScale)) hrScale = sc->Initialize(src, (UINT)lato, (UINT)lato, WICBitmapInterpolationModeCubic);
+                if (SUCCEEDED(hrScale) &&
+                    SUCCEEDED(wic->CreateFormatConverter(&cv)) && cv &&
+                    SUCCEEDED(cv->Initialize(sc, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom))) {
+                    const size_t stride = (size_t)lato * 4;
+                    out.resize(stride * (size_t)lato);
+                    if (SUCCEEDED(cv->CopyPixels(nullptr, (UINT)stride, (UINT)out.size(), out.data()))) {
+                        ok = true;
+                    } else {
+                        out.clear();
+                    }
+                }
+            }
+        }
+    }
+
+    for (IUnknown* u : {(IUnknown*)cv, (IUnknown*)sc, (IUnknown*)cl, (IUnknown*)fr, (IUnknown*)dec, (IUnknown*)stream, (IUnknown*)wic}) {
+        if (u) u->Release();
+    }
+    return ok;
+}
+
 inline auto Motore::leggiTuttiGiochi(bool subito) -> void {
     gLetto = adesso();
     if (subito) { Cronometro cr(this, "leggiTuttiGiochi"); applicaTuttiGiochi(elencaTuttiGiochi()); return; }
@@ -2693,6 +2980,700 @@ inline auto Motore::scaricaIconaGioco(const AppL& a) -> void {
         });
 }
 
+inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
+    lDialogoAperto = true;
+
+    struct IconaTrovata {
+        std::wstring thumbUrl;
+        std::wstring fullUrl;
+        std::string rawBytes;
+        std::vector<BYTE> bgra;
+    };
+
+    struct StatoWorker {
+        std::mutex mtx;
+        std::atomic<bool> annulla{false};
+        std::atomic<int> generazione{0};
+        HWND hwnd = nullptr;
+        std::deque<IconaTrovata> coda;
+        int totaleCandidati = 0;
+    };
+
+    struct ElementoIcona {
+        std::wstring thumbUrl;
+        std::wstring fullUrl;
+        std::string rawBytes;
+        std::vector<BYTE> bgra;
+        ID2D1Bitmap* bmp = nullptr;
+    };
+
+    struct ScegliIconaDlg {
+        Motore* motore = nullptr;
+        AppL gioco;
+        std::wstring apiKey;
+        vetro::Finestra v;
+        IDWriteTextFormat* fTitolo = nullptr;
+        IDWriteTextFormat* fSotto = nullptr;
+        IDWriteTextFormat* fStato = nullptr;
+        IDWriteTextFormat* fBtn = nullptr;
+        IDWriteTextFormat* fVuotoTitolo = nullptr;
+        IDWriteTextFormat* fVuoto = nullptr;
+        ID2D1LinearGradientBrush* sheen = nullptr;
+        unsigned sheenGiro = 0;
+        unsigned bmpGiro = 0;
+        float fmtDpi = 0.0f;
+
+        std::vector<ElementoIcona> elementi;
+        std::shared_ptr<StatoWorker> worker;
+        int genCorrente = 0;
+        bool caricamento = true;
+        int totaleAttesi = 0;
+
+        float scrollY = 0.0f;
+        int hovTile = -1;
+        bool hovClose = false;
+        bool hovKey = false;
+        bool hovCancel = false;
+        bool trackingMouse = false;
+        int pressedKind = 0;
+        int pressedTile = -1;
+
+        bool finito = false;
+        bool sceltoOk = false;
+        std::wstring sceltoThumbUrl;
+        std::wstring sceltoFullUrl;
+        std::string sceltoRaw;
+        ULONGLONG tFade = 0;
+
+        static bool dentro(const D2D1_RECT_F& r, float x, float y) {
+            return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        }
+
+        float headerH() const { return 56.0f * v.dpi; }
+        float footerH() const { return 52.0f * v.dpi; }
+        float gridTop() const { return headerH(); }
+        float gridBottom() const { return (float)v.H - footerH(); }
+
+        D2D1_RECT_F rectClose() const {
+            const float s = v.dpi;
+            const float pad = 20.0f * s, sz = 28.0f * s;
+            return { (float)v.W - pad - sz, 14.0f * s, (float)v.W - pad, 14.0f * s + sz };
+        }
+
+        D2D1_RECT_F rectKey() const {
+            const float s = v.dpi;
+            const float pad = 20.0f * s, h = 30.0f * s, w = 168.0f * s;
+            const float y = gridBottom() + (footerH() - h) * 0.5f;
+            return { pad, y, pad + w, y + h };
+        }
+
+        D2D1_RECT_F rectCancel() const {
+            const float s = v.dpi;
+            const float pad = 20.0f * s, h = 30.0f * s, w = 88.0f * s;
+            const float y = gridBottom() + (footerH() - h) * 0.5f;
+            return { (float)v.W - pad - w, y, (float)v.W - pad, y + h };
+        }
+
+        int slotCount() const {
+            const int loaded = (int)elementi.size();
+            if (!caricamento) return loaded;
+            return std::max(loaded, totaleAttesi > 0 ? totaleAttesi : 8);
+        }
+
+        D2D1_RECT_F tileRect(int idx) const {
+            const float s = v.dpi;
+            const float tile = 92.0f * s, gap = 12.0f * s;
+            const float gridW = 4.0f * tile + 3.0f * gap;
+            const float x0 = ((float)v.W - gridW) * 0.5f;
+            const float topPad = (caricamento ? 34.0f : 14.0f) * s;
+            const int col = idx % 4;
+            const int row = idx / 4;
+            const float x = x0 + (float)col * (tile + gap);
+            const float y = gridTop() + topPad + (float)row * (tile + gap) - scrollY;
+            return { x, y, x + tile, y + tile };
+        }
+
+        float scrollMax() const {
+            const int cnt = slotCount();
+            if (cnt <= 0) return 0.0f;
+            const float s = v.dpi;
+            const float tile = 92.0f * s, gap = 12.0f * s;
+            const float topPad = (caricamento ? 34.0f : 14.0f) * s;
+            const float botPad = 14.0f * s;
+            const int rows = (cnt + 3) / 4;
+            const float contentH = topPad + (float)rows * tile + (float)std::max(0, rows - 1) * gap + botPad;
+            const float viewH = std::max(1.0f, gridBottom() - gridTop());
+            return std::max(0.0f, contentH - viewH);
+        }
+
+        int tileAt(float mx, float my) const {
+            if (my < gridTop() || my > gridBottom()) return -1;
+            for (int i = 0; i < (int)elementi.size(); i++) {
+                if (dentro(tileRect(i), mx, my)) return i;
+            }
+            return -1;
+        }
+
+        void aggiornaFormati() {
+            if (fTitolo && std::abs(fmtDpi - v.dpi) < 0.01f) return;
+            for (IDWriteTextFormat** fp : { &fTitolo, &fSotto, &fStato, &fBtn, &fVuotoTitolo, &fVuoto }) {
+                if (*fp) { (*fp)->Release(); *fp = nullptr; }
+            }
+            const float s = v.dpi;
+            fTitolo = v.formato(15.0f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+            fSotto = v.formato(11.5f * s, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, false);
+            fStato = v.formato(11.5f * s, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+            fBtn = v.formato(12.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+            fVuotoTitolo = v.formato(14.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER, false);
+            fVuoto = v.formato(12.5f * s, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER, true);
+            fmtDpi = s;
+        }
+
+        void aggiornaSheen() {
+            if (sheen && sheenGiro == v.giroRt) return;
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            if (!v.rt) return;
+            const D2D1_GRADIENT_STOP stops[2] = {
+                { 0.0f, D2D1::ColorF(1, 1, 1, v.scuro ? 0.14f : 0.42f) },
+                { 1.0f, D2D1::ColorF(1, 1, 1, 0.0f) }
+            };
+            ID2D1GradientStopCollection* col = nullptr;
+            if (SUCCEEDED(v.rt->CreateGradientStopCollection(stops, 2, &col)) && col) {
+                v.rt->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties({ 0, 0 }, { 0, (float)v.H * 0.42f }),
+                    col, &sheen);
+                col->Release();
+            }
+            sheenGiro = v.giroRt;
+        }
+
+        ID2D1Bitmap* creaBitmap96(const std::vector<BYTE>& bgra) {
+            if (!v.rt || bgra.size() < 96u * 96u * 4u) return nullptr;
+            ID2D1Bitmap* bmp = nullptr;
+            const D2D1_BITMAP_PROPERTIES bp = D2D1::BitmapProperties(
+                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            if (FAILED(v.rt->CreateBitmap(D2D1::SizeU(96, 96), bgra.data(), 96 * 4, bp, &bmp))) return nullptr;
+            return bmp;
+        }
+
+        void aggiornaBitmapsRt() {
+            if (bmpGiro == v.giroRt) return;
+            for (auto& el : elementi) {
+                if (el.bmp) { el.bmp->Release(); el.bmp = nullptr; }
+                el.bmp = creaBitmap96(el.bgra);
+            }
+            bmpGiro = v.giroRt;
+        }
+
+        void liberaBitmaps() {
+            for (auto& el : elementi) {
+                if (el.bmp) { el.bmp->Release(); el.bmp = nullptr; }
+            }
+        }
+
+        void libera() {
+            liberaBitmaps();
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            for (IDWriteTextFormat** fp : { &fTitolo, &fSotto, &fStato, &fBtn, &fVuotoTitolo, &fVuoto }) {
+                if (*fp) { (*fp)->Release(); *fp = nullptr; }
+            }
+        }
+
+        void fermaWorker() {
+            if (!worker) return;
+            std::lock_guard<std::mutex> lk(worker->mtx);
+            worker->annulla.store(true);
+            worker->hwnd = nullptr;
+        }
+
+        void avviaRicerca() {
+            fermaWorker();
+            liberaBitmaps();
+            elementi.clear();
+            scrollY = 0.0f;
+            hovTile = -1;
+            pressedTile = -1;
+            caricamento = true;
+            totaleAttesi = 0;
+
+            const int gen = ++genCorrente;
+            auto st = std::make_shared<StatoWorker>();
+            st->generazione.store(gen);
+            st->hwnd = v.fin;
+            worker = st;
+
+            AppL copiaGioco = gioco;
+            copiaGioco.icona = nullptr;
+            const std::wstring key = apiKey;
+
+            std::thread([st, copiaGioco = std::move(copiaGioco), key, gen]() {
+                CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                const auto cands = cercaCandidatiIconaOnline(copiaGioco, key, 16);
+                if (!st->annulla.load()) {
+                    {
+                        std::lock_guard<std::mutex> lk(st->mtx);
+                        st->totaleCandidati = (int)cands.size();
+                        if (st->hwnd && !st->annulla.load()) {
+                            PostMessageW(st->hwnd, WM_APP + 2, (WPARAM)gen, 0);
+                        }
+                    }
+                    for (const auto& c : cands) {
+                        if (st->annulla.load()) break;
+                        std::string raw = httpPrendi(c.thumbUrl, L"", 4 * 1024 * 1024);
+                        if (st->annulla.load()) break;
+                        if (estensioneDaMagic(raw, false).empty()) continue;
+                        std::vector<BYTE> bgra;
+                        if (!decodificaImmagineMemoria(raw, 96, bgra)) continue;
+                        if (st->annulla.load()) break;
+                        std::lock_guard<std::mutex> lk(st->mtx);
+                        if (!st->hwnd || st->annulla.load()) break;
+                        st->coda.push_back({ c.thumbUrl, c.fullUrl, std::move(raw), std::move(bgra) });
+                        PostMessageW(st->hwnd, WM_APP + 2, (WPARAM)gen, 0);
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> lk(st->mtx);
+                    if (st->hwnd && !st->annulla.load()) {
+                        PostMessageW(st->hwnd, WM_APP + 3, (WPARAM)gen, 0);
+                    }
+                }
+                CoUninitialize();
+            }).detach();
+
+            if (v.fin) InvalidateRect(v.fin, nullptr, FALSE);
+        }
+
+        void raccogliRisultati(int gen) {
+            if (gen != genCorrente || !worker) return;
+            std::deque<IconaTrovata> arrivate;
+            {
+                std::lock_guard<std::mutex> lk(worker->mtx);
+                totaleAttesi = std::max(totaleAttesi, worker->totaleCandidati);
+                arrivate.swap(worker->coda);
+            }
+            bmpGiro = v.giroRt;
+            for (auto& it : arrivate) {
+                ElementoIcona el;
+                el.thumbUrl = std::move(it.thumbUrl);
+                el.fullUrl = std::move(it.fullUrl);
+                el.rawBytes = std::move(it.rawBytes);
+                el.bgra = std::move(it.bgra);
+                el.bmp = creaBitmap96(el.bgra);
+                if (el.bmp) elementi.push_back(std::move(el));
+            }
+            if (v.fin) InvalidateRect(v.fin, nullptr, FALSE);
+        }
+
+        void disegna() {
+            if (!v.inizia(0.84f)) return;
+            aggiornaFormati();
+            aggiornaSheen();
+            aggiornaBitmapsRt();
+
+            const float s = v.dpi;
+            const float rad = v.raggio();
+            if (sheen) {
+                v.rt->FillRoundedRectangle(
+                    D2D1::RoundedRect({ 0, 0, (float)v.W, (float)v.H }, rad, rad),
+                    sheen);
+            }
+
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, v.scuro ? 0.18f : 0.72f));
+            v.rt->DrawRoundedRectangle(
+                D2D1::RoundedRect({ 0.5f, 0.5f, (float)v.W - 0.5f, (float)v.H - 0.5f },
+                    std::max(0.0f, rad - 0.5f), std::max(0.0f, rad - 0.5f)),
+                v.pen, 1.0f);
+
+            const float pad = 20.0f * s;
+            const D2D1_RECT_F rClose = rectClose();
+            v.testo(testi::t(L"Scegli icona online", L"Choose icon online"),
+                    fTitolo, { pad, 10.0f * s, rClose.left - 8.0f * s, 32.0f * s }, v.inchiostro());
+            const std::wstring sub = gioco.nome + L" · " + (apiKey.empty() ? L"Steam" : L"SteamGridDB + Steam");
+            v.testo(sub, fSotto, { pad, 32.0f * s, rClose.left - 8.0f * s, 50.0f * s }, v.inchiostro(0.62f));
+
+            const float closeRad = (rClose.right - rClose.left) * 0.5f;
+            v.pen->SetColor(v.scuro
+                ? D2D1::ColorF(1, 1, 1, hovClose ? 0.18f : 0.08f)
+                : D2D1::ColorF(0, 0, 0, hovClose ? 0.11f : 0.05f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(rClose, closeRad, closeRad), v.pen);
+            const float cx = (rClose.left + rClose.right) * 0.5f;
+            const float cy = (rClose.top + rClose.bottom) * 0.5f;
+            const float arm = 4.8f * s;
+            v.pen->SetColor(v.inchiostro(hovClose ? 0.95f : 0.72f));
+            v.rt->DrawLine({ cx - arm, cy - arm }, { cx + arm, cy + arm }, v.pen, 1.6f * s);
+            v.rt->DrawLine({ cx + arm, cy - arm }, { cx - arm, cy + arm }, v.pen, 1.6f * s);
+
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.08f));
+            v.rt->DrawLine({ pad, headerH() }, { (float)v.W - pad, headerH() }, v.pen, 1.0f);
+
+            const float gTop = gridTop();
+            const float gBot = gridBottom();
+            v.rt->PushAxisAlignedClip({ 0.0f, gTop, (float)v.W, gBot }, D2D1_ANTIALIAS_MODE_ALIASED);
+
+            if (caricamento) {
+                const wchar_t* msg = totaleAttesi == 0
+                    ? testi::t(L"Ricerca online…", L"Searching online…")
+                    : testi::t(L"Caricamento icone…", L"Loading icons…");
+                v.testo(msg, fStato, { pad, gTop + 8.0f * s, (float)v.W - pad, gTop + 28.0f * s }, v.inchiostro(0.62f));
+            }
+
+            if (!caricamento && elementi.empty()) {
+                const float midY = (gTop + gBot) * 0.5f;
+                v.testo(testi::t(L"Nessuna icona trovata online", L"No icons found online"),
+                        fVuotoTitolo, { pad, midY - 28.0f * s, (float)v.W - pad, midY - 2.0f * s }, v.inchiostro(0.85f));
+                v.testo(testi::t(L"Imposta una chiave API SteamGridDB o rinomina il gioco",
+                                 L"Try setting a SteamGridDB API key or renaming the game"),
+                        fVuoto, { pad + 16.0f * s, midY + 4.0f * s, (float)v.W - pad - 16.0f * s, midY + 48.0f * s }, v.inchiostro(0.58f));
+            } else {
+                const int cnt = slotCount();
+                const float tileRad = 14.0f * s;
+                const float iconSz = 76.0f * s;
+                const float iconRad = 10.0f * s;
+                for (int idx = 0; idx < cnt; idx++) {
+                    const D2D1_RECT_F tr = tileRect(idx);
+                    if (tr.bottom < gTop || tr.top > gBot) continue;
+
+                    const bool loaded = idx < (int)elementi.size();
+                    const bool hov = loaded && idx == hovTile;
+                    v.pen->SetColor(v.scuro
+                        ? D2D1::ColorF(1, 1, 1, hov ? 0.18f : (loaded ? 0.09f : 0.06f))
+                        : D2D1::ColorF(1, 1, 1, hov ? 0.88f : (loaded ? 0.62f : 0.42f)));
+                    v.rt->FillRoundedRectangle(D2D1::RoundedRect(tr, tileRad, tileRad), v.pen);
+
+                    if (hov) {
+                        v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.88f));
+                        v.rt->DrawRoundedRectangle(D2D1::RoundedRect(tr, tileRad, tileRad), v.pen, 1.6f * s);
+                    } else {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+                        v.rt->DrawRoundedRectangle(D2D1::RoundedRect(tr, tileRad, tileRad), v.pen, 1.0f);
+                    }
+
+                    const float ix = (tr.left + tr.right - iconSz) * 0.5f;
+                    const float iy = (tr.top + tr.bottom - iconSz) * 0.5f;
+                    const D2D1_RECT_F ir = { ix, iy, ix + iconSz, iy + iconSz };
+                    if (loaded && elementi[idx].bmp) {
+                        ID2D1BitmapBrush* bb = nullptr;
+                        const D2D1_BITMAP_BRUSH_PROPERTIES bbp = D2D1::BitmapBrushProperties(
+                            D2D1_EXTEND_MODE_CLAMP, D2D1_EXTEND_MODE_CLAMP, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                        const float k = iconSz / 96.0f;
+                        const D2D1_BRUSH_PROPERTIES bp = D2D1::BrushProperties(
+                            1.0f, D2D1::Matrix3x2F::Scale(k, k) * D2D1::Matrix3x2F::Translation(ix, iy));
+                        if (SUCCEEDED(v.rt->CreateBitmapBrush(elementi[idx].bmp, bbp, bp, &bb)) && bb) {
+                            v.rt->FillRoundedRectangle(D2D1::RoundedRect(ir, iconRad, iconRad), bb);
+                            bb->Release();
+                        } else {
+                            v.rt->DrawBitmap(elementi[idx].bmp, ir, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                        }
+                    } else {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.05f));
+                        v.rt->FillRoundedRectangle(D2D1::RoundedRect(ir, iconRad, iconRad), v.pen);
+                    }
+                }
+            }
+
+            v.rt->PopAxisAlignedClip();
+
+            const float sMax = scrollMax();
+            if (sMax > 0.5f) {
+                const float viewH = gBot - gTop;
+                const float trackTop = gTop + 8.0f * s;
+                const float trackH = std::max(1.0f, viewH - 16.0f * s);
+                const float thumbH = std::clamp(trackH * (viewH / (viewH + sMax)), 26.0f * s, trackH);
+                const float thumbY = trackTop + (trackH - thumbH) * (scrollY / sMax);
+                const float bw = 4.0f * s;
+                const float bx = (float)v.W - 8.0f * s - bw;
+                v.pen->SetColor(v.inchiostro(0.28f));
+                v.rt->FillRoundedRectangle(D2D1::RoundedRect({ bx, thumbY, bx + bw, thumbY + thumbH }, bw * 0.5f, bw * 0.5f), v.pen);
+            }
+
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.08f));
+            v.rt->DrawLine({ pad, gBot }, { (float)v.W - pad, gBot }, v.pen, 1.0f);
+
+            auto disegnaPill = [&](const D2D1_RECT_F& r, const wchar_t* label, bool hov) {
+                const float pr = (r.bottom - r.top) * 0.5f;
+                v.pen->SetColor(v.scuro
+                    ? D2D1::ColorF(1, 1, 1, hov ? 0.18f : 0.10f)
+                    : D2D1::ColorF(0, 0, 0, hov ? 0.10f : 0.05f));
+                v.rt->FillRoundedRectangle(D2D1::RoundedRect(r, pr, pr), v.pen);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.16f) : D2D1::ColorF(0, 0, 0, 0.10f));
+                v.rt->DrawRoundedRectangle(D2D1::RoundedRect(r, pr, pr), v.pen, 1.0f);
+                v.testo(label, fBtn, r, v.inchiostro());
+            };
+            disegnaPill(rectKey(), testi::t(L"Chiave SteamGridDB…", L"SteamGridDB key…"), hovKey);
+            disegnaPill(rectCancel(), testi::t(L"Annulla", L"Cancel"), hovCancel);
+
+            v.finisci();
+        }
+
+        bool messaggio(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+            switch (m) {
+                case WM_PAINT:
+                    disegna();
+                    return true;
+                case WM_TIMER:
+                    if (w == 2) {
+                        const double p = std::clamp((double)(GetTickCount64() - tFade) / 140.0, 0.0, 1.0);
+                        v.alfa(vetro::uscita(p));
+                        if (p >= 1.0) KillTimer(h, 2);
+                        return true;
+                    }
+                    return false;
+                case WM_APP + 2:
+                    raccogliRisultati((int)w);
+                    r = 0;
+                    return true;
+                case WM_APP + 3:
+                    if ((int)w == genCorrente) {
+                        raccogliRisultati((int)w);
+                        caricamento = false;
+                        scrollY = std::clamp(scrollY, 0.0f, scrollMax());
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    r = 0;
+                    return true;
+                case WM_MOUSEWHEEL: {
+                    const float delta = (float)GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA;
+                    const float next = std::clamp(scrollY - delta * 52.0f * v.dpi, 0.0f, scrollMax());
+                    if (std::abs(next - scrollY) > 0.1f) {
+                        scrollY = next;
+                        POINT pt{ GET_X_LPARAM(l), GET_Y_LPARAM(l) };
+                        ScreenToClient(h, &pt);
+                        hovTile = tileAt((float)pt.x, (float)pt.y);
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    r = 0;
+                    return true;
+                }
+                case WM_KEYDOWN:
+                    if (w == VK_ESCAPE) {
+                        fermaWorker();
+                        finito = true;
+                        r = 0;
+                        return true;
+                    }
+                    return false;
+                case WM_MOUSEMOVE: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (!trackingMouse) {
+                        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, h, 0 };
+                        trackingMouse = TrackMouseEvent(&tme) != FALSE;
+                    }
+                    const bool hc = dentro(rectClose(), mx, my);
+                    const bool hk = dentro(rectKey(), mx, my);
+                    const bool ha = dentro(rectCancel(), mx, my);
+                    const int ht = tileAt(mx, my);
+                    if (hc != hovClose || hk != hovKey || ha != hovCancel || ht != hovTile) {
+                        hovClose = hc;
+                        hovKey = hk;
+                        hovCancel = ha;
+                        hovTile = ht;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                }
+                case WM_MOUSELEAVE:
+                    trackingMouse = false;
+                    if (hovClose || hovKey || hovCancel || hovTile != -1) {
+                        hovClose = hovKey = hovCancel = false;
+                        hovTile = -1;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                case WM_LBUTTONDOWN: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (dentro(rectClose(), mx, my)) {
+                        pressedKind = 1;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (dentro(rectKey(), mx, my)) {
+                        pressedKind = 2;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (dentro(rectCancel(), mx, my)) {
+                        pressedKind = 3;
+                        SetCapture(h);
+                        return true;
+                    }
+                    const int t = tileAt(mx, my);
+                    if (t >= 0) {
+                        pressedKind = 4;
+                        pressedTile = t;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (my < headerH()) {
+                        ReleaseCapture();
+                        SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_LBUTTONUP: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    const int kind = pressedKind;
+                    const int pTile = pressedTile;
+                    pressedKind = 0;
+                    pressedTile = -1;
+                    if (GetCapture() == h) ReleaseCapture();
+                    if (kind == 1 && dentro(rectClose(), mx, my)) {
+                        fermaWorker();
+                        finito = true;
+                        return true;
+                    }
+                    if (kind == 3 && dentro(rectCancel(), mx, my)) {
+                        fermaWorker();
+                        finito = true;
+                        return true;
+                    }
+                    if (kind == 2 && dentro(rectKey(), mx, my)) {
+                        const std::wstring prima = apiKey;
+                        EnableWindow(h, FALSE);
+                        motore->impostaChiaveSteamGridDB();
+                        motore->lDialogoAperto = true;
+                        EnableWindow(motore->launcher, FALSE);
+                        EnableWindow(h, TRUE);
+                        SetForegroundWindow(h);
+                        SetFocus(h);
+                        const std::wstring dopo = motore->leggiChiaveSteamGridDB();
+                        if (dopo != prima) {
+                            apiKey = dopo;
+                            avviaRicerca();
+                        } else {
+                            InvalidateRect(h, nullptr, FALSE);
+                        }
+                        return true;
+                    }
+                    if (kind == 4 && pTile >= 0 && pTile < (int)elementi.size() && tileAt(mx, my) == pTile) {
+                        sceltoThumbUrl = elementi[pTile].thumbUrl;
+                        sceltoFullUrl = elementi[pTile].fullUrl;
+                        sceltoRaw = std::move(elementi[pTile].rawBytes);
+                        sceltoOk = true;
+                        fermaWorker();
+                        finito = true;
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_CLOSE:
+                    fermaWorker();
+                    finito = true;
+                    r = 0;
+                    return true;
+                case WM_DESTROY:
+                    fermaWorker();
+                    libera();
+                    return false;
+            }
+            return false;
+        }
+    } dlg;
+
+    dlg.motore = this;
+    dlg.gioco = a;
+    dlg.gioco.icona = nullptr;
+    dlg.apiKey = leggiChiaveSteamGridDB();
+
+    const wchar_t* clsName = L"FluidWin.ScegliIconaGioco";
+    WNDCLASSW wc{};
+    if (!GetClassInfoW(GetModuleHandleW(nullptr), clsName, &wc)) {
+        wc.lpfnWndProc = vetro::procedura<ScegliIconaDlg>;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = clsName;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
+    }
+
+    if (dlg.v.crea(clsName, vetro::procedura<ScegliIconaDlg>, &dlg, true, 2, true, true)) {
+        const int W = (int)std::lround(472.0f * dpi);
+        const int H = (int)std::lround(436.0f * dpi);
+        RECT rl{};
+        GetWindowRect(launcher, &rl);
+        int wx = rl.left + ((rl.right - rl.left) - W) / 2;
+        int wy = rl.top + ((rl.bottom - rl.top) - H) / 2;
+        MONITORINFO mi{ sizeof(mi) };
+        if (GetMonitorInfoW(MonitorFromWindow(launcher, MONITOR_DEFAULTTONEAREST), &mi)) {
+            wx = std::clamp(wx, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - W));
+            wy = std::clamp(wy, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - H));
+        }
+
+        dlg.v.posiziona(wx, wy, W, H, HWND_TOPMOST, 0);
+        EnableWindow(launcher, FALSE);
+        dlg.tFade = GetTickCount64();
+        ShowWindow(dlg.v.fin, SW_SHOW);
+        SetForegroundWindow(dlg.v.fin);
+        SetFocus(dlg.v.fin);
+        SetTimer(dlg.v.fin, 2, 16, nullptr);
+        dlg.avviaRicerca();
+
+        MSG msg{};
+        while (!dlg.finito && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        KillTimer(dlg.v.fin, 2);
+        EnableWindow(launcher, TRUE);
+    }
+
+    dlg.fermaWorker();
+    dlg.libera();
+    dlg.v.chiudi();
+
+    lDialogoAperto = false;
+    if (lAperto && !lChiusura) prendiFuoco(launcher);
+
+    if (dlg.sceltoOk) {
+        const std::wstring chiave = chiaveGioco(a);
+        const std::wstring thumbUrl = std::move(dlg.sceltoThumbUrl);
+        const std::wstring fullUrl = std::move(dlg.sceltoFullUrl);
+        auto rawFallback = std::make_shared<std::string>(std::move(dlg.sceltoRaw));
+        auto ris = std::make_shared<std::wstring>();
+        inSottofondo(
+            [chiave, thumbUrl, fullUrl, rawFallback, ris] {
+                const std::wstring cacheDir = cartellaCacheIconeGiochi();
+                if (cacheDir.empty()) return;
+                std::string bytes;
+                if (!fullUrl.empty() && fullUrl != thumbUrl) {
+                    bytes = httpPrendi(fullUrl, L"", 8 * 1024 * 1024);
+                }
+                if (bytes.empty() || estensioneDaMagic(bytes, false).empty()) {
+                    bytes = *rawFallback;
+                }
+                const std::wstring ext = estensioneDaMagic(bytes, false);
+                if (ext.empty()) return;
+                const std::wstring dest = cacheDir + L"\\" + hashChiaveGioco(chiave) + ext;
+                if (scriviFileBinario(dest, bytes)) *ris = dest;
+            },
+            [this, chiave, ris] {
+                if (ris->empty()) return;
+                const std::wstring& p = *ris;
+                auto ic = leggiIconeGiochi();
+                ic[chiave] = p;
+                salvaIconeGiochi(ic);
+                iconeChieste.erase(chiaveIcona(p, 96));
+                for (auto& g : tuttiGiochi) {
+                    if (chiaveGioco(g) == chiave) {
+                        if (g.icona) { g.icona->Release(); g.icona = nullptr; }
+                        g.iconaFile = p;
+                        g.iconaPers = true;
+                        g.provata = true;
+                    }
+                }
+                chiediIcona(p, 96);
+                lDirty = true;
+            });
+    }
+}
+
 inline auto Motore::scaricaTutteIconeOnline() -> void {
     if (lScaricaIconeInCorso) return;
     std::vector<AppL> lista;
@@ -2754,7 +3735,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (hasCartella || hasFile)
         vv.push_back(menu::voce(testi::t(L"Apri percorso", L"Open folder"), 3));
     vv.push_back(menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 6));
-    vv.push_back(menu::voce(testi::t(L"Scarica icona online", L"Fetch icon online"), 10));
+    vv.push_back(menu::voce(testi::t(L"Scarica icona online…", L"Fetch icon online…"), 10));
     if (a.iconaPers)
         vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 7));
     vv.push_back(menu::voce(testi::t(L"Rinomina…", L"Rename…"), 8));
@@ -2849,7 +3830,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
     } else if (cmd == 10) {
-        scaricaIconaGioco(a);
+        scegliIconaOnline(a);
     }
 }
 
