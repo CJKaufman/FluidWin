@@ -534,6 +534,7 @@ public:
             }
             if (adesso() - wlCercataT > 10) { wlCercataT = adesso(); wlan.cerca(); }
         }
+        if (pannelloTipo == P_SFONDO && !pChiusura && ++giroSfondo % 4 == 0) leggiAppSfondo();
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
         if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro
                                             || sensori::Sensori::io().versioneTempo != versioneTempoCentro)) {
@@ -551,7 +552,7 @@ public:
             // da' mai o lo toglie subito, e prima si richiudeva da solo dopo 0,6 s. Li' lo chiude un clic fuori, vedi
             // controllaClicFuori, o Esc)
             usa(0);
-            if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso) chiudiTutte();
+            if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso && !pMenuTray) chiudiTutte();
         }
         if (lAperto && !lChiusura && !lDialogoAperto && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
     }
@@ -1723,7 +1724,9 @@ private:
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
         const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
-        if (schedaFinestra(WindowFromPoint(pt))) return;
+        HWND hw = WindowFromPoint(pt);
+        if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
+        if (pMenuTray) { pMenuTray = false; return; }
         scrivi("centro di controllo: clic fuori, si chiude");
         chiudiTutte();
     }
@@ -2816,7 +2819,7 @@ private:
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     jumplist::Indice jumpList;           // comandi delle app (tasto destro sulle icone), letti dai file di Windows
     IDWriteTextFormat* fmtNotizia = nullptr;
-    enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
+    enum Azione { A_APP, A_APP_CHIUDI, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
@@ -2866,7 +2869,12 @@ private:
     std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeN;   // per AppUserModelID (nullptr = provata, nessuna icona)
     std::unordered_map<std::wstring, std::wstring> iconeNDaExe;   // eseguibile chiesto al posto dell'AppUserModelID -> AppUserModelID
     IDWriteTextFormat* fmtGrande = nullptr;
-    struct AppSfondo { std::wstring nome, exe, avvio, chiaveReg; ID2D1Bitmap* icona = nullptr; };
+    struct AppSfondo {
+        std::wstring nome, exe, avvio, chiaveReg;
+        ID2D1Bitmap* icona = nullptr;
+        HWND hWndTray = nullptr;
+        UINT uidTray = 0, msgTray = 0, verTray = 0;
+    };
     struct Elemento { D2D1_RECT_F r; Azione azione; int indice; };
 
     HWND pannello = nullptr, vetroPannello = nullptr;
@@ -2915,6 +2923,10 @@ private:
     // verso il pulsante da cui era nato e il centro di controllo torna avanti
     bool pRipreso = false;                // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
     bool pFuocoAvuto = false;             // il pannello ha avuto il primo piano almeno una volta da quando e' aperto
+    bool pMenuTray = false;               // menu nativo di un'icona di sistema aperto sopra il pannello
+    DWORD pMenuTrayPid = 0;               // processo dell'icona a cui si e' chiesto il menu
+    std::wstring pMenuTrayDir;            // cartella dell'eseguibile (es. Steam -> steamwebhelper)
+    int giroSfondo = 0;
     double phVis = 0, phVel = 0;          // altezza che si vede: va verso PH (quella della vista) con una molla
     int vistaPrima = P_NESSUNO; float phPrima = 0; double tVista = -1; bool vistaAvanti = true;
     D2D1_POINT_2F origineVista{}, origineRitorno{};
@@ -3219,7 +3231,15 @@ private:
 
     void pannelloWindows();
 
-    void apriAppSfondo(const AppSfondo& a);
+    void apriAppSfondo(const AppSfondo& a, POINT pt = {});
+
+    bool inviaClicTray(const AppSfondo& a, bool destro, POINT pt);
+
+    bool apriMenuTray(const AppSfondo& a, POINT pt);
+
+    bool finestraMenuTray(HWND h) const;
+
+    void chiudiAppSfondo(int indice, bool forza);
 
     void eseguiPannello(const Elemento& e);
 
