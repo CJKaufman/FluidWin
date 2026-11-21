@@ -8,6 +8,8 @@
 !icona.rc
 !icona.ico
 !icona.svg
+!sfondi/
+!sfondi/*.jpg
 !compila.ps1
 !README.md
 !LICENSE

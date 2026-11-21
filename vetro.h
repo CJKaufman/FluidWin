@@ -98,17 +98,21 @@ public:
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(fin, &mg);
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &sc, sizeof(sc));
         int tipo = acrilico ? 3 : 1; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
-        DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
+        if (angoli == 2) raggio::registra(fin);   // angoli normali: quelli dell'impostazione "Angoli" (anche cambiandola dopo)
+        else DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         // fabbriche condivise da tutte le finestre di vetro (e dai menu): con una fabbrica Direct2D a testa ognuna si
         // creava il suo motore grafico, ~20 thread del driver video in piu' per finestra aperta almeno una volta
         f2d = fabbriche::d2d(); fdw = fabbriche::testo();
-        if (!f2d || !fdw) return false;
+        // (ogni errore da qui in poi distrugge la finestra e azzera fin: prima restava un HWND che chi chiama
+        // considerava pronto, con le fabbriche nulle, e la seconda apertura arrivava a usarle, R20261121-003154-S2)
+        if (!f2d || !fdw) { DestroyWindow(fin); fin = nullptr; f2d = nullptr; fdw = nullptr; return false; }
         fam = famiglia(fdw);
         // superficie subito (1x1): una finestra creata e mai mostrata, senza superficie, teneva il thread
         // occupato al 100% e bloccava i timer di FluidWin finche' non compariva la prima volta
         W = H = 1; creaRt();
-        return rt != nullptr;
+        if (!rt) { DestroyWindow(fin); fin = nullptr; return false; }
+        return true;
     }
 
     // tema chiaro/scuro riletto a ogni apertura (si puo' cambiare dal centro di controllo)
@@ -135,7 +139,7 @@ public:
         IDWriteTextFormat* f = nullptr;
         fdw->CreateTextFormat(fam, nullptr, peso, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, pt, L"it-it", &f);
         if (!f) return nullptr;
-        f->SetTextAlignment(al);
+        testi::allinea(f, al);   // (in arabo da destra a sinistra, vedi testi.h)
         f->SetParagraphAlignment(aCapo ? DWRITE_PARAGRAPH_ALIGNMENT_NEAR : DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
         f->SetWordWrapping(aCapo ? DWRITE_WORD_WRAPPING_WRAP : DWRITE_WORD_WRAPPING_NO_WRAP);
         if (!aCapo) {
@@ -207,7 +211,9 @@ private:
                                     D2D1::HwndRenderTargetProperties(fin, D2D1::SizeU(std::max(1, W), std::max(1, H))), &rt);
         if (rt) {
             rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);   // sul vetro il ClearType farebbe aloni colorati
-            rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pen);
+            // superficie e pennello vanno in coppia: senza pennello niente superficie (prima inizia() la dava per buona
+            // e il disegno usava un pennello nullo, R20261121-003154-S3)
+            if (FAILED(rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pen)) || !pen) { pen = nullptr; rt->Release(); rt = nullptr; }
         }
     }
 };

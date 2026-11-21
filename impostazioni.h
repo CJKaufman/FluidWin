@@ -5,30 +5,36 @@
 #include "testi.h"
 #include "cursori.h"
 #include "pool.h"
+#include "sfondi.h"
 #include <shellapi.h>   // DragAcceptFiles: il pacchetto di cursori si trascina nella finestra
 #include <windowsx.h>
 #include <commdlg.h>   // ChooseColorW: il colore del dock scelto a piacere
 #include <vector>
 #include <functional>
 #include <string>
+#include <utility>
 
 namespace impostazioni {
 
 struct Valori {
     bool avvio = false;           // FluidWin si apre all'accesso a Windows (sta nel registro di Windows, vedi avvioAttivo)
     bool gelatina = true;         // finestre "di gelatina" quando si trascinano
-    bool genio = true;            // riduzione e ripristino con l'effetto genio
+    bool genio = true;            // riduzione e ripristino animati (con il genio o con la caduta, vedi riduzione)
+    int riduzione = 0;            // 0 genio (la finestra si deforma), 1 caduta nel dock (riquadro che cade dietro le icone)
+    int angoli = 0;               // angoli di dock, notch, pannelli e finestre di FluidWin: 0 arrotondati, 1 poco, 2 squadrati (raggio.h)
     bool chiusura = true;         // finestre che si rimpiccioliscono e svaniscono quando si chiudono
     bool apertura = true;         // finestre aperte fuori dal dock (Start, ricerca...) che crescono dal centro
     bool onda = true;             // onda di luce multicolore sui bordi dello schermo quando si apre la ricerca
     bool volume = true;           // indicatore del volume di FluidWin al posto di quello di Windows
     bool angolo = true;           // panoramica col mouse nell'angolo in alto a sinistra
+    bool tastoWin = true;         // il tasto Win da solo apre il launcher delle app (al posto dello Start)
     bool winTab = true;           // Alt+Tab apre la panoramica di FluidWin (fino alla 1.2.0 era Win+Tab: il nome e' rimasto)
     bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
-    bool notch = true;            // il notch in alto al centro (spento: volume e notifiche col vetro, niente musica e timer)
+    bool notch = true;            // il notch in alto al centro sempre visibile (spento: a scomparsa, scende solo per volume, notifiche e avvisi; musica e timer nel dock)
     bool oraDock = false;         // ora e data in fondo al dock, dopo il centro di controllo
+    int dockLato = 0;             // bordo del dock: 0 in basso, 1 in alto, 2 a sinistra, 3 a destra (1.3.0, Fase 3; il notch va in basso col dock in alto)
     bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
     int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
     int dockIcone = 42;           // lato delle icone del dock a riposo, px a 100% (ICONE_MIN..ICONE_MAX); l'altezza segue
@@ -37,9 +43,10 @@ struct Valori {
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockGiochi = true;       // pulsante Giochi nel dock accanto a quello delle app
+    bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
-    int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
+    int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
     std::wstring cursore;         // pacchetto di cursori di FluidWin in uso ("" = quelli di Windows; vedi cursori.h)
 };
 constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
@@ -113,10 +120,13 @@ inline void carica() {
     if (v.avvio && comandoRegistrato() != comandoAvvio()) impostaAvvio(true);
     v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
+    v.riduzione = leggiDword(L"Riduzione", 0) == 1 ? 1 : 0;
+    { const DWORD a = leggiDword(L"Angoli", 0); v.angoli = a <= 2 ? (int)a : 0; }
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
-    v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
+    v.winS = leggiDword(L"WinS", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
     v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
+    { const DWORD l = leggiDword(L"DockLato", 0); v.dockLato = l <= 3 ? (int)l : 0; }
     v.dockOpacita = std::clamp((int)leggiDword(L"DockOpacita", 100), OPACITA_MIN, 100);
     v.dockIcone = std::clamp((int)leggiDword(L"DockIcone", 42), ICONE_MIN, ICONE_MAX);
     v.dockDistanza = std::clamp((int)leggiDword(L"DockDistanza", 6), DISTANZA_MIN, DISTANZA_MAX);
@@ -124,9 +134,10 @@ inline void carica() {
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockGiochi = leggiDword(L"DockGiochi", 1);
+    v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
-    v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
+    { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
     testi::lingua() = v.lingua;
     v.cursore = leggiTesto(L"Cursore");
     if (!cursori::esiste(v.cursore)) v.cursore.clear();   // (pacchetto cancellato a mano dalla cartella)
@@ -138,15 +149,14 @@ inline void carica() {
 inline void salva() {
     const Valori& v = valori();
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
-    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
+    scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda); scriviDword(L"Riduzione", (DWORD)v.riduzione); scriviDword(L"Angoli", (DWORD)v.angoli);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
-    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
+    scriviDword(L"WinS", v.winS); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
-    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
+    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi);
-    scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -156,12 +166,14 @@ inline void salva() {
 class Finestra {
 public:
     std::function<void()> cambiato;   // dopo ogni cambio (gia' salvato)
-    int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
     std::function<bool()> copiaDiagnostica;   // mette negli appunti la diagnostica (fluidwin.cpp); true se riuscito
+    std::function<void()> esci;               // "Esci da FluidWin": l'uscita normale, che rimette Windows com'era (#16)
     std::function<void()> tornaAlCentro;      // aperte dal centro di controllo e richiuse nel suo rettangolo: lo riapre
     std::function<void(bool)> dockSu;         // aperte dal centro di controllo: il dock resta su finche' ci sono
     std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
+    std::function<std::vector<std::pair<std::wstring, std::wstring>>()> elencoNascoste;
+    std::function<void(const std::wstring&)> mostraNascosta;
 
     // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
@@ -204,19 +216,26 @@ public:
         v.posiziona(rDa.left, rDa.top, rDa.right - rDa.left, rDa.bottom - rDa.top, HWND_TOP, SWP_SHOWWINDOW);
         if (daCentro && dockSu) dockSu(true);
         if (registro) { char b[140]; snprintf(b, 140, "impostazioni: crescono da%s (%ld,%ld-%ld,%ld -> %d,%d %dx%d)", daCentro ? "l centro di controllo" : dalMouse ? "l mouse" : "l centro dello schermo", rDa.left, rDa.top, rDa.right, rDa.bottom, x, y, w, h); registro(b); }
+        // (rifatti se lo schermo ha un'altra scala: prima restavano quelli della prima apertura, S15)
+        if (fTitolo && fDpi != d) for (IDWriteTextFormat** f : {&fTitolo, &fVoce, &fSotto, &fSezione, &fCentro, &fMarchio, &fPiccolo}) if (*f) { (*f)->Release(); *f = nullptr; }
         if (!fTitolo) {
+            fDpi = d;
             fTitolo = v.formato(22 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fVoce = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
             fSotto = v.formato(11.5f * d);
             fSezione = v.formato(13 * d, DWRITE_FONT_WEIGHT_MEDIUM);
             fCentro = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
             fMarchio = v.formato(16 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            fPiccolo = v.formato(10.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);   // ("Coming soon" della lingua)
         }
         valori().avvio = avvioAttivo();   // (puo' essere cambiato da Gestione attivita' mentre FluidWin era aperto)
         DragAcceptFiles(v.fin, TRUE);
         rileggiPacchetti();
         anim.clear();
-        aperta = true; sopra = -1; scorriDock = 0; rotella = 0; t0 = vetro::ms(); k = 0; kSez = 1;
+        aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
+        // (lo sfondo puo' essere cambiato da fuori: si rilegge, e la miniatura del tuo si rifa')
+        sfondoAttuale = -2; sfondoErrore = false; provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; }
+        if (sfondoInCorso != -2 && vetro::ms() - sfondoDa >= 15000) sfondoInCorso = -2;   // (risposta persa: vedi scegliSfondo)
         if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
         v.alfa(daCentro ? 1 : 0);
         vetro::battito(v.fin, 1);
@@ -263,7 +282,7 @@ public:
         chiudi();
     }
 
-    bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+    bool messaggio(HWND hw, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
         r = 0;
         switch (m) {
             case WM_TIMER:
@@ -341,14 +360,16 @@ public:
                 return true;
             case WM_CLOSE: chiudi(); return true;
             case WM_MOUSEWHEEL:   // sezione Cursore: l'elenco dei pacchetti scorre (non ci stanno tutti: R20261114-141207-S7)
-                if (sezione == S_DOCK && !morph && maxScorriDock > 0) {
-                    rotella += GET_WHEEL_DELTA_WPARAM(w);
-                    scorriDock = std::clamp(scorriDock - (rotella / WHEEL_DELTA) * 40, 0, maxScorriDock);
-                    rotella %= WHEEL_DELTA;
-                    disegna();
-                    return true;
-                }
-                if (sezione == S_CURSORE && !morph) {
+                if (sezione != S_CURSORE && !morph) {   // le altre: tutta la sezione, una riga (60 px) per scatto
+                    const float prima = scorriSez;
+                    scorriSez = std::min(std::max(scorriSez - GET_WHEEL_DELTA_WPARAM(w) * 60.0f * v.dpi / WHEEL_DELTA, 0.0f), massimoSez);
+                    if (scorriSez != prima) {
+                        disegna();   // (rifa' le zone allo scorrimento nuovo)
+                        POINT pm; GetCursorPos(&pm); ScreenToClient(v.fin, &pm);
+                        const int s = dentro ? zonaIn((float)pm.x, (float)pm.y) : -1;
+                        if (s != sopra) { sopra = s; disegna(); }   // sotto il mouse ora c'e' un'altra riga
+                    }
+                } else if (sezione == S_CURSORE && !morph) {
                     // (si sommano: ogni WHEEL_DELTA una riga; prima un delta di 60 per volta non scorreva mai, R20261114-142613)
                     rotella += GET_WHEEL_DELTA_WPARAM(w);
                     scorriCursori -= rotella / WHEEL_DELTA; rotella %= WHEEL_DELTA;
@@ -363,7 +384,14 @@ public:
                 if (uno) { vaiASezione(S_CURSORE); installa(p); }
                 return true;
             }
+            case WM_SFONDO_FATTO: {   // lo sfondo scelto e' stato messo (o no): vedi scegliSfondo
+                if (!consegna::riprendi(hw, m, (const void*)l)) return true;   // (non consegnato da sfondi.h: ignorato)
+                auto* cb = (std::function<void(bool)>*)l;
+                (*cb)(w != 0); delete cb;
+                return true;
+            }
             case WM_CURSORI_INSTALLATI: {
+                if (!consegna::riprendi(hw, m, (const void*)l)) return true;   // (non consegnato dal lavoro di installazione)
                 cursori::Esito* e = (cursori::Esito*)l;
                 installando = false;
                 if (e->ok) {
@@ -409,14 +437,16 @@ private:
          L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
         {L"Pulsante Giochi nel dock", L"Games button in the dock",
          L"Accanto al pulsante delle app, apre la raccolta dei giochi", L"Next to the apps button, opens your games library", &Valori::dockGiochi, S_DOCK},
+        {L"Anteprime delle finestre", L"Window previews",
+         L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
          L"FluidWin si apre da solo quando accedi", L"FluidWin opens by itself when you sign in", &Valori::avvio, S_GENERALE},
         {L"Cerca aggiornamenti", L"Check for updates",
          L"All'avvio chiede a GitHub se c'è una versione nuova", L"At startup it asks GitHub for a new version", &Valori::aggiornamenti, S_GENERALE},
-        {L"Effetto genio", L"Genie effect",
-         L"Riduzione e ripristino che entrano ed escono dal dock", L"Minimize into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
+        {L"Riduzione a icona animata", L"Animated minimize",
+         L"Le finestre entrano nel dock ed escono da lì", L"Windows go into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
         {L"Animazione di apertura", L"Open animation",
          L"Le finestre aperte da Start o dalla ricerca crescono dal centro", L"Windows opened from Start or search grow from the center", &Valori::apertura, S_ANIMAZIONI},
         {L"Animazione di chiusura", L"Close animation",
@@ -426,13 +456,15 @@ private:
         {L"Onda di luce della ricerca", L"Search light wave",
          L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda, S_ANIMAZIONI},
         {L"Notch", L"Notch",
-         L"In alto al centro: ora, volume, notifiche, musica e timer", L"At the top center: time, volume, notifications, music, timer", &Valori::notch, S_NOTCH},
+         L"Sempre visibile. Spento: compare solo quando serve", L"Always visible. Off: it appears only when needed", &Valori::notch, S_NOTCH},
         {L"Ora e data nel dock", L"Time and date in the dock",
          L"In fondo al dock, dopo il centro di controllo", L"At the end of the dock, after the control center", &Valori::oraDock, S_NOTCH},
         {L"Notifiche di FluidWin", L"FluidWin notifications",
          L"Escono dal notch, con il numero sulle icone del dock", L"They come out of the notch, with badges on the dock", &Valori::banner, S_NOTCH},
         {L"Volume nel notch", L"Volume in the notch",
          L"I tasti del volume mostrano il livello nel notch", L"The volume keys show the level in the notch", &Valori::volume, S_NOTCH},
+        {L"Il tasto Win apre le app", L"Win key opens the launcher",
+         L"Al posto del menu Start di Windows", L"Instead of the Windows Start menu", &Valori::tastoWin, S_TASTIERA},
         {L"Alt+Tab apre la panoramica", L"Alt+Tab opens the overview",
          L"Tieni Alt e premi Tab per scegliere la finestra, come prima", L"Hold Alt and press Tab to pick a window, as always", &Valori::winTab, S_TASTIERA},
         {L"Win+Tab apre la ricerca", L"Win+Tab opens search",
@@ -444,7 +476,8 @@ private:
          L"On the desktop and in File Explorer. Off or with Shift: the Windows one", &Valori::menuDestro, S_TASTIERA},
     };
     vetro::Finestra v;
-    IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr;
+    IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr, *fPiccolo = nullptr;
+    float fDpi = 0;   // scala con cui sono stati fatti i formati qui sopra
     bool aperta = false, dentro = false;
     // crescita dal centro di controllo e rientro (vedi apri): morph 1 cresce, -1 rientra, 0 fermo; mx 0..1 avanzamento
     // (0 = rettangolo del centro rDa, 1 = impostazioni rA); rientra: curva del rientro (vedi forma)
@@ -509,20 +542,87 @@ private:
 
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
+    // app nascoste dal dock (PR #20): "Mostra tutte", poi una riga per app da Z_MOSTRA_APP in su, senza limite (prima 651..699,
+    // e dalla cinquantesima le righe non c'erano: R20261120-022133-S4)
+    static constexpr int Z_MOSTRA_TUTTE = 650, Z_MOSTRA_APP = 10000;
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
+    // ---- sfondi (Generale, Fase 3): Z_SFONDO "Il tuo sfondo", Z_SFONDO + 1 + i gli sfondi di FluidWin (sfondi.h)
+    static constexpr UINT WM_SFONDO_FATTO = WM_APP + 51;
+    static constexpr int Z_SFONDO = 170;
+    ID2D1Bitmap* miniSfondi[sfondi::N + 1] = {};   // [0] il tuo, poi i nostri; fatte per il render target di giroSfondi
+    unsigned giroSfondi = ~0u;
+    int sfondoAttuale = -2;   // -2 da leggere, -1 il tuo (o un altro), 0..N-1 uno di FluidWin
+    int sfondoInCorso = -2;   // quello che si sta mettendo (-2 nessuno)
+    ULONGLONG sfondoDa = 0;   // da quando (vedi scegliSfondo) 
+    unsigned sfondoRichiesta = 0;   // numero dell'ultima scelta (vedi scegliSfondo)
+    bool sfondoErrore = false;
+    bool provataMini[sfondi::N + 1] = {};      // miniatura gia' provata (anche senza riuscirci)
+    bool tuoTinta = false; DWORD coloreTuo = 0;   // il tuo sfondo e' una tinta unita: il suo colore
+    void liberaSfondi() { for (auto*& b : miniSfondi) if (b) { b->Release(); b = nullptr; } for (bool& p : provataMini) p = false; }
+    // sceglie lo sfondo i (-1 il tuo); lo mette un thread (sfondi::scegli), la risposta arriva con WM_SFONDO_FATTO.
+    // Uno alla volta; se la risposta si perde (finestra distrutta, coda piena) dopo 15 s se ne puo' scegliere un altro: i
+    // lavori restano in fila (sfondi::scegli) e conta solo la risposta dell'ultimo
+    // (R20261120-210024-S5)
+    void scegliSfondo(int i) {
+        if (registro) { char b[96]; snprintf(b, 96, "sfondo: scelto %d (attuale %d, in corso %d)", i, sfondoAttuale, sfondoInCorso); registro(b); }
+        if ((sfondoInCorso != -2 && vetro::ms() - sfondoDa < 15000) || i == sfondoAttuale) return;   // (quello che c'e' gia': niente)
+        if (i == -1 && !tuoDisponibile()) return;
+        sfondoInCorso = i; sfondoErrore = false; sfondoDa = vetro::ms();
+        const unsigned n = ++sfondoRichiesta;   // (la risposta di una richiesta superata non cambia lo stato: R20261120-211010-S3)
+        if (!sfondi::scegli(i, v.fin, WM_SFONDO_FATTO, [this, i, n](bool ok) {
+                if (n != sfondoRichiesta) { if (registro) registro("sfondo: risposta di una scelta superata"); return; }
+                sfondoInCorso = -2;
+                if (registro) { char b[64]; snprintf(b, 64, "sfondo: %d %s", i, ok ? "messo" : "NON messo"); registro(b); }
+                if (ok) sfondoAttuale = i; else sfondoErrore = true;
+                if (ok && i >= 0) { provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; } }   // ("il tuo" ora e' quello ricordato)
+                vetro::battito(v.fin, 1);
+                disegna();
+            })) { sfondoInCorso = -2; sfondoErrore = true; }
+        disegna();
+    }
+    // il "tuo sfondo": quello ricordato, o quello di adesso se non e' di FluidWin. Immagine per la miniatura (vuota:
+    // nessuna) e, se e' una tinta unita, il colore
+    sfondi::Stato statoTuo() const {
+        sfondi::Stato t = sfondi::tuo();
+        if (t.tipo == sfondi::NESSUNO && sfondoAttuale == -1) sfondi::leggi(t);
+        return t;
+    }
+    std::wstring fileTuo() const {
+        const sfondi::Stato t = statoTuo();
+        std::wstring f = t.immagine();
+        // (il file di partenza puo' non esserci piu': Windows ne tiene una copia dello sfondo mostrato)
+        if (f.empty() && t.tipo == sfondi::IMMAGINI && sfondoAttuale == -1) f = sfondi::copiaDiWindows();
+        return f;
+    }
+    bool tuoDisponibile() const { return sfondi::tuo().tipo != sfondi::NESSUNO || sfondoAttuale == -1; }
     static constexpr int Z_PACCHETTO = 700, Z_WINDOWS = 710, Z_SCEGLI = 720, Z_RIMUOVI = 760, MAX_PACCHETTI = 30;
     std::vector<cursori::Pacchetto> pacchetti;
     std::vector<ID2D1Bitmap*> anteprime;   // la freccia di ogni pacchetto, fatta per il render target di giroAnteprime
     unsigned giroAnteprime = ~0u;
     bool installando = false, erroreCursori = false;
     int scorriCursori = 0;   // prima riga mostrata dell'elenco (0 = "Cursori di Windows"): rotella del mouse
-    int scorriDock = 0, maxScorriDock = 0;
     int rotella = 0;         // scatti piccoli della rotella (touchpad, rotelle ad alta precisione) messi da parte
+    // le altre sezioni scorrono intere quando non ci stanno (Dock: 4 interruttori, 3 cursori e il colore; con
+    // l'interruttore delle anteprime l'ultima riga usciva dalla finestra). Pixel scrollati e quanti se ne possono
+    // scrollare, misurati all'ultimo disegno della sezione
+    float scorriSez = 0, massimoSez = 0;
     std::wstring statoCursori;
 
     void liberaAnteprime() { for (auto* b : anteprime) if (b) b->Release(); anteprime.clear(); }
-    void rileggiPacchetti() { pacchetti = cursori::elenco(); if ((int)pacchetti.size() > MAX_PACCHETTI) pacchetti.resize(MAX_PACCHETTI); liberaAnteprime(); }
+    // (oltre il limite resta comunque quello in uso: prima un pacchetto installato per ultimo in ordine alfabetico era
+    // attivo ma non compariva, e non si poteva togliere, R20261121-002419-S16)
+    void rileggiPacchetti() {
+        pacchetti = cursori::elenco();
+        if ((int)pacchetti.size() > MAX_PACCHETTI) {
+            const auto it = std::find_if(pacchetti.begin(), pacchetti.end(), [](const cursori::Pacchetto& p) { return p.nome == valori().cursore; });
+            const bool fuori = it != pacchetti.end() && it - pacchetti.begin() >= MAX_PACCHETTI;
+            cursori::Pacchetto attivo; if (fuori) attivo = *it;
+            pacchetti.resize(MAX_PACCHETTI);
+            if (fuori) pacchetti.back() = std::move(attivo);
+        }
+        liberaAnteprime();
+    }
 
     // la freccia del pacchetto come bitmap (pixel premoltiplicati); nullptr se non si legge
     ID2D1Bitmap* anteprima(const std::wstring& file, int lato) {
@@ -570,7 +670,7 @@ private:
         if (!pool::lancia([](LPVOID p) -> DWORD {
                 Lavoro* l = (Lavoro*)p;
                 cursori::Esito* e = new cursori::Esito(cursori::installa(l->file));
-                if (!PostMessageW(l->fin, WM_CURSORI_INSTALLATI, 0, (LPARAM)e)) delete e;
+                if (!consegna::posta(l->fin, WM_CURSORI_INSTALLATI, 0, e)) delete e;
                 delete l;
                 return 0;
             }, l, THREAD_PRIORITY_BELOW_NORMAL, true)) {
@@ -605,7 +705,7 @@ private:
 
     void vaiASezione(int s) {
         if (s == sezione) return;
-        sezione = s; scorriDock = 0; rotella = 0; kSez = 0; tSez = vetro::ms();
+        sezione = s; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -618,6 +718,20 @@ private:
             scegliColore(id);
             salva();
             if (cambiato) cambiato();
+            disegna();
+            return;
+        }
+        if (id == Z_MOSTRA_TUTTE) {
+            if (mostraNascosta) mostraNascosta(L"");
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_MOSTRA_APP) {
+            const auto nasc = elencoNascoste ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
+            const size_t k = (size_t)(id - Z_MOSTRA_APP);
+            if (k < nasc.size() && mostraNascosta) mostraNascosta(nasc[k].first);
+            vetro::battito(v.fin, 1);
             disegna();
             return;
         }
@@ -641,13 +755,18 @@ private:
             disegna();
             return;
         }
+        if (id >= Z_SFONDO && id <= Z_SFONDO + sfondi::N) { scegliSfondo(id - Z_SFONDO - 1); return; }   // sfondo (Fase 3)
+        if (id == 401) { if (esci) esci(); return; }   // "Esci da FluidWin" (#16)
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
             disegna();
             return;
         }
         if (id >= 300 && id < 300 + SEZIONI) { vaiASezione(id - 300); return; }
-        if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
+        if (id == 120 || id == 121) valori().riduzione = id - 120;   // stile della riduzione a icona (1.3.0)
+        else if (id >= 130 && id <= 132) valori().angoli = id - 130;   // angoli (1.3.0, Fase 3)
+        else if (id >= 140 && id <= 143) valori().dockLato = id - 140;   // posizione del dock (1.3.0, Fase 3)
+        else if (id >= 100 && id < 100 + testi::N_LINGUE) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
             if (voci[id].campo == &Valori::avvio) impostaAvvio(b);   // (sta nel registro di Windows, non in salva)
@@ -677,7 +796,7 @@ private:
     static const wchar_t* nomeSezione(int s) {
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
-            case S_DOCK: return L"Dock";
+            case S_DOCK: return testi::t(L"Dock", L"Dock");
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -806,38 +925,29 @@ private:
         const D2D1_COLOR_F inkS = {ink.r, ink.g, ink.b, ink.a * (float)e}, tenueS = {tenue.r, tenue.g, tenue.b, tenue.a * (float)e};
         const float L = B + 28 * d + sx, R = W - 28 * d + sx;
         v.testo(nomeSezione(sezione), fTitolo, {L, 20 * d, R - 50 * d, 54 * d}, inkS);
-        if (sezione == S_DOCK) {
-            int righeDock = 1;
-            for (const auto& x : voci) if (x.sezione == S_DOCK) righeDock++;
-            for (const auto& c : cursori) if (c.sezione == S_DOCK) righeDock++;
-            const float yFine = 72 * d + righeDock * 60 * d - 6 * d;
-            maxScorriDock = std::max(0, (int)std::ceil((yFine - (H - 14 * d)) / d));
-            scorriDock = std::clamp(scorriDock, 0, maxScorriDock);
-        } else {
-            maxScorriDock = 0;
-        }
-        float y = sezione == S_DOCK ? 72 * d - scorriDock * d : 72 * d;
-        const D2D1_RECT_F clipDock = {B, 64 * d, W, H - 10 * d};
-        auto aggiungiZona = [&](D2D1_RECT_F r, int id) {
-            if (sezione == S_DOCK) {
-                r.top = std::max(r.top, clipDock.top);
-                r.bottom = std::min(r.bottom, clipDock.bottom);
-                if (r.bottom <= r.top) return;
-            }
-            zone.push_back({r, id});
-        };
+        // le righe scorrono sotto il titolo: ritaglio da qui in giu', e le zone tagliate allo stesso modo (piu' sotto).
+        // (la sezione Cursore ha il suo scorrimento, a righe dell'elenco dei pacchetti)
+        const bool scorre = sezione != S_CURSORE;
+        const float cimaSez = 62 * d, y0 = 72 * d;
+        const size_t zona0 = zone.size();
+        if (scorre) v.rt->PushAxisAlignedClip({B, cimaSez, W, H}, D2D1_ANTIALIAS_MODE_ALIASED);
+        float y = y0 - (scorre ? scorriSez : 0);
+        // app nascoste dal dock (PR #20): il loro elenco in fondo alla sezione Dock
+        const auto nascDock = (sezione == S_DOCK && elencoNascoste) ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
+        const int nNascVis = (int)nascDock.size();
+        auto aggiungiZona = [&](D2D1_RECT_F r, int id) { zone.push_back({r, id}); };   // (le taglia lo scorrimento, piu' sotto)
         auto riquadro = [&](const D2D1_RECT_F& r, bool evid) {
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
         };
-        auto riga = [&](const std::wstring& titolo, const std::wstring& testo) {   // riga informativa (senza interruttore)
+        // riga informativa (senza interruttore); spazio: quanto lasciare libero a destra per un pulsante
+        auto riga = [&](const std::wstring& titolo, const std::wstring& testo, float spazio = 0) {
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);
-            v.testo(titolo, fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 16 * d, r.top + 29 * d}, inkS);
-            v.testo(testo, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 16 * d, r.top + 48 * d}, tenueS);
+            v.testo(titolo, fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 16 * d - spazio, r.top + 29 * d}, inkS);
+            v.testo(testo, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 16 * d - spazio, r.top + 48 * d}, tenueS);
             y += 60 * d;
         };
-        if (sezione == S_DOCK) v.rt->PushAxisAlignedClip(clipDock, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
         for (size_t i = 0; i < voci.size(); i++) {
             if (voci[i].sezione != sezione) continue;
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
@@ -848,17 +958,48 @@ private:
             levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i], (float)e);
             y += 60 * d;
         }
-        if (sezione == S_GENERALE) {
-            // lingua: due scelte (i nomi restano ciascuno nella sua lingua)
+        if (sezione == S_ANIMAZIONI) {
+            // stile della riduzione a icona (1.3.0): il genio, o il riquadro che cade dietro le icone del dock. Con la
+            // riduzione animata spenta la scelta resta, un po' spenta, per quando la si riaccende
             const D2D1_RECT_F rl = {L, y, R, y + 64 * d};
             riquadro(rl, false);
-            v.testo(testi::t(L"Lingua", L"Language"), fVoce, {rl.left + 16 * d, rl.top, rl.left + 160 * d, rl.bottom}, inkS);
-            const float x0 = rl.left + 170 * d, larg = rl.right - 16 * d - x0, h = 34 * d, yl = rl.top + 15 * d;
+            const float ks = valori().genio ? 1.0f : 0.45f;
+            const D2D1_COLOR_F inkK = {inkS.r, inkS.g, inkS.b, inkS.a * ks};
+            v.testo(testi::t(L"Stile della riduzione", L"Minimize style"), fVoce, {rl.left + 16 * d, rl.top, rl.left + 200 * d, rl.bottom}, inkK);
+            const float x0 = rl.left + 210 * d, larg = rl.right - 16 * d - x0, h = 34 * d, yl = rl.top + 15 * d;
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
             v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
-            const wchar_t* nomi[2] = {L"Italiano", L"English"};
+            const wchar_t* nomi[2] = {testi::t(L"Genio", L"Genie"), testi::t(L"Caduta nel dock", L"Drop into the dock")};
             for (int i = 0; i < 2; i++) {
                 const D2D1_RECT_F r = {x0 + larg * i / 2 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 2 - 3 * d, yl + h - 3 * d};
+                zone.push_back({r, 120 + i});
+                if (valori().riduzione == i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e * ks) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e * ks));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                } else if (sopra == 120 + i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                }
+                v.testo(nomi[i], fCentro, r, inkK);
+            }
+            y += 70 * d;
+        }
+        if (sezione == S_GENERALE) {
+            // lingua: sette scelte in un'unica tendina di due file da quattro (i nomi restano ciascuno nella sua lingua);
+            // l'ottavo posto dice che altre lingue arriveranno
+            const D2D1_RECT_F rl = {L, y, R, y + 98 * d};
+            riquadro(rl, false);
+            v.testo(testi::t(L"Lingua", L"Language"), fVoce, {rl.left + 16 * d, rl.top, rl.left + 160 * d, rl.bottom}, inkS);
+            const float x0 = rl.left + 170 * d, larg = rl.right - 16 * d - x0, h = 34 * d, y0 = rl.top + 15 * d;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+            v.rt->FillRoundedRectangle({{x0, y0, x0 + larg, y0 + 2 * h}, h / 2, h / 2}, v.pen);
+            v.testo(L"Coming soon", fPiccolo, {x0 + larg * 3 / 4 + 3 * d, y0 + h + 3 * d, x0 + larg - 3 * d, y0 + 2 * h - 3 * d}, tenueS);
+            for (int i = 0; i < testi::N_LINGUE; i++) {
+                const int col = i % 4;
+                const int fila = i / 4;
+                const float yl = y0 + (float)fila * h;
+                const D2D1_RECT_F r = {x0 + larg * col / 4 + 3 * d, yl + 3 * d, x0 + larg * (col + 1) / 4 - 3 * d, yl + h - 3 * d};
+                const wchar_t* const nomeL = testi::nome(i);
                 zone.push_back({r, 100 + i});
                 if (valori().lingua == i) {
                     v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
@@ -867,24 +1008,113 @@ private:
                     v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
                     v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
                 }
-                v.testo(nomi[i], fCentro, r, inkS);
+                v.testo(nomeL, fCentro, r, inkS);
             }
-            y += 70 * d;
-            riga(testi::t(L"Angoli delle finestre", L"Window corners"), raggioWindhawk > 0
-                ? std::wstring(testi::t(L"Arrotondati a ", L"Rounded to ")) + std::to_wstring(raggioWindhawk) + testi::t(L" px dalla mod di Windhawk", L" px by the Windhawk mod")
-                : std::wstring(testi::t(L"Quelli di Windows (piu' tondi con la mod di Windhawk)", L"The Windows ones (rounder with the Windhawk mod)")));
+            y += 104 * d;
+            {   // angoli (1.3.0, Fase 3): dock, notch, pannelli, menu e finestre di FluidWin; tre scelte
+                const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
+                riquadro(ra, false);
+                v.testo(testi::t(L"Angoli", L"Corners"), fVoce, {ra.left + 16 * d, ra.top, ra.left + 160 * d, ra.bottom}, inkS);
+                const float x0 = ra.left + 170 * d, larg = ra.right - 16 * d - x0, h = 34 * d, yl = ra.top + 15 * d;
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const wchar_t* nomi[3] = {testi::t(L"Arrotondati", L"Rounded"), testi::t(L"Poco arrotondati", L"Slightly rounded"), testi::t(L"Squadrati", L"Square")};
+                for (int i = 0; i < 3; i++) {
+                    const D2D1_RECT_F r = {x0 + larg * i / 3 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 3 - 3 * d, yl + h - 3 * d};
+                    zone.push_back({r, 130 + i});
+                    if (valori().angoli == i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == 130 + i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[i], fCentro, r, inkS);
+                }
+                y += 70 * d;
+            }
+            {   // sfondo (1.3.0, Fase 3): il tuo e i tre di FluidWin, in fila; un clic lo mette (sfondi.h)
+                if (sfondoAttuale == -2) sfondoAttuale = sfondi::attualeNostro();
+                if (giroSfondi != v.giroRt) { liberaSfondi(); giroSfondi = v.giroRt; }
+                const int n = sfondi::N + 1;
+                const float gap = 12 * d, x0 = L + 16 * d, larg = (R - L - 32 * d - gap * (n - 1)) / n, alto = std::round(larg * 9 / 16);
+                const D2D1_RECT_F rs = {L, y, R, y + (44 + 30) * d + alto};
+                riquadro(rs, false);
+                v.testo(testi::t(L"Sfondo", L"Wallpaper"), fVoce, {rs.left + 16 * d, rs.top + 8 * d, rs.left + 200 * d, rs.top + 38 * d}, inkS);
+                if (sfondoErrore) v.testo(testi::t(L"Non messo: riprova", L"Not set: try again"), fSotto, {rs.left + 200 * d, rs.top + 8 * d, rs.right - 16 * d, rs.top + 38 * d}, tenueS);
+                const float yc = rs.top + 44 * d, rr = std::max(2.0f, 8 * d * raggio::fattore());
+                const bool haTuo = tuoDisponibile();
+                for (int k = 0; k < n; k++) {
+                    const int i = k - 1;   // -1 il tuo, poi 0..N-1
+                    const D2D1_RECT_F c = {x0 + k * (larg + gap), yc, x0 + k * (larg + gap) + larg, yc + alto};
+                    const bool usabile = i >= 0 || haTuo;
+                    if (usabile) zone.push_back({c, Z_SFONDO + k});
+                    if (!miniSfondi[k] && !provataMini[k] && usabile) {   // (una prova sola per apertura: niente letture a ogni fotogramma)
+                        provataMini[k] = true;
+                        const UINT pw = (UINT)std::lround(larg), ph = (UINT)std::lround(alto);
+                        if (i >= 0) { const void* dati = nullptr; DWORD nb = 0; if (sfondi::risorsa(i, dati, nb)) miniSfondi[k] = sfondi::miniatura(v.rt, dati, nb, L"", pw, ph); }
+                        else {
+                            const sfondi::Stato t = statoTuo();
+                            tuoTinta = t.tipo == sfondi::TINTA; coloreTuo = t.colore;
+                            const std::wstring f = fileTuo(); if (!f.empty()) miniSfondi[k] = sfondi::miniatura(v.rt, nullptr, 0, f, pw, ph);
+                        }
+                    }
+                    const float ea = (float)e * (usabile ? 1.0f : 0.4f);
+                    if (miniSfondi[k]) {
+                        ID2D1BitmapBrush* bb = nullptr;
+                        if (SUCCEEDED(v.rt->CreateBitmapBrush(miniSfondi[k], &bb)) && bb) {
+                            bb->SetTransform(D2D1::Matrix3x2F::Translation(c.left, c.top));
+                            bb->SetOpacity(ea);
+                            v.rt->FillRoundedRectangle({c, rr, rr}, bb);
+                            bb->Release();
+                        }
+                    } else if (i < 0 && tuoTinta) {   // il tuo e' una tinta unita: quel colore
+                        v.pen->SetColor(D2D1::ColorF(GetRValue(coloreTuo) / 255.0f, GetGValue(coloreTuo) / 255.0f, GetBValue(coloreTuo) / 255.0f, ea));
+                        v.rt->FillRoundedRectangle({c, rr, rr}, v.pen);
+                    } else {   // (nessuna immagine: un riquadro vuoto)
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * ea) : D2D1::ColorF(0, 0, 0, 0.06f * ea));
+                        v.rt->FillRoundedRectangle({c, rr, rr}, v.pen);
+                    }
+                    // scelto: anello blu; sotto il mouse: anello chiaro; mentre si mette: anello tratteggiato... qui pieno e tenue
+                    const bool scelto = sfondoAttuale == i, inCorso = sfondoInCorso == i;
+                    if (scelto || inCorso || (sopra == Z_SFONDO + k && usabile)) {
+                        v.pen->SetColor(scelto ? D2D1::ColorF(blu.r, blu.g, blu.b, (float)e) : inCorso ? D2D1::ColorF(blu.r, blu.g, blu.b, 0.45f * (float)e) : tenueS);
+                        const float o = 3 * d;
+                        v.rt->DrawRoundedRectangle({{c.left - o, c.top - o, c.right + o, c.bottom + o}, rr + o, rr + o}, v.pen, 2.0f * d);
+                    }
+                    const wchar_t* nome = i < 0 ? testi::t(L"Il tuo sfondo", L"Your wallpaper") : testi::t(sfondi::ELENCO[i].it, sfondi::ELENCO[i].en);
+                    v.testo(nome, fCentro, {c.left, c.bottom + 4 * d, c.right, c.bottom + 26 * d}, usabile ? inkS : tenueS);
+                }
+                y += rs.bottom - rs.top + 6 * d;
+            }
             riga(L"FluidWin" + (ver.empty() ? std::wstring() : L" " + ver), testi::t(L"Windows reimmaginato · github.com/clooudfn/FluidWin", L"Windows reimagined · github.com/clooudfn/FluidWin"));
             // diagnostica: versione, Windows, schermi, scheda video, impostazioni (niente dati personali), per chi
             // segnala un problema; il pulsante "Copia" a destra
             {
                 const float yr = y;
-                riga(testi::t(L"Diagnostica", L"Diagnostics"), testi::t(L"Sistema, schermi, scheda video e impostazioni, da incollare in una segnalazione",
-                                                                         L"System, screens, graphics card and settings, to paste into a report"));
                 const std::wstring tb = copiataAlle ? testi::t(L"Copiata", L"Copied") : testi::t(L"Copia", L"Copy");
                 const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                // (il testo si ferma prima del pulsante: prima ci finiva sotto)
+                riga(testi::t(L"Diagnostica", L"Diagnostics"), testi::t(L"Sistema, schermi, scheda video e impostazioni, da incollare in una segnalazione",
+                                                                         L"System, screens, graphics card and settings, to paste into a report"), lw + 12 * d);
                 const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
                 zone.push_back({rb, 400});
                 v.pen->SetColor(copiataAlle ? D2D1::ColorF(0.20f, 0.78f, 0.35f, (float)e) : D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == 400 ? 1.0f : 0.88f) * (float)e));
+                v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
+            }
+            // uscita (issue #16): con la barra di Windows nascosta l'icona nell'area di notifica non si vede. La
+            // scorciatoia d'emergenza la tiene il guardiano e funziona anche con FluidWin bloccato
+            {
+                const float yr = y;
+                const std::wstring tb = testi::t(L"Esci", L"Quit");
+                const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                riga(testi::t(L"Esci da FluidWin", L"Quit FluidWin"),
+                     testi::t(L"Windows torna com'era. Bloccato? Ctrl+Alt+Maiusc+F12",
+                              L"Windows goes back as it was. Stuck? Ctrl+Alt+Shift+F12"), lw + 12 * d);
+                const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
+                zone.push_back({rb, 401});
+                v.pen->SetColor(D2D1::ColorF(0.92f, 0.26f, 0.22f, (sopra == 401 ? 1.0f : 0.88f) * (float)e));
                 v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
                 v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
             }
@@ -912,10 +1142,32 @@ private:
             v.rt->FillEllipse({{xm, cy + 0.8f * d}, rk + 0.6f * d, rk + 0.6f * d}, v.pen);
             v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
             v.rt->FillEllipse({{xm, cy}, rk, rk}, v.pen);
-            v.testo(std::to_wstring(val) + c.unita, fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
+            v.testo(testi::isola(std::to_wstring(val) + c.unita), fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
             y += 60 * d;
         }
         if (sezione == S_DOCK) {
+            {   // posizione (1.3.0, Fase 3): il bordo dello schermo dove sta il dock; quattro scelte
+                const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
+                riquadro(ra, false);
+                v.testo(testi::t(L"Posizione", L"Position"), fVoce, {ra.left + 16 * d, ra.top, ra.left + 160 * d, ra.bottom}, inkS);
+                const float x0 = ra.left + 170 * d, larg = ra.right - 16 * d - x0, h = 34 * d, yl = ra.top + 15 * d;
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const wchar_t* nomi[4] = {testi::t(L"In basso", L"Bottom"), testi::t(L"In alto", L"Top"), testi::t(L"A sinistra", L"Left"), testi::t(L"A destra", L"Right")};
+                for (int i = 0; i < 4; i++) {
+                    const D2D1_RECT_F r = {x0 + larg * i / 4 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 4 - 3 * d, yl + h - 3 * d};
+                    zone.push_back({r, 140 + i});
+                    if (valori().dockLato == i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == 140 + i) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[i], fCentro, r, inkS);
+                }
+                y += 70 * d;
+            }
             // colore del dock: automatico (meta' chiaro e meta' scuro), i colori pronti, e "+" per sceglierne uno
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);
@@ -957,8 +1209,45 @@ private:
                 }
             }
             y += 60 * d;
-            v.rt->PopAxisAlignedClip();
-            if (maxScorriDock > 0) v.testo(testi::t(L"scorri", L"scroll"), fSotto, {R - 120 * d, 26 * d, R - 60 * d, 50 * d}, tenueS);
+            if (nascDock.empty()) {
+                riga(testi::t(L"App nascoste dal dock", L"Hidden dock apps"),
+                     testi::t(L"Nessuna. Clic destro su un'app aperta nel dock per nasconderla", L"None. Right-click an open app in the dock to hide it"));
+            } else {
+                const std::wstring subTit = std::to_wstring(nascDock.size()) + testi::t(nascDock.size() == 1 ? L" app nascosta" : L" app nascoste",
+                                                                                        nascDock.size() == 1 ? L" hidden app" : L" hidden apps");
+                const D2D1_RECT_F rh = {L, y, R, y + 54 * d};
+                riquadro(rh, false);
+                float limTit = rh.right - 16 * d;
+                if (nascDock.size() > 1) {
+                    const std::wstring tb = testi::t(L"Mostra tutte", L"Show all");
+                    const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                    const D2D1_RECT_F rb = {R - 16 * d - lw, y + 12 * d, R - 16 * d, y + 42 * d};
+                    aggiungiZona(rb, Z_MOSTRA_TUTTE);
+                    v.pen->SetColor(D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == Z_MOSTRA_TUTTE ? 1.0f : 0.88f) * (float)e));
+                    v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                    v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
+                    limTit = rb.left - 12 * d;
+                }
+                v.testo(testi::t(L"App nascoste dal dock", L"Hidden dock apps"), fVoce, {rh.left + 16 * d, rh.top + 7 * d, limTit, rh.top + 29 * d}, inkS);
+                v.testo(subTit, fSotto, {rh.left + 16 * d, rh.top + 28 * d, limTit, rh.top + 48 * d}, tenueS);
+                y += 60 * d;
+                for (int k = 0; k < nNascVis; k++) {
+                    const D2D1_RECT_F ra = {L, y, R, y + 54 * d};
+                    const int id = Z_MOSTRA_APP + k;
+                    riquadro(ra, false);
+                    const std::wstring tb = testi::t(L"Mostra", L"Show");
+                    const float lw = v.larghezza(tb, fCentro) + 24 * d;
+                    const D2D1_RECT_F rb = {ra.right - 16 * d - lw, y + 12 * d, ra.right - 16 * d, y + 42 * d};
+                    aggiungiZona(rb, id);
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == id ? 0.16f : 0.08f) * (float)e)
+                                            : D2D1::ColorF(0, 0, 0, (sopra == id ? 0.10f : 0.05f) * (float)e));
+                    v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                    v.testo(tb, fCentro, rb, inkS);
+                    v.testo(nascDock[k].second, fVoce, {ra.left + 16 * d, ra.top + 7 * d, rb.left - 12 * d, ra.top + 29 * d}, inkS);
+                    v.testo(testi::t(L"Nascosta nel dock", L"Hidden in dock"), fSotto, {ra.left + 16 * d, ra.top + 28 * d, rb.left - 12 * d, ra.top + 48 * d}, tenueS);
+                    y += 60 * d;
+                }
+            }
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),
@@ -968,6 +1257,26 @@ private:
             riga(testi::t(L"Maiusc+clic destro", L"Shift+right-click"), testi::t(L"Il menu di Windows, anche con il menu di FluidWin acceso", L"The Windows menu, even with the FluidWin menu on"));
         }
         if (sezione == S_CURSORE) disegnaCursori(L, R, y, e, ink, tenue, blu, rr, H);
+        if (scorre) {
+            v.rt->PopAxisAlignedClip();
+            // quanto si puo' scorrere: l'altezza del contenuto (y senza lo scorrimento) meno lo spazio visibile, con un
+            // margine sul fondo. Se la finestra e' cresciuta (o la sezione accorciata) lo scorrimento rientra al
+            // prossimo scatto; qui si disegna comunque con quello che c'e'
+            const float alto = y + scorriSez - y0, visibile = H - 12 * d - y0;
+            massimoSez = std::max(0.0f, alto - visibile);
+            scorriSez = std::min(scorriSez, massimoSez);   // (vale dal prossimo disegno)
+            // zone della sezione: solo la parte visibile (sotto il titolo e dentro la finestra); le altre via
+            for (size_t k = zona0; k < zone.size();) {
+                D2D1_RECT_F& z = zone[k].r;
+                z.top = std::max(z.top, cimaSez); z.bottom = std::min(z.bottom, H);
+                if (z.bottom <= z.top) zone.erase(zone.begin() + (std::ptrdiff_t)k); else k++;
+            }
+            if (massimoSez > 0) {   // barretta a destra: dove si e' e quanto c'e'
+                const float hb = visibile * visibile / alto, yb = y0 + (visibile - hb) * std::min(scorriSez / massimoSez, 1.0f);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(0, 0, 0, 0.18f * (float)e));
+                v.rt->FillRoundedRectangle({{W - 10 * d, yb, W - 6 * d, yb + hb}, 2 * d, 2 * d}, v.pen);
+            }
+        }
         if (strato) { v.rt->PopLayer(); v.rt->SetTransform(D2D1::Matrix3x2F::Identity()); }
         v.finisci();
     }
@@ -1004,7 +1313,8 @@ private:
         const int posto = std::max(1, (int)((H - 14 * d - y) / passo)), tutte = 1 + (int)pacchetti.size();
         scorriCursori = std::clamp(scorriCursori, 0, std::max(0, tutte - posto));
         if (tutte > posto) {
-            const std::wstring quali = std::to_wstring(scorriCursori + 1) + L"–" + std::to_wstring(std::min(tutte, scorriCursori + posto)) +
+            // (l'intervallo isolato: in arabo "1–6" fra due numeri si leggerebbe "6–1")
+            const std::wstring quali = testi::isola(std::to_wstring(scorriCursori + 1) + L"–" + std::to_wstring(std::min(tutte, scorriCursori + posto))) +
                                        testi::t(L" di ", L" of ") + std::to_wstring(tutte) + testi::t(L" · scorri", L" · scroll");
             v.testo(quali, fSotto, {R - 220 * d, 26 * d, R - 60 * d, 50 * d}, tenueS);
         }

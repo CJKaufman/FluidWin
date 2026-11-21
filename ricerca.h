@@ -4,6 +4,7 @@
 #pragma once
 #include "vetro.h"
 #include "onda.h"
+#include "indice.h"
 #include <windowsx.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -121,7 +122,18 @@ public:
             fSezione = v.formato(11 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
         }
         app = elencoApp ? elencoApp() : std::vector<std::pair<std::wstring, std::wstring>>{};
-        testo.clear(); risultati.clear(); file.clear(); sel = 0; sopra = -1;
+        testo.clear(); risultati.clear(); file.clear(); sel = 0; sopra = -1; selUtente = false; saltaBasso = false;
+        // (il mouse di adesso: un primo WM_MOUSEMOVE della finestra che cresce sotto il puntatore fermo non e' una
+        // scelta, R20261121-124830 su S1 del giro 2)
+        { POINT pm{}; GetCursorPos(&pm); ultimoMouse = (DWORD)MAKELONG((short)pm.x, (short)pm.y); }
+        // una ricerca della sessione di prima ancora in corso non vale piu' (prima i suoi file arrivavano nella sessione
+        // nuova vuota, R20261121-002818-S15)
+        InterlockedIncrement(&generazione); KillTimer(v.fin, 3);   // (3: la ricerca in attesa dopo l'ultimo tasto)
+        // icone dei file: oltre 300 si ricomincia (prima la cache cresceva per tutta la sessione, S17). Sotto cs: il
+        // thread delle icone la legge; quelle ancora in lavorazione restano segnate (nullptr) e si rifanno
+        EnterCriticalSection(&cs);
+        if (icone.size() > 300 && iconeDaFare.empty() && !iconeInCorso) { for (auto& [k, b] : icone) if (b) b->Release(); icone.clear(); }
+        LeaveCriticalSection(&cs);
         larg = (int)std::lround(680 * d);
         x = (a.left + a.right - larg) / 2; y = a.top + (int)std::lround((a.bottom - a.top) * 0.22);
         primaDi = GetForegroundWindow();
@@ -155,7 +167,7 @@ public:
         passoRiquadro();
     }
 
-    bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+    bool messaggio(HWND hw, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
         r = 0;
         if (m == onda.messaggio) {
             if (w == 1) { onda.battitoRicevuto(); passoRiquadro(); } else onda.controlla();
@@ -173,18 +185,38 @@ public:
                 return true;
             case WM_PAINT: disegna(); return true;
             case WM_APP + 1: {   // risultati dei file dal thread
+                if (!consegna::riprendi(hw, m, (const void*)l)) return true;   // (non consegnato dal thread: ignorato)
                 auto* lista = (std::vector<Risultato>*)l;
                 if ((LONG)w == generazione && apertaOra) { file = std::move(*lista); componi(); }
                 delete lista;
                 return true;
             }
-            case WM_CHAR:
-                if (w >= 32 && w != 127 && !(GetKeyState(VK_CONTROL) & 0x8000)) { testo += (wchar_t)w; cambiato(); }
+            case WM_CHAR: {
+                // Tetto di 512 come l'incolla, ma un carattere fuori dal piano base (due unita') entra intero o non entra:
+                // controllato sulla singola unita' lasciava mezza emoji nella query (R20261121-124830-S1)
+                if (w < 32 || w == 127 || (GetKeyState(VK_CONTROL) & 0x8000)) return true;
+                const wchar_t c = (wchar_t)w;
+                if (IS_HIGH_SURROGATE(c)) { saltaBasso = testo.size() + 2 > 512; if (!saltaBasso) testo += c; return true; }
+                if (IS_LOW_SURROGATE(c)) {
+                    const bool ok = !saltaBasso && !testo.empty() && IS_HIGH_SURROGATE(testo.back());
+                    saltaBasso = false;
+                    if (ok) { testo += c; cambiato(); }
+                    return true;
+                }
+                saltaBasso = false;
+                if (!testo.empty() && IS_HIGH_SURROGATE(testo.back())) testo.pop_back();   // (meta' rimasta sola)
+                if (testo.size() < 512) { testo += c; cambiato(); }
                 return true;
+            }
             case WM_KEYDOWN: tasto(w); return true;
             case WM_MOUSEMOVE: {
                 const int s = rigaIn(GET_X_LPARAM(l), GET_Y_LPARAM(l));
-                if (s != sopra) { sopra = s; if (s >= 0) sel = s; disegna(); }
+                // (scelta dell'utente solo se il mouse si e' mosso davvero: la finestra che cresce sotto il mouse fermo
+                // manda anche lei WM_MOUSEMOVE)
+                const DWORD mp = GetMessagePos(); const bool mosso = mp != ultimoMouse; ultimoMouse = mp;
+                // (un movimento vero dentro la riga gia' evidenziata e' una scelta anche lui, R20261121-124830-S2)
+                if (s >= 0 && mosso && !selUtente) { sel = s; selUtente = true; }
+                if (s != sopra) { sopra = s; if (s >= 0) { sel = s; if (mosso) selUtente = true; } disegna(); }
                 return true;
             }
             case WM_LBUTTONUP: { const int s = rigaIn(GET_X_LPARAM(l), GET_Y_LPARAM(l)); if (s >= 0) esegui(s); return true; }
@@ -222,6 +254,9 @@ private:
     std::vector<std::pair<std::wstring, std::wstring>> app;
     std::vector<Risultato> risultati, file;
     int sel = 0, sopra = -1, larg = 0, x = 0, y = 0;
+    DWORD ultimoMouse = 0;
+    bool saltaBasso = false;   // WM_CHAR: la prima meta' di un carattere non entrata, si scarta anche la seconda
+    bool selUtente = false;   // sel scelta con frecce o mouse (non la prima riga data da sola: vedi componi)
     bool apertaOra = false, cursore = true;
     HWND primaDi = nullptr;
     onda::Onda onda;
@@ -303,23 +338,37 @@ private:
         if (k == VK_ESCAPE) { if (testo.empty()) chiudi(); else { testo.clear(); cambiato(); } }
         else if (k == VK_BACK && !testo.empty()) {
             if (ctrl) { while (!testo.empty() && testo.back() == L' ') testo.pop_back(); while (!testo.empty() && testo.back() != L' ') testo.pop_back(); }
-            else testo.pop_back();
+            else { testo.pop_back(); if (!testo.empty() && IS_HIGH_SURROGATE(testo.back())) testo.pop_back(); }   // (l'emoji intera)
             cambiato();
         }
-        else if (k == VK_DOWN && !risultati.empty()) { sel = (sel + 1) % (int)risultati.size(); disegna(); }
-        else if (k == VK_UP && !risultati.empty()) { sel = (sel - 1 + (int)risultati.size()) % (int)risultati.size(); disegna(); }
+        else if (k == VK_DOWN && !risultati.empty()) { sel = (sel + 1) % (int)risultati.size(); selUtente = true; disegna(); }
+        else if (k == VK_UP && !risultati.empty()) { sel = (sel - 1 + (int)risultati.size()) % (int)risultati.size(); selUtente = true; disegna(); }
         else if (k == VK_RETURN) esegui(sel);
         else if (ctrl && k == 'V' && OpenClipboard(v.fin)) {
+            const size_t primaIncolla = testo.size();
+            // dentro il blocco e al massimo 512 caratteri in tutto: un incolla enorme fermava l'interfaccia (S11)
             if (HANDLE hd = GetClipboardData(CF_UNICODETEXT)) if (const wchar_t* p = (const wchar_t*)GlobalLock(hd)) {
-                for (; *p; p++) if (*p >= 32) testo += *p;
+                // Si esaminano al massimo 4096 unita' (un blocco di soli a capo non fa crescere il testo, e prima si
+                // percorreva tutto). Una coppia surrogata entra intera o non entra: tagliata a 512 restava a meta'
+                // (R20261121-120822-S4 e conferma di S11)
+                const size_t n = std::min<size_t>(GlobalSize(hd) / sizeof(wchar_t), 4096);
+                for (size_t i = 0; i < n && p[i] && testo.size() < 512; i++) {
+                    if (p[i] < 32) continue;
+                    if (IS_HIGH_SURROGATE(p[i])) {
+                        if (i + 1 >= n || !IS_LOW_SURROGATE(p[i + 1]) || testo.size() + 2 > 512) break;
+                        testo += p[i]; testo += p[++i];
+                    } else if (!IS_LOW_SURROGATE(p[i])) testo += p[i];
+                }
                 GlobalUnlock(hd);
             }
-            CloseClipboard(); cambiato();
+            // (cambiato solo se e' entrato qualcosa: un incolla di un'immagine azzerava la riga scelta, R20261121-124830-S3)
+            CloseClipboard(); if (testo.size() != primaIncolla) cambiato();
         }
     }
 
     void cambiato() {
         cursore = true; SetTimer(v.fin, 2, 530, nullptr);
+        selUtente = false; sel = 0;   // testo nuovo: torna la prima riga (la scelta di prima era per l'altro testo)
         InterlockedIncrement(&generazione);
         file.clear();
         componi();
@@ -340,16 +389,24 @@ private:
     }
 
     void componi() {
+        // la voce scelta con le frecce si ritrova per tipo e azione, non per numero di riga: i file che arrivano dopo
+        // entrano prima di "Cerca sul web", e Invio apriva un file al suo posto (R20261121-002818-S9)
+        // Solo una scelta vera (frecce o mouse): la prima riga data da sola resta la prima. Prima anche quella si
+        // ritrovava per tipo, e se in attesa dei file c'era solo "Cerca sul web", Invio mandava al browser il nome del
+        // file appena trovato (R20261121-120822-S1)
+        const bool scelta = selUtente && sel >= 0 && sel < (int)risultati.size();
+        if (!selUtente) sel = 0;
+        const int tipoScelto = scelta ? (int)risultati[sel].tipo : -1;
+        const std::wstring azioneScelta = scelta ? risultati[sel].azione : L"";
         risultati.clear();
-        std::wstring q = testo;
-        while (!q.empty() && q.front() == L' ') q.erase(q.begin());
-        while (!q.empty() && q.back() == L' ') q.pop_back();
+        const size_t a = testo.find_first_not_of(L' '), b = testo.find_last_not_of(L' ');
+        std::wstring q = a == std::wstring::npos ? L"" : testo.substr(a, b - a + 1);   // (senza spazi ai lati, in un passo)
         if (!q.empty()) {
             const std::wstring ql = minuscolo(q);
             double val;
             if (Calcolo::valuta(q, val)) {
                 wchar_t b[64]; swprintf(b, 64, L"%.10g", val);
-                std::wstring s = b; if (!testi::inglese()) for (auto& c : s) if (c == L'.') c = L',';   // virgola in italiano
+                std::wstring s = b; const wchar_t vg = testi::virgola(); for (auto& c : s) if (c == L'.') c = vg;   // (virgola in italiano, spagnolo...)
                 risultati.push_back({T_CALCOLO, L"= " + s, testi::t(L"Invio per copiare il risultato", L"Enter to copy the result"), s, L""});
             }
             // app: prima chi inizia con il testo
@@ -365,11 +422,21 @@ private:
                 if (n >= 3) break;
                 if (punteggio(s.titolo, ql) > 0 || minuscolo(s.sotto).find(ql) != std::wstring::npos) { Risultato r = s; r.sotto = testi::t(L"Impostazioni", L"Settings"); risultati.push_back(r); n++; }
             }
-            for (const auto& f : file) risultati.push_back(f);
-            risultati.push_back({T_WEB, testi::t(L"Cerca “", L"Search “") + q + testi::t(L"” sul web", L"” on the web"),
+            // i file che entrano: la barra resta dentro tre quarti dello schermo (con 8 file, piu' app, impostazioni e
+            // web, su uno schermo basso usciva di sotto). Una riga resta per la ricerca sul web
+            {
+                MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+                const bool ok = GetMonitorInfoW(MonitorFromWindow(v.fin, MONITOR_DEFAULTTONEAREST), &mi);
+                const float alto = ok ? (mi.rcWork.bottom - mi.rcWork.top) / v.dpi * 0.75f : 1000;
+                const int righe = std::max(0, (int)((alto - ALTO_BARRA - 18) / ALTO_RIGA));
+                const int posto = std::max(0, righe - (int)risultati.size() - 1);
+                for (size_t i = 0; i < file.size() && (int)i < posto; i++) risultati.push_back(file[i]);
+            }
+            risultati.push_back({T_WEB, testi::t(L"Cerca “", L"Search “") + testi::isola(q) + testi::t(L"” sul web", L"” on the web"),
                                  testi::t(L"Nel browser predefinito", L"In the default browser"), q, L""});
         }
         sel = std::clamp(sel, 0, std::max(0, (int)risultati.size() - 1));
+        if (scelta) for (int i = 0; i < (int)risultati.size(); i++) if ((int)risultati[i].tipo == tipoScelto && risultati[i].azione == azioneScelta) { sel = i; break; }
         if (risultati.empty()) sel = 0;
         sopra = -1;
         chiediIcone();
@@ -434,14 +501,16 @@ private:
                 if (primaDi && IsWindow(primaDi)) SetForegroundWindow(primaDi);
                 break;
             case T_WEB: {
+                // tutta la stringa in UTF-8 in una volta, poi in percentuale: prima un carattere alla volta, e le emoji o
+                // gli ideogrammi fuori dal piano base (due wchar_t) diventavano caratteri sostitutivi (S20)
                 std::wstring u = L"https://www.google.com/search?q=";
-                for (wchar_t c : r.azione) {
-                    if (iswalnum(c) && c < 128) u += c;
-                    else if (c == L' ') u += L'+';
-                    else {   // UTF-8 in percentuale
-                        char b[8]; const int n = WideCharToMultiByte(CP_UTF8, 0, &c, 1, b, 8, nullptr, nullptr);
-                        for (int j = 0; j < n; j++) { wchar_t h[4]; swprintf(h, 4, L"%%%02X", (unsigned char)b[j]); u += h; }
-                    }
+                const int n8 = WideCharToMultiByte(CP_UTF8, 0, r.azione.c_str(), (int)r.azione.size(), nullptr, 0, nullptr, nullptr);
+                std::string b8(n8 > 0 ? n8 : 0, '\0');
+                if (n8 > 0) WideCharToMultiByte(CP_UTF8, 0, r.azione.c_str(), (int)r.azione.size(), b8.data(), n8, nullptr, nullptr);
+                for (unsigned char c : b8) {
+                    if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) u += (wchar_t)c;
+                    else if (c == ' ') u += L'+';
+                    else { wchar_t h[4]; swprintf(h, 4, L"%%%02X", c); u += h; }
                 }
                 ShellExecuteW(nullptr, L"open", u.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 break;
@@ -564,9 +633,9 @@ private:
                 {L"Gestione attività", L"Task Manager", L"processi task manager processes", L"taskmgr"},
                 {L"Impostazioni di FluidWin", L"FluidWin settings", L"dock gelatina genio panoramica jelly genie overview", L"*fluidwin"},
         };
-        static std::vector<Risultato> p[2];
-        std::vector<Risultato>& v = p[testi::inglese() ? 1 : 0];
-        if (v.empty()) for (auto& x : t) v.push_back({T_IMPOSTAZIONE, testi::inglese() ? x[1] : x[0], x[2], x[3], L""});
+        static std::vector<Risultato> p[testi::N_LINGUE];
+        std::vector<Risultato>& v = p[testi::attuale()];
+        if (v.empty()) for (auto& x : t) v.push_back({T_IMPOSTAZIONE, testi::t(x[0], x[1]), x[2], x[3], L""});
         return v;
     }
 
@@ -583,8 +652,9 @@ private:
                 else if (!r->iconeDaFare.empty()) { ic = r->iconeDaFare.front(); r->iconeDaFare.pop_front(); r->iconeInCorso++; }
                 LeaveCriticalSection(&r->cs);
                 if (g >= 0) {
-                    auto* lista = new std::vector<Risultato>(cercaFile(q, 5));   // al massimo 5, dopo aver saltato quelli di sistema
-                    if (g != r->generazione || !PostMessageW(r->v.fin, WM_APP + 1, (WPARAM)g, (LPARAM)lista)) delete lista;
+                    // al massimo 8 (prima 5), dopo aver saltato quelli di sistema; quanti se ne vedono lo decide componi
+                    auto* lista = new std::vector<Risultato>(cercaFile(q, 8));
+                    if (g != r->generazione || !consegna::posta(r->v.fin, WM_APP + 1, (WPARAM)g, lista)) delete lista;
                 } else if (!ic.empty()) {
                     Pixel px; px.chiave = ic;
                     pixelIcona(ic, 64, px.w, px.h, px.px);
@@ -595,56 +665,11 @@ private:
         return 0;
     }
 
+    // file e cartelle dall'indice di Windows (indice.h, condiviso con il launcher): tutti i luoghi indicizzati, senza
+    // AppData, cartelle nascoste e menu Start. Prima solo la cartella dell'utente
     static std::vector<Risultato> cercaFile(const std::wstring& q, int quanti) {
         std::vector<Risultato> out;
-        static const CLSID CLSID_Fabbrica = {0x14010e02, 0xbbbd, 0x41f0, {0x88, 0xe3, 0xed, 0xa3, 0x71, 0x21, 0x65, 0x84}};   // SearchFolderItemFactory
-        static const IID IID_Fabbrica = {0xa0ffbc28, 0x5482, 0x4366, {0xbe, 0x27, 0x3e, 0x81, 0xe7, 0x8e, 0x06, 0xc2}};
-        static const CLSID CLSID_Condizioni = {0xe03e85b0, 0x7be3, 0x4000, {0xba, 0x98, 0x6c, 0x13, 0xde, 0x9f, 0xa4, 0x86}};   // ConditionFactory
-        static const IID IID_Condizioni2 = {0x71d222e1, 0x432f, 0x429e, {0x8c, 0x13, 0xb6, 0xda, 0xfd, 0xe5, 0x07, 0x7a}};
-        static const IID IID_Condizione = {0x0fc988d4, 0xc935, 0x4b97, {0xa9, 0x73, 0x46, 0x28, 0x2e, 0xa1, 0x75, 0xc8}};
-        static const PROPERTYKEY NOME = {{0xb725f130, 0x47ef, 0x101a, {0xa5, 0xf1, 0x02, 0x60, 0x8c, 0x9e, 0xeb, 0xac}}, 10};   // ItemNameDisplay
-        ISearchFolderItemFactory* sf = nullptr; IUnknown* cf = nullptr; ICondition* cond = nullptr;
-        if (FAILED(CoCreateInstance(CLSID_Fabbrica, nullptr, CLSCTX_INPROC_SERVER, IID_Fabbrica, (void**)&sf))) return out;
-        if (SUCCEEDED(CoCreateInstance(CLSID_Condizioni, nullptr, CLSCTX_INPROC_SERVER, IID_Condizioni2, (void**)&cf)) &&
-            // IConditionFactory2::CreateStringLeaf (MinGW non ha structuredquery.h: si chiama per posizione, IUnknown 3 +
-            // IConditionFactory 4 + CreateTrueFalse, CreateNegation, CreateCompoundFromObjectArray, CreateCompoundFromArray)
-            SUCCEEDED(((HRESULT (STDMETHODCALLTYPE*)(void*, const PROPERTYKEY&, CONDITION_OPERATION, LPCWSTR, LPCWSTR, int, REFIID, void**))(*(void***)cf)[11])(
-                cf, NOME, COP_VALUE_CONTAINS, q.c_str(), nullptr, 0 /* CONDITION_CREATION_DEFAULT */, IID_Condizione, (void**)&cond)) && cond) {
-            sf->SetDisplayName(L"FluidWin");
-            sf->SetCondition(cond);
-            PIDLIST_ABSOLUTE profilo = nullptr;
-            if (SUCCEEDED(SHGetKnownFolderIDList(FOLDERID_Profile, 0, nullptr, &profilo))) {
-                IShellItemArray* scopo = nullptr;
-                if (SUCCEEDED(SHCreateShellItemArrayFromIDLists(1, (PCIDLIST_ABSOLUTE_ARRAY)&profilo, &scopo))) { sf->SetScope(scopo); scopo->Release(); }
-                CoTaskMemFree(profilo);
-            }
-            IShellItem* ris = nullptr;
-            if (SUCCEEDED(sf->GetShellItem(IID_PPV_ARGS(&ris)))) {
-                IEnumShellItems* en = nullptr;
-                if (SUCCEEDED(ris->BindToHandler(nullptr, BHID_EnumItems, IID_PPV_ARGS(&en)))) {
-                    IShellItem* it = nullptr;
-                    while ((int)out.size() < quanti && en->Next(1, &it, nullptr) == S_OK) {
-                        LPWSTR n = nullptr, perc = nullptr;
-                        if (SUCCEEDED(it->GetDisplayName(SIGDN_NORMALDISPLAY, &n)) && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &perc)) && n && perc) {
-                            std::wstring p = perc, cartella = p.substr(0, p.find_last_of(L'\\'));
-                            // cartelle di sistema e nascoste (AppData, .cache, .vscode...): non sono cose che si cercano
-                            std::wstring pl = p; for (auto& ch : pl) ch = (wchar_t)towlower(ch);
-                            const bool sistema = pl.find(L"\\appdata\\") != std::wstring::npos || pl.find(L"\\.") != std::wstring::npos;
-                            if (sistema) { CoTaskMemFree(n); CoTaskMemFree(perc); it->Release(); continue; }
-                            wchar_t prof[MAX_PATH] = L""; ExpandEnvironmentStringsW(L"%USERPROFILE%", prof, MAX_PATH);
-                            if (_wcsnicmp(cartella.c_str(), prof, wcslen(prof)) == 0) cartella = L"~" + cartella.substr(wcslen(prof));
-                            out.push_back({T_FILE, n, cartella, p, p});
-                        }
-                        CoTaskMemFree(n); CoTaskMemFree(perc); it->Release();
-                    }
-                    en->Release();
-                }
-                ris->Release();
-            }
-        }
-        if (cond) cond->Release();
-        if (cf) cf->Release();
-        sf->Release();
+        for (auto& f : indice::cerca(q, quanti, true)) out.push_back({T_FILE, f.nome, f.cartella, f.percorso, f.percorso});
         return out;
     }
 

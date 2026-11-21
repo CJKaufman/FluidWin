@@ -14,13 +14,16 @@
 #include <dwmapi.h>
 #include "raggio.h"
 #include "fabbriche.h"
+#include "testi.h"   // direzione del testo (arabo)
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
 #include <vector>
 #include <functional>
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <cstdint>
 
 namespace menu {
 
@@ -38,6 +41,30 @@ inline void chiudi() { if (aperti > 0) chiudiTutti = true; }
 inline bool animazioni() { return animazioniInCorso && passoAnimazioni && animazioniInCorso(); }
 // registro di FluidWin (solo con --log): alla chiusura di ogni menu, quanto arrivavano in ritardo i movimenti del mouse
 inline void (*registro)(const char*) = nullptr;
+// Fascia del dock a riposo su quello schermo (dal bordo dello schermo al lato interno del dock, lunga quanto il bordo;
+// vuota se li' non c'e' o resta giu'): il dock non riserva spazio (la zona di lavoro arriva fino al bordo), e un menu
+// lungo aperto dal centro di controllo finiva in parte sotto il dock, con le ultime voci non cliccabili ("Ferma il
+// timer", "Spegni"). Col dock in alto o ai lati (impostazione "Posizione") la fascia e' su quel bordo
+inline RECT (*fasciaDock)(HMONITOR) = nullptr;
+// zona di lavoro senza la fascia del dock. Se dopo non resta posto (schermo basso, area di lavoro ridotta): meglio un
+// menu che copre il dock di uno alto un pixel (R20261120-145131-S3)
+inline RECT areaLibera(HMONITOR m, const RECT& lavoro) {
+    RECT a = lavoro;
+    if (!fasciaDock) return a;
+    const RECT f = fasciaDock(m);
+    if (IsRectEmpty(&f)) return a;
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(m, &mi)) return a;
+    const RECT& s = mi.rcMonitor;
+    if (f.right - f.left >= f.bottom - f.top) {   // in basso o in alto
+        if (f.bottom >= s.bottom - 1) a.bottom = std::min(a.bottom, f.top); else a.top = std::max(a.top, f.bottom);
+        if (a.bottom - a.top < 160) { a.top = lavoro.top; a.bottom = lavoro.bottom; }
+    } else {                                       // a sinistra o a destra
+        if (f.left <= s.left + 1) a.left = std::max(a.left, f.right); else a.right = std::min(a.right, f.left);
+        if (a.right - a.left < 160) { a.left = lavoro.left; a.right = lavoro.right; }
+    }
+    return a;
+}
 
 struct Voce {
     std::wstring testo;
@@ -47,6 +74,11 @@ struct Voce {
     int pulsante = 0;        // != 0: pulsante con icona nella riga in cima (vedi Icona), come nel menu di Windows 11
     bool extra = false;      // nascosta finche' non si passa sulla freccia in fondo (le "altre opzioni")
     int simbolo = 0;         // icona piccola a sinistra del testo (Icona), 0 nessuna
+    // icona a colori a sinistra del testo (comandi delle app nel dock: jumplist.h): pixel BGRA premoltiplicati,
+    // latoPixel x latoPixel, di chi chiama mostra() (devono restare validi finche' il menu e' aperto); il menu ne fa una
+    // bitmap di Direct2D. Pixel e non HICON: arrivano gia' pronti dal thread che legge le jump list
+    const uint32_t* pixel = nullptr;
+    int latoPixel = 0;
 };
 enum Icona { I_NIENTE, I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA,
              I_APRI, I_APRI_CON, I_ADMIN, I_PREFERITI, I_START, I_BARRA, I_PERCORSO, I_PROPRIETA, I_TERMINALE, I_COPILOT,
@@ -148,8 +180,24 @@ private:
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
+        for (ID2D1Bitmap* b : immagini) if (b) b->Release();
         for (IUnknown* o : std::initializer_list<IUnknown*>{pen, rt, fmt, fmtTitolo}) if (o) o->Release();
         if (fin) DestroyWindow(fin);
+    }
+
+    // Icone a colori (Voce::pixel) come bitmap di Direct2D, fatte la prima volta che servono con il render target di
+    // questo menu. Una che non si crea resta vuota: niente icona
+    std::vector<ID2D1Bitmap*> immagini;
+    std::vector<bool> immaginiProvate;
+    ID2D1Bitmap* immagine(size_t i) {
+        if (i >= voci.size() || !voci[i].pixel || voci[i].latoPixel <= 0 || voci[i].latoPixel > 256 || !rt) return nullptr;
+        if (immagini.size() != voci.size()) { immagini.assign(voci.size(), nullptr); immaginiProvate.assign(voci.size(), false); }
+        if (immaginiProvate[i]) return immagini[i];
+        immaginiProvate[i] = true;
+        const UINT32 l = (UINT32)voci[i].latoPixel;
+        rt->CreateBitmap(D2D1::SizeU(l, l), voci[i].pixel, l * 4,
+                         D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &immagini[i]);
+        return immagini[i];
     }
 
     // Fabbriche di Direct2D e DirectWrite: una sola per tutti i menu (crearle a ogni menu lasciava indietro un paio di
@@ -207,6 +255,7 @@ private:
         // nulli e torna 0, come un menu annullato. Prima si usavano subito, nulli
         if (!fmt || !fmtTitolo) return;
         for (IDWriteTextFormat* f : {fmt, fmtTitolo}) {
+            testi::allinea(f, DWRITE_TEXT_ALIGNMENT_LEADING);   // (in arabo da destra a sinistra, vedi testi.h)
             f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
@@ -224,7 +273,7 @@ private:
         }
         if (pulsanti) { largo = std::max(largo, (pulsanti * (LATO_PULSANTE + 4) + 12) * dpi); }
         conFreccia = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.extra; });
-        conSimboli = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.simbolo != 0; });
+        conSimboli = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.simbolo != 0 || v.pixel; });
         if (conSimboli) largo += 14 * dpi;
         W = (int)std::ceil(std::min(largo, 420 * dpi));
         // rettangoli: pulsanti in riga in cima, poi le voci, poi la freccia, poi le voci extra
@@ -243,12 +292,14 @@ private:
         }
         // dentro lo schermo
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
-        hMax = (int)(mi.rcWork.bottom - mi.rcWork.top);
+        const RECT al = areaLibera(mon, mi.rcWork);   // (fuori dalla fascia del dock, su qualsiasi lato)
+        hMax = (int)(al.bottom - al.top);
         H = std::min((int)std::ceil(hCompatto), hMax);
         int x = pt.x, y = versoAlto ? pt.y - H : pt.y;
-        if (x + W > mi.rcWork.right) x = std::max((int)mi.rcWork.left, (padre ? (int)padre->sinistraFin() - W : (int)mi.rcWork.right - W));
-        if (y + H > mi.rcWork.bottom) y = mi.rcWork.bottom - H;
-        if (y < mi.rcWork.top) y = mi.rcWork.top;
+        if (x < al.left) x = al.left;   // (dock a sinistra: il menu aperto su un'icona sta alla sua destra)
+        if (x + W > al.right) x = std::max((int)al.left, (padre ? (int)padre->sinistraFin() - W : (int)al.right - W));
+        if (y + H > al.bottom) y = al.bottom - H;
+        if (y < al.top) y = al.top;
         x0 = x; y0 = y;
         fin = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"FluidWin.Menu", L"", WS_POPUP,
                               x, y, W, H, proprietario, nullptr, GetModuleHandleW(nullptr), this);
@@ -257,7 +308,7 @@ private:
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(fin, &mg);
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &sc, sizeof(sc));
         int tipo = 3; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
-        int angoli = 2; DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
+        int angoli = raggio::preferenzaDwm(); DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));   // (impostazione "Angoli")
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         f2d = fabbrica2d();
         if (!f2d || !fdw) return;
@@ -280,7 +331,8 @@ private:
         const double e = 1 - std::pow(1 - kEsp, 3);
         const int h = std::min((int)std::ceil(hCompatto + (hPieno - hCompatto) * e), hMax);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
-        const int y = std::max((int)mi.rcWork.top, std::min(y0, (int)mi.rcWork.bottom - h));
+        const RECT al = areaLibera(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), mi.rcWork);
+        const int y = std::max((int)al.top, std::min(y0, (int)al.bottom - h));
         if (alfa < 255) posa(1);   // (se l'apertura non era finita, la si chiude qui)
         SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
         H = h;
@@ -309,21 +361,25 @@ private:
     bool fasciaSu() const { return scorri > 0.5f; }
     bool fasciaGiu() const { return scorri < maxScorri() - 0.5f; }
     // porta lo scorrimento a y; la voce sotto il mouse cambia con le voci
-    void scorriA(float y) {
+    // dalMouse: la voce sotto il mouse diventa quella scelta. Scorrendo con la tastiera no: la scelta resta quella delle
+    // frecce (prima saltava alla voce sotto il mouse fermo, e Invio eseguiva un altro comando, R20261121-002818-S14)
+    void scorriA(float y, bool dalMouse = true) {
         const float n = std::clamp(y, 0.0f, maxScorri());
         if (std::fabs(n - scorri) < 0.01f) return;
         scorri = n;
-        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
-        RECT cr; GetClientRect(fin, &cr);
-        sopra = PtInRect(&cr, c) ? voceIn(c.x, c.y) : sopra;
+        if (dalMouse) {
+            POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+            RECT cr; GetClientRect(fin, &cr);
+            sopra = PtInRect(&cr, c) ? voceIn(c.x, c.y) : sopra;
+        }
         disegna();
     }
     // la voce i tutta dentro la finestra (spostandosi con la tastiera)
     void mostraVoce(int i) {
         if (i < 0 || i >= (int)rett.size() || maxScorri() <= 0) return;
         const float m = FASCIA * dpi;
-        if (rett[i].top - scorri < m) scorriA(rett[i].top - m);
-        else if (rett[i].bottom - scorri > H - m) scorriA(rett[i].bottom - H + m);
+        if (rett[i].top - scorri < m) scorriA(rett[i].top - m, false);
+        else if (rett[i].bottom - scorri > H - m) scorriA(rett[i].bottom - H + m, false);
     }
     // mouse fermo su una delle due fasce: scorre da solo (la rotella puo' finire a un'altra finestra se FluidWin non e'
     // in primo piano). true se sta scorrendo
@@ -400,6 +456,11 @@ private:
                 pen->SetColor(ci);
                 icona(v.simbolo, r.left + 18 * dpi, (r.top + r.bottom) / 2, 0.82f);
                 pen->SetColor(c);
+            } else if (v.pixel && !v.titolo) {   // icona a colori, 16 punti, al posto del simbolo
+                if (ID2D1Bitmap* b = immagine((size_t)i)) {
+                    const float cx = r.left + 18 * dpi, cy = (r.top + r.bottom) / 2, m = 8 * dpi;
+                    rt->DrawBitmap(b, {cx - m, cy - m, cx + m, cy + m}, v.disattivata ? 0.4f : 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                }
             }
             rt->DrawText(v.testo.c_str(), (UINT32)v.testo.size(), v.titolo ? fmtTitolo : fmt, v.titolo ? D2D1_RECT_F{r.left + 10 * dpi, r.top, r.right, r.bottom} : rtxt,
                          pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
@@ -425,7 +486,9 @@ private:
             rt->DrawLine({cx - 5 * dpi, cy - 2 * s * dpi}, {cx, cy + 3 * s * dpi}, pen, 1.6f * dpi);
             rt->DrawLine({cx, cy + 3 * s * dpi}, {cx + 5 * dpi, cy - 2 * s * dpi}, pen, 1.6f * dpi);
         }
-        rt->EndDraw();
+        // superficie persa (GPU, driver): il menu si chiude senza scelta, con i suoi sottomenu; alla prossima apertura
+        // le risorse si rifanno. Prima restava aperto e cliccabile, vuoto o fermo all'ultimo disegno (S16)
+        if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { fine = true; scelta = 0; for (Menu* p = padre; p; p = p->padre) p->fine = true; }
         ValidateRect(fin, nullptr);
     }
 

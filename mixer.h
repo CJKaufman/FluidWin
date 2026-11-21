@@ -12,6 +12,7 @@
 #include <audiopolicy.h>
 #include <endpointvolume.h>
 #include <tlhelp32.h>
+#include <map>
 #include <string>
 #include <vector>
 #include <algorithm>
@@ -137,8 +138,28 @@ private:
         if (nome.empty()) { nome = f; const size_t q = nome.rfind(L'.'); if (q != std::wstring::npos && q > 0) nome.resize(q); if (!nome.empty()) nome[0] = (wchar_t)towupper(nome[0]); }
     }
 
+    // Una volta per eseguibile (solo dal thread principale): prima il mixer aperto rileggeva dal disco i dati di ogni
+    // exe a ogni secondo, per ogni sessione (R20261121-001738-S14). Al massimo 256 voci, poi si ricomincia
+    // La voce ricorda anche la data di modifica del file: un'app aggiornata nella stessa cartella (descrizione nuova)
+    // si rilegge invece di mostrare il nome vecchio finche' FluidWin resta aperto (R20261121-120053-S1)
+    // La data si ricontrolla al massimo ogni 30 s per voce: il mixer rilegge ogni secondo, e un'app avviata da una
+    // condivisione lenta faceva attendere il thread principale a ogni giro (R20261121-123247-S1)
     static std::wstring descrizione(const std::wstring& exe) {
+        struct Voce { ULONGLONG data; std::wstring nome; ULONGLONG visto = 0; };
+        static std::map<std::wstring, Voce> gia;
         if (exe.empty()) return L"";
+        const ULONGLONG adesso = GetTickCount64();
+        if (auto it = gia.find(exe); it != gia.end() && adesso - it->second.visto < 30000) return it->second.nome;
+        WIN32_FILE_ATTRIBUTE_DATA a{};
+        const ULONGLONG data = GetFileAttributesExW(exe.c_str(), GetFileExInfoStandard, &a)
+            ? ((ULONGLONG)a.ftLastWriteTime.dwHighDateTime << 32) | a.ftLastWriteTime.dwLowDateTime : 0;
+        if (auto it = gia.find(exe); it != gia.end() && it->second.data == data) { it->second.visto = adesso; return it->second.nome; }
+        if (gia.size() > 256) gia.clear();
+        Voce& v = gia[exe];
+        v.data = data; v.nome = leggiDescrizione(exe); v.visto = adesso;
+        return v.nome;
+    }
+    static std::wstring leggiDescrizione(const std::wstring& exe) {
         DWORD h = 0, n = GetFileVersionInfoSizeW(exe.c_str(), &h);
         if (!n || n > 4 * 1024 * 1024) return L"";
         std::vector<BYTE> b(n);

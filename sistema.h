@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <mutex>
 
 namespace sistema {
 
@@ -62,12 +63,18 @@ public:
     }
 
     void rileggi() { SetEvent(evento); }
+    // (una richiesta per radio: prima Wi-Fi e Bluetooth avevano un posto solo, e il secondo clic cancellava il primo,
+    // R20261121-001738-S6)
     void impostaRadio(int tipo /* 1 Wi-Fi, 3 Bluetooth */, bool acceso) {
         (tipo == 1 ? wifi : bluetooth) = acceso ? 1 : 0;   // subito nell'interfaccia; il thread la rende vera
-        richiestaRadio = tipo * 2 + (acceso ? 1 : 0);
+        (tipo == 1 ? richiestaWifi : richiestaBt) = acceso ? 1 : 0;
         SetEvent(evento);
     }
-    void impostaLuminosita(int v) { luminosita = v; richiestaLum = v; SetEvent(evento); }
+    // (lo schermo e' quello del momento del gesto: prima lo sceglieva il thread piu' tardi, e se intanto il dock era
+    // passato su un altro schermo la luminosita' finiva li', S12)
+    // valore e schermo si prendono insieme: prima due atomiche separate, e un gesto su un altro schermo durante il
+    // lavoro faceva scrivere il valore del primo sul secondo (R20261121-120053 su S12)
+    void impostaLuminosita(int v) { luminosita = v; { std::lock_guard<std::mutex> g(mLum); lum = {v, centroSchermo.load()}; } SetEvent(evento); }
 
     // ---- tema ----
     static bool temaScuro() {
@@ -135,24 +142,26 @@ public:
 
 private:
     HANDLE thread = nullptr, evento = nullptr;
-    std::atomic<int> richiestaRadio{-1}, richiestaLum{-1};
+    std::atomic<int> richiestaWifi{-1}, richiestaBt{-1};
+    struct Lum { int v = -1; long long schermo = 0; };
+    std::mutex mLum; Lum lum;   // richiesta di luminosita' (v -1 = nessuna)
 
     static DWORD WINAPI lavoro(LPVOID p) {
         Sistema* s = (Sistema*)p;
         RoInitialize(RO_INIT_MULTITHREADED);
         for (;;) {
-            WaitForSingleObject(s->evento, INFINITE);
-            const int rr = s->richiestaRadio.exchange(-1);
-            const int rl = s->richiestaLum.exchange(-1);
-            s->radio(rr >= 0 ? rr / 2 : 0, rr >= 0 && (rr & 1));
-            s->monitor(rl);
+            if (WaitForSingleObject(s->evento, INFINITE) != WAIT_OBJECT_0) break;
+            const int rw = s->richiestaWifi.exchange(-1), rb = s->richiestaBt.exchange(-1);
+            Lum rl; { std::lock_guard<std::mutex> g(s->mLum); rl = s->lum; s->lum = Lum{}; }
+            s->radio(rw, rb);
+            s->monitor(rl.v, rl.v >= 0 ? rl.schermo : s->centroSchermo.load());
             s->pronto = true;
         }
         return 0;
     }
 
-    // legge (e, se tipo != 0, imposta) le radio
-    void radio(int tipo, bool acceso) {
+    // legge (e imposta, se le richieste sono 0 o 1: spenta o accesa) le radio Wi-Fi e Bluetooth
+    void radio(int vuoleWifi, int vuoleBt) {
         HSTRING cl = nullptr; const wchar_t* n = L"Windows.Devices.Radios.Radio";
         WindowsCreateString(n, (UINT32)wcslen(n), &cl);
         IInspectable* fab = nullptr;
@@ -181,9 +190,10 @@ private:
             if (!r) continue;
             int stato = 0, genere = 0;   // RadioState: 1 acceso, 2 spento, 3 disattivato; RadioKind: 1 Wi-Fi, 3 Bluetooth
             metodoS<HRESULT (STDMETHODCALLTYPE*)(void*, int*)>(r, 11)(r, &genere);
-            if (tipo && genere == tipo) {
+            const int vuole = genere == 1 ? vuoleWifi : genere == 3 ? vuoleBt : -1;
+            if (vuole >= 0) {
                 void* o = nullptr;
-                metodoS<HRESULT (STDMETHODCALLTYPE*)(void*, int, void**)>(r, 6)(r, acceso ? 1 : 2, &o);   // SetStateAsync
+                metodoS<HRESULT (STDMETHODCALLTYPE*)(void*, int, void**)>(r, 6)(r, vuole ? 1 : 2, &o);   // SetStateAsync
                 if (o) { attendi(o, 3000); rilasciaS(o); }
             }
             metodoS<HRESULT (STDMETHODCALLTYPE*)(void*, int*)>(r, 9)(r, &stato);
@@ -197,9 +207,11 @@ private:
     }
 
     // luminosita' del monitor del dock (DDC/CI): legge, e imposta se v >= 0
-    void monitor(int v) {
-        const long long c = centroSchermo;
-        HMONITOR mon = MonitorFromPoint({(LONG)(c >> 32), (LONG)(int)(c & 0xFFFFFFFF)}, MONITOR_DEFAULTTOPRIMARY);
+    void monitor(int v, long long c) {
+        // (una richiesta per uno schermo scollegato intanto non finisce sul principale: si scarta)
+        HMONITOR mon = MonitorFromPoint({(LONG)(c >> 32), (LONG)(int)(c & 0xFFFFFFFF)}, v >= 0 ? MONITOR_DEFAULTTONULL : MONITOR_DEFAULTTOPRIMARY);
+        // (scartata: si rilegge lo schermo di adesso, invece di lasciare nel pannello il valore chiesto, R20261121-123247-S2)
+        if (!mon) { monitor(-1, centroSchermo.load()); return; }
         DWORD n = 0;
         if (!GetNumberOfPhysicalMonitorsFromHMONITOR(mon, &n) || !n) { luminosita = -1; return; }
         std::vector<PHYSICAL_MONITOR> pm(n);

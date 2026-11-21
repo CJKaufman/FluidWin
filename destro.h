@@ -185,17 +185,21 @@ inline std::wstring percorsoSelezionato(IFolderView2* fv) {
 }
 
 // tutti i file selezionati (percorsi del file system; gli elementi virtuali, come "Questo PC", si saltano)
-inline std::vector<std::wstring> percorsiSelezionati(IFolderView2* fv) {
+// Dalla selezione presa all'apertura del menu (a, vedi mostra): i percorsi si leggono solo scegliendo Condividi, non a
+// ogni menu (prima fino a 500 letture anche per premere Esc, R20261121-120822-S3). Tutti o nessuno: oltre 500, o un
+// elemento che non si legge, niente lista (Condividi ne riceveva una parte come se fosse tutto, R20261121-002818-S12)
+inline std::vector<std::wstring> percorsiSelezionati(IShellItemArray* a) {
     std::vector<std::wstring> r;
-    IShellItemArray* a = nullptr; DWORD n = 0;
-    if (fv && SUCCEEDED(fv->GetSelection(FALSE, &a)) && a && SUCCEEDED(a->GetCount(&n))) {
-        for (DWORD i = 0; i < n && i < 500; i++) {
-            IShellItem* it = nullptr; LPWSTR s = nullptr;
-            if (SUCCEEDED(a->GetItemAt(i, &it)) && it && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &s)) && s) { r.emplace_back(s); CoTaskMemFree(s); }
-            if (it) it->Release();
-        }
+    DWORD n = 0;
+    if (!a || FAILED(a->GetCount(&n)) || n > 500) return r;
+    for (DWORD i = 0; i < n; i++) {
+        IShellItem* it = nullptr; LPWSTR s = nullptr;
+        const bool letto = SUCCEEDED(a->GetItemAt(i, &it)) && it && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &s)) && s;
+        if (letto) r.emplace_back(s);
+        CoTaskMemFree(s);
+        if (it) it->Release();
+        if (!letto) { r.clear(); break; }
     }
-    if (a) a->Release();
     return r;
 }
 
@@ -297,7 +301,11 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
     else if (cosa == 1 && indiceDesktop >= 0) {
         DWORD stato = 0; PITEMID_CHILD pid = nullptr;
         if (SUCCEEDED(fv->Item(indiceDesktop, &pid)) && pid) { fv->GetSelectionState(pid, &stato); CoTaskMemFree(pid); }
-        if (!(stato & SVSI_SELECT)) fv->SelectItem(indiceDesktop, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED);
+        if (!(stato & SVSI_SELECT) && FAILED(fv->SelectItem(indiceDesktop, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED))) {
+            fv->Release(); sv->Release();   // (come sotto: niente menu su una selezione che non e' quella del clic, S3)
+            if (registro) registro("tasto destro: selezione sul desktop non riuscita, menu di Windows");
+            return false;
+        }
     } else if (cosa == 1) {
         // l'elemento col nome visto da UI Automation; se non e' gia' fra i selezionati diventa l'unico selezionato
         int indice = -1, quanti = 0;
@@ -320,11 +328,21 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
         DWORD stato = 0;
         PITEMID_CHILD pid = nullptr;
         if (SUCCEEDED(fv->Item(indice, &pid)) && pid) { fv->GetSelectionState(pid, &stato); CoTaskMemFree(pid); }
-        if (!(stato & SVSI_SELECT)) fv->SelectItem(indice, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED);
+        // selezione non riuscita (il file e' sparito intanto): il menu di Windows. Prima il menu di FluidWin restava sul
+        // file selezionato prima, e "Elimina" poteva colpire quello (R20261121-002818-S3)
+        if (!(stato & SVSI_SELECT) && FAILED(fv->SelectItem(indice, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED))) {
+            fv->Release(); sv->Release();
+            if (registro) registro("tasto destro: selezione non riuscita, menu di Windows");
+            return false;
+        }
     }
     tElemento = ms();
     IContextMenu* cm = nullptr;
     sv->GetItemObject(cosa == 1 ? SVGIO_SELECTION : SVGIO_BACKGROUND, IID_PPV_ARGS(&cm));
+    // la selezione per Condividi presa insieme al menu della shell (non dopo: Explorer puo' cambiarla intanto, e il menu
+    // restava di A con Condividi su B, R20261121-120822 su S4). Solo l'elenco degli elementi: i percorsi dopo
+    IShellItemArray* selezione = nullptr;
+    if (cm && cosa == 1 && fv && FAILED(fv->GetSelection(FALSE, &selezione))) selezione = nullptr;
     if (cm) {
         HMENU m = CreatePopupMenu();
         if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, 0x7EFF, CMF_NORMAL | CMF_CANRENAME))) {
@@ -401,7 +419,7 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
                     fatto = rinomina(fv, radice);
                     if (registro) registro(fatto ? "tasto destro: rinomina (casella del nome nella vista)" : "tasto destro: rinomina non riuscita, comando del menu");
                 } else if (quale == menu::I_CONDIVIDI) {
-                    fatto = condividi::file(percorsiSelezionati(fv), pt, radice, registro);
+                    fatto = condividi::file(percorsiSelezionati(selezione), pt, radice, registro);
                 }
                 if (cmd == ID_ADMIN) ShellExecuteW(radice, L"runas", file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 else if (cmd > 0 && !fatto) {
@@ -422,6 +440,7 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
         DestroyMenu(m);
         cm->Release();
     }
+    if (selezione) selezione->Release();
     if (fv) fv->Release();
     sv->Release();
     return ok;

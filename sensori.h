@@ -28,7 +28,7 @@
 
 namespace sensori {
 
-enum Simbolo { S_PUNTINA, S_BATTERIA, S_CUFFIE };
+enum Simbolo { S_PUNTINA, S_BATTERIA, S_CUFFIE, S_ALIMENTAZIONE };
 
 class Sensori {
 public:
@@ -188,7 +188,7 @@ private:
         if (carica != caricaPrima) {
             caricaPrima = carica;
             swprintf(b, 96, carica ? testi::t(L"In carica · %d%%", L"Charging · %d%%") : testi::t(L"Alimentatore scollegato · %d%%", L"Unplugged · %d%%"), pc);
-            if (avviso) avviso(b, S_BATTERIA, pc, carica);
+            if (avviso) avviso(b, S_ALIMENTAZIONE, pc, carica);
             if (carica) sogliaAvvisata = 101;
         }
         if (!carica && pc <= 20 && sogliaAvvisata > (pc <= 10 ? 10 : 20)) {

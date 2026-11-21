@@ -39,8 +39,9 @@ class Pila {
 public:
     bool aperta() const { return stato != 0; }
 
-    // icona: il rettangolo dell'icona nel dock (schermo); cartella: il percorso
-    void apri(const RECT& icona, const std::wstring& cartella, const std::wstring& nome) {
+    // icona: il rettangolo dell'icona nel dock (schermo); cartella: il percorso; latoDock: lato del dock (0 basso, 1 alto,
+    // 2 sinistra, 3 destra), la pila si apre dal suo lato interno
+    void apri(const RECT& icona, const std::wstring& cartella, const std::wstring& nome, int latoDock = 0) {
         if (!v.fin && !v.crea(L"FluidWin.Pila", vetro::procedura<Pila>, this, true)) return;
         dir = cartella; titolo = nome;
         v.aggiornaTema();
@@ -50,11 +51,22 @@ public:
         const int righe = std::max(1, (int)std::min<size_t>(3, (file.size() + COLONNE - 1) / COLONNE));
         const int w = (int)std::lround((COLONNE * CELLA + 24) * d), h = (int)std::lround((48 + righe * ALTA + 50) * d);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromRect(&icona, MONITOR_DEFAULTTONEAREST), &mi);
-        x = std::clamp((int)((icona.left + icona.right) / 2 - w / 2), (int)mi.rcWork.left + 8, (int)mi.rcWork.right - w - 8);
-        y = icona.top - (int)std::lround(14 * d) - h;
+        // dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto), a destra o a sinistra (ai lati)
+        const int st = (int)std::lround(14 * d);
+        // (schermo piu' stretto della pila: limite alto mai sotto quello basso, std::clamp altrimenti non e' definito, S7)
+        x = std::clamp((int)((icona.left + icona.right) / 2 - w / 2), (int)mi.rcWork.left + 8, std::max((int)mi.rcWork.left + 8, (int)mi.rcWork.right - w - 8));
+        y = icona.top - st - h; sx = 0; sy = 1;
+        if (latoDock == 1) { y = icona.bottom + st; sy = -1; }
+        else if (latoDock >= 2) {
+            x = latoDock == 2 ? icona.right + st : icona.left - st - w; sx = latoDock == 2 ? -1 : 1; sy = 0;
+            y = std::clamp((int)((icona.top + icona.bottom) / 2 - h / 2), (int)mi.rcWork.top + 8, std::max((int)mi.rcWork.top + 8, (int)mi.rcWork.bottom - h - 8));
+        }
         if (y < mi.rcMonitor.top + 8) y = mi.rcMonitor.top + 8;
-        v.posiziona(x, y + (int)std::lround(14 * d), w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
-        if (!fTitolo) { fTitolo = v.formato(15 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD); fNome = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER); fLink = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM); }
+        if (y + h > mi.rcMonitor.bottom - 8) y = std::max((int)mi.rcMonitor.top + 8, (int)mi.rcMonitor.bottom - 8 - h);
+        v.posiziona(x + sx * st, y + sy * st, w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
+        // (rifatti se cambia lo schermo e la sua scala: prima restavano della prima apertura, S18)
+        if (fTitolo && fDpi != d) { for (IDWriteTextFormat** f : {&fTitolo, &fNome, &fLink}) if (*f) { (*f)->Release(); *f = nullptr; } }
+        if (!fTitolo) { fTitolo = v.formato(15 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD); fNome = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER); fLink = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM); fDpi = d; }
         caricaAnteprime();
         sopra = premuto = -1;
         stato = 1; t0 = vetro::ms(); k = 0;
@@ -110,9 +122,11 @@ private:
     std::vector<File> file;
     std::wstring dir, titolo;
     IDWriteTextFormat *fTitolo = nullptr, *fNome = nullptr, *fLink = nullptr;
+    float fDpi = 0;   // scala con cui sono stati fatti i tre formati
     int stato = 0;   // 0 chiusa, 1 entra, 2 aperta, 3 esce
     ULONGLONG t0 = 0; double k = 0;
     int x = 0, y = 0, sopra = -1, premuto = -1, px0 = 0, py0 = 0;
+    int sx = 0, sy = 1;   // da dove scivola entrando (verso il dock): in basso di serie, in alto o ai lati col dock li'
     bool dentro = false, trascinando = false;
     Fonte fonte;
 
@@ -241,7 +255,8 @@ private:
             if (k <= 0) { stato = 0; vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); libera(); return; }
         } else return;
         const double e = stato == 3 ? vetro::uscita(k) : vetro::molla(k);
-        SetWindowPos(v.fin, HWND_TOPMOST, x, y + (int)std::lround((1 - e) * 14 * v.dpi), 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+        const int sp = (int)std::lround((1 - e) * 14 * v.dpi);   // (scivola dal lato del dock)
+        SetWindowPos(v.fin, HWND_TOPMOST, x + sx * sp, y + sy * sp, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
         v.alfa(std::min(1.0, k * 1.5));
     }
 

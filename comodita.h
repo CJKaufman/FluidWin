@@ -32,11 +32,29 @@ inline Stato& stato() { static Stato s; return s; }
 inline bool sveglio() { return stato().svegliaFino != 0; }
 inline bool silenzio() { return stato().silenzioFino != 0; }
 
-// millisecondi da adesso fino a domani alle 'ora' (ora locale)
+// millisecondi da adesso fino a domani alle 'ora' (ora locale). Le 'ora' di domani si convertono in UTC con le regole
+// del fuso di quel giorno: prima si contava un giorno di 24 ore, e la sera prima del cambio dell'ora legale il silenzio
+// finiva alle 9 o alle 7 (R20261121-001738-S18)
 inline ULONGLONG finoADomani(int ora) {
-    SYSTEMTIME st; GetLocalTime(&st);
-    const int adesso = st.wHour * 3600 + st.wMinute * 60 + st.wSecond;
-    return (ULONGLONG)(24 * 3600 - adesso + ora * 3600) * 1000;
+    SYSTEMTIME oggi; GetLocalTime(&oggi);
+    const int adesso = oggi.wHour * 3600 + oggi.wMinute * 60 + oggi.wSecond;
+    const ULONGLONG ripiego = (ULONGLONG)(24 * 3600 - adesso + ora * 3600) * 1000;
+    // domani a mezzanotte (locale), poi alle 'ora': data del giorno dopo con FILETIME (giorni di 24 ore esatti in UTC
+    // non servono: si somma un giorno di calendario sulla data locale)
+    SYSTEMTIME d = oggi; d.wHour = d.wMinute = d.wSecond = d.wMilliseconds = 0;
+    FILETIME f; if (!SystemTimeToFileTime(&d, &f)) return ripiego;
+    ULARGE_INTEGER u; u.LowPart = f.dwLowDateTime; u.HighPart = f.dwHighDateTime;
+    u.QuadPart += 864000000000ULL;   // + 1 giorno (data locale come se fosse UTC: solo per avere la data di domani)
+    f.dwLowDateTime = u.LowPart; f.dwHighDateTime = u.HighPart;
+    SYSTEMTIME domaniLoc; if (!FileTimeToSystemTime(&f, &domaniLoc)) return ripiego;
+    domaniLoc.wHour = (WORD)ora;
+    SYSTEMTIME domaniUtc, oraUtc;
+    if (!TzSpecificLocalTimeToSystemTime(nullptr, &domaniLoc, &domaniUtc)) return ripiego;
+    GetSystemTime(&oraUtc);
+    FILETIME a, b;
+    if (!SystemTimeToFileTime(&domaniUtc, &a) || !SystemTimeToFileTime(&oraUtc, &b)) return ripiego;
+    const ULONGLONG ta = ((ULONGLONG)a.dwHighDateTime << 32) | a.dwLowDateTime, tb = ((ULONGLONG)b.dwHighDateTime << 32) | b.dwLowDateTime;
+    return ta > tb ? (ta - tb) / 10000 : ripiego;
 }
 
 // applica la sveglia a Windows (solo quando cambia)

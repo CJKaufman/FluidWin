@@ -108,17 +108,25 @@ inline auto Motore::apriPannello(int tipo) -> void {
     dirty = true;   // il dock risale subito con il pannello (aperto anche dal notch o da Win+N: senza, aspettava il suo timer)
     pSopra = pPremuto = -1; evidP.clear(); trascinaVolume = false; pMouseDentro = false;
     PW = PWMAX;
-    // spazio vero sopra l'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
-    // nessuna vista lo supera
-    const D2D1_RECT_F rc = rettCentro();
-    const int y1 = schermo.bottom - H + (int)std::round(rc.top - PAD - 10 * dpi);
-    phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
+    // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
+    // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
+    // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
+    const RECT ic = aSchermo(rettCentro());
+    const int stacco = (int)std::round(PAD + 10 * dpi);
+    int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
+    if (lato == 1) y1 = ic.bottom + stacco;
+    else if (verticale()) y1 = std::min((int)ic.bottom + (int)PAD, (int)schermo.bottom - 8);
+    phDisponibile = std::max(200 * dpi, (float)(lato == 1 ? schermo.bottom - y1 : y1 - schermo.top) - 12 * dpi);
     preparaVista(tipo);
     PH = altezzaVista(tipo);
     phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
-    // sopra l'icona, allineato al suo bordo destro (dentro lo schermo)
-    const int x1 = std::clamp(schermo.left + (int)std::round(rc.right + PAD), schermo.left + (int)PW + 8, schermo.right - 8);
-    rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
+    // in basso e in alto: allineato al bordo destro dell'icona (dentro lo schermo); ai lati: accanto al dock
+    // (schermo piu' stretto del pannello: i due limiti si invertirebbero, e std::clamp con lo > hi non e' definito, S15)
+    const int xMin = (int)schermo.left + (int)PW + 8, xMax = std::max(xMin, (int)schermo.right - 8);
+    int x1 = std::clamp((int)ic.right + (int)std::round(PAD), xMin, xMax);
+    if (lato == 2) x1 = ic.right + stacco + (int)PW;
+    else if (lato == 3) x1 = ic.left - stacco;
+    rettPannello = lato == 1 ? RECT{x1 - (int)PW, y1, x1, y1 + (int)PH} : RECT{x1 - (int)PW, y1 - (int)PH, x1, y1};
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
     posizionaPannello(0);
     ShowWindow(vetroPannello, SW_SHOWNOACTIVATE);
@@ -134,11 +142,15 @@ inline auto Motore::apriPannello(int tipo) -> void {
 // i dati che servono a una vista, letti quando ci si entra
 inline auto Motore::preparaVista(int tipo) -> void {
     if (tipo == P_SFONDO) leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
-    else if (tipo == P_WIDGET) { widD.aggiorna(); wid = widD.copia(); }
+    else if (tipo == P_WIDGET) {   // (la ricerca della citta' lasciata aperta non si ritrova riaprendo)
+        widD.aggiorna(); wid = widD.copia();
+        wCitta = false; wK = 0; wUnitaPos = -1; wTesto.clear(); wCercato.clear(); wLuoghi.clear(); wStato = widget::R_VUOTA; wSel = 0;
+    }
     else if (tipo == P_NOTIFICHE) chiediNotifiche();   // si apre subito con l'ultimo elenco, il nuovo arriva dal thread
     else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
+    else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -150,6 +162,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_NOTIFICHE) h = altezzaNotifiche() + testa;
     else if (tipo == P_MIXER) h = altezzaMixer() + testa;
     else if (tipo == P_APPUNTI) h = altezzaAppunti() + testa;
+    else if (tipo == P_WIFI) h = altezzaWifi() + testa;
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -319,10 +332,13 @@ inline auto Motore::posizionaPannello(double k) -> void {
     float tx = 0;
     double alfa = std::min(1.0, k * 2.2);
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
+    {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const D2D1_RECT_F rc = rettCentro();
-        const float ax = std::clamp((float)(schermo.left + (rc.left + rc.right) / 2 - r.left), 0.0f, pw);
-        m = D2D1::Matrix3x2F::Scale(s, s, {ax, ph});   // dal bordo in basso, sopra l'icona
+        const RECT ic = aSchermo(rettCentro());
+        const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
+        const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
+        m = D2D1::Matrix3x2F::Scale(s, s, p);
+    }
     }
     const float pd = (float)(posDietro * posDietro * (3 - 2 * posDietro));
     const float sb = 1 - 0.06f * pd;
@@ -362,11 +378,13 @@ inline auto Motore::renderPannello() -> bool {
         k = 1 - x * x; pAnimazione = x < 1 || posaInMoto;
         if (x >= 1) { nascondiPannello(); return false; }
     }
-    // altezza: va verso quella della vista con una molla appena morbida (il bordo in basso resta fermo, sopra il dock)
+    // altezza: va verso quella della vista con una molla appena morbida (il bordo dal lato del dock resta fermo)
     if (phVis <= 0) phVis = PH;
     if (molla(phVis, phVel, PH, 210, 0.86, 0.3)) pAnimazione = true;
     const LONG alto = (LONG)std::lround(phVis);
-    if (rettPannello.bottom - rettPannello.top != alto) rettPannello.top = rettPannello.bottom - alto;
+    if (rettPannello.bottom - rettPannello.top != alto) {   // (col dock in alto resta fermo il bordo in alto, sotto il dock)
+        if (lato == 1) rettPannello.bottom = rettPannello.top + alto; else rettPannello.top = rettPannello.bottom - alto;
+    }
     posizionaPannello(k); pK = k;
 
     // cambio di vista in corso: 0..1
@@ -431,6 +449,7 @@ inline auto Motore::renderPannello() -> bool {
                 else if (interna == P_SFONDO) simboloFreccia(c.x, c.y);
                 else if (interna == P_NOTIFICHE) simboloCampana(c.x, c.y);
                 else if (interna == P_APPUNTI) simboloAppunti(c.x, c.y);
+                else if (interna == P_WIFI) simboloSegnale(c.x, c.y, 4, {ink.r, ink.g, ink.b, ink.a * aSimbolo});
                 baseVista = D2D1::Matrix3x2F::Identity();
                 dc->SetTransform(baseVista);
             }
@@ -472,6 +491,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
         else if (tipo == P_WIDGET) disegnaWidget(scuro, ink);
         else if (tipo == P_MIXER) disegnaMixer(scuro, ink);
         else if (tipo == P_APPUNTI) disegnaAppunti(scuro, ink);
+        else if (tipo == P_WIFI) disegnaWifi(scuro, ink);
         for (size_t i = n; i < elementi.size(); i++) { elementi[i].r.top += testa; elementi[i].r.bottom += testa; }
     }
     baseVista = D2D1::Matrix3x2F::Identity(); dc->SetTransform(baseVista);
@@ -495,7 +515,7 @@ inline auto Motore::disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) -> void
     dc->SetTransform(baseVista);
     // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
     const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget"
-                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : tipo == P_APPUNTI ? testi::t(L"Appunti", L"Clipboard")
+                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : tipo == P_APPUNTI ? testi::t(L"Appunti", L"Clipboard") : tipo == P_WIFI ? L"Wi-Fi"
                               : testi::t(L"Notifiche", L"Notifications");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
@@ -637,12 +657,18 @@ inline auto Motore::altezzaMixer() const -> float {
 }
 
 inline auto Motore::rileggiMixer() -> void {
+    // chi c'e' e in che ordine, prima e dopo: se cambia, le zone cliccabili e il tasto premuto (indici di riga) non
+    // valgono piu'. Prima un rilascio dopo la rilettura poteva silenziare l'app arrivata in quella riga (S7)
+    auto firma = [&] { std::wstring f; for (const auto& u : mix.uscite) { f += u.id; f += L'|'; for (const auto& a : u.app) { f += a.exe; f += L'/'; f += a.nome; f += L'|'; } f += L'#'; } return f; };
+    const std::wstring prima = firma();
     mix.leggi();
+    const bool cambiata = firma() != prima;
     const int s = slotCorrente;
     usa(0);
     if (pannelloTipo == P_MIXER && !pChiusura) {
         const float nuova = altezzaVista(P_MIXER);
         if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        if (cambiata) { pSopra = pPremuto = -1; trascinaMixer = -1; elementi.clear(); }
         pDirty = true;
     }
     usa(s);
@@ -656,6 +682,136 @@ inline auto Motore::mixerDaMouse(float x) -> void {
         pDirty = true; dirty = true;
         return;
     }
+}
+
+// ---- reti Wi-Fi (freccia sulla piastrella Wi-Fi; wifi.h). Issue #24 ----
+// Riga dell'interruttore, poi le reti (al massimo WIFI_MAX righe), o un messaggio; in fondo le impostazioni di Windows
+static constexpr float WIFI_TESTA = 48, WIFI_RIGA = 50, WIFI_PIEDE = 52;
+static constexpr int WIFI_MAX = 8;
+
+// Reti da mostrare: quelle che ci sono (al massimo WIFI_MAX) e che entrano nello spazio sopra il dock, tolte testata,
+// interruttore e piede. Lo stesso numero per l'altezza, il disegno e le zone: R20261119-145819-S3, prima su uno schermo
+// basso l'ultima rete finiva sotto "Altre impostazioni Wi-Fi" (e il clic andava a quella). 0: si mostra un messaggio
+inline auto Motore::righeWifi() const -> int {
+    if (sis.wifi != 1 || wlStato != wifi::S_PRONTA || wlReti.empty()) return 0;   // (R20261119-145819-S4: solo S_PRONTA)
+    const float spazio = (altezzaMassimaP() - std::round(TESTA * dpi)) / dpi - 8 - WIFI_TESTA - WIFI_PIEDE;
+    const int entrano = std::max(1, (int)std::floor(spazio / WIFI_RIGA));
+    return std::min({(int)wlReti.size(), WIFI_MAX, entrano});
+}
+
+inline auto Motore::altezzaWifi() const -> float {
+    const int righe = std::max(1, righeWifi());   // (un messaggio occupa una riga)
+    const float h = 8 + WIFI_TESTA + righe * WIFI_RIGA + WIFI_PIEDE;
+    return std::min(altezzaMassimaP() - std::round(TESTA * dpi), std::round(h * dpi));
+}
+
+// segnale: quattro archi (livello 0..4), quelli oltre il livello sbiaditi; c = colore pieno
+inline auto Motore::simboloSegnale(float cx, float cy, int livello, D2D1_COLOR_F c) -> void {
+    const float pi = (float)M_PI, by = cy + 6 * dpi;
+    pennello->SetColor(c);
+    dc->FillEllipse({{cx, by - 0.5f * dpi}, 1.6f * dpi, 1.6f * dpi}, pennello);
+    const float raggi[3] = {5.5f, 9.5f, 13.5f};
+    for (int i = 0; i < 3; i++) {
+        pennello->SetColor(i + 2 <= std::max(livello, 1) ? c : D2D1_COLOR_F{c.r, c.g, c.b, c.a * 0.28f});
+        arco(cx, by, raggi[i], -pi * 0.75f, -pi * 0.25f, 2.0f);
+    }
+    pennello->SetColor(c);
+}
+
+inline auto Motore::simboloLucchetto(float cx, float cy) -> void {
+    dc->FillRoundedRectangle({{cx - 4 * dpi, cy - 1 * dpi, cx + 4 * dpi, cy + 5 * dpi}, 1.5f * dpi, 1.5f * dpi}, pennello);
+    arco(cx, cy - 1 * dpi, 2.6f, (float)M_PI, (float)(2 * M_PI) - 0.02f, 1.4f);   // l'archetto sopra il corpo (poco meno di mezzo giro: con 180 gradi esatti la direzione e' ambigua)
+}
+
+inline auto Motore::disegnaWifi(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+    float y = 8 * dpi;
+    // interruttore del Wi-Fi (la stessa radio della piastrella)
+    {
+        const bool acceso = sis.wifi == 1;
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_TESTA * dpi};
+        evidenzia(aggiungi(r, A_WIFI_RADIO, 0), r, scuro, 10 * dpi);
+        pennello->SetColor(ink);
+        scrivi(L"Wi-Fi", fmtVoce, {m, y, PW - 80 * dpi, y + WIFI_TESTA * dpi});
+        // capsula dell'interruttore; la pallina scorre verso la posizione vera (wifiK, animata)
+        const float cw = 40 * dpi, ch = 24 * dpi, cx = PW - m - cw, cy = y + (WIFI_TESTA * dpi - ch) / 2;
+        const double obj = acceso ? 1.0 : 0.0;
+        if (wifiK < 0) wifiK = obj;
+        if (wifiK != obj) { wifiK += (obj - wifiK) * (1 - std::exp(-dtFotogramma / 0.05)); if (std::abs(wifiK - obj) < 0.004) wifiK = obj; else pAnimazione = true; }
+        const float k = (float)wifiK;
+        // dal grigio (spento) al blu di sistema (acceso)
+        const D2D1_COLOR_F spento = scuro ? D2D1::ColorF(0.30f, 0.30f, 0.32f, 1) : D2D1::ColorF(0.78f, 0.78f, 0.80f, 1);
+        const D2D1_COLOR_F accesoC = D2D1::ColorF(0.0f, 0.478f, 1.0f, 1);
+        pennello->SetColor({spento.r + (accesoC.r - spento.r) * k, spento.g + (accesoC.g - spento.g) * k, spento.b + (accesoC.b - spento.b) * k, 1});
+        dc->FillRoundedRectangle({{cx, cy, cx + cw, cy + ch}, ch / 2, ch / 2}, pennello);
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 1));
+        const float px = cx + ch / 2 + (cw - ch) * k;
+        dc->FillEllipse({{px, cy + ch / 2}, ch / 2 - 2 * dpi, ch / 2 - 2 * dpi}, pennello);
+        y += WIFI_TESTA * dpi;
+    }
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, y - 0.5f}, {PW - m, y - 0.5f}, pennello, 1.0f);
+    // contenuto: un messaggio, o le reti
+    auto messaggio = [&](const wchar_t* t, Azione a) {
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_RIGA * dpi};
+        if (a != A_WIFI_RETE) evidenzia(aggiungi(r, a, 0), r, scuro, 10 * dpi);
+        pennello->SetColor(a != A_WIFI_RETE ? blu : tenue);
+        scrivi(t, fmtSotto, {m, y, PW - m, y + WIFI_RIGA * dpi});
+        y += WIFI_RIGA * dpi;
+    };
+    if (sis.wifi != 1) messaggio(testi::t(L"Il Wi-Fi è spento", L"Wi-Fi is off"), A_WIFI_RETE);
+    else if (wlStato == wifi::S_NESSUNA) messaggio(testi::t(L"Nessuna scheda Wi-Fi disponibile", L"No Wi-Fi adapter available"), A_WIFI_RETE);
+    else if (wlStato == wifi::S_PERMESSO)   // Windows 11 24H2: senza la posizione i programmi non vedono le reti
+        messaggio(testi::t(L"Per vedere le reti consenti la posizione alle app desktop…", L"To see networks, allow location for desktop apps…"), A_WIFI_PRIVACY);
+    else if (wlStato == wifi::S_ERRORE) messaggio(testi::t(L"Non riesco a leggere le reti: riprovo…", L"Can't read networks: retrying…"), A_WIFI_RETE);
+    else if (righeWifi() == 0) messaggio(wlCerca || wlStato == wifi::S_AVVIO ? testi::t(L"Cerco le reti…", L"Looking for networks…") : testi::t(L"Nessuna rete trovata", L"No networks found"), A_WIFI_RETE);
+    else {
+        const int righe = righeWifi();
+        for (size_t i = 0; i < wlReti.size() && (int)i < righe; i++) {
+            const wifi::Rete& n = wlReti[i];
+            const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + WIFI_RIGA * dpi};
+            evidenzia(aggiungi(r, A_WIFI_RETE, (int)i), r, scuro, 10 * dpi);
+            const float cy = y + WIFI_RIGA * dpi / 2;
+            simboloSegnale(m + 12 * dpi, cy - 2 * dpi, n.segnale >= 75 ? 4 : n.segnale >= 50 ? 3 : n.segnale >= 25 ? 2 : 1, n.connessa ? blu : ink);
+            const bool inCorso = wlEsito == wifi::E_IN_CORSO && wlEsitoDi == n.ssid;
+            const bool fallito = wlEsito == wifi::E_FALLITO && wlEsitoDi == n.ssid;
+            const std::wstring sotto = n.connessa ? testi::t(L"Collegata", L"Connected")
+                                     : inCorso ? testi::t(L"Collegamento…", L"Connecting…")
+                                     : fallito ? testi::t(L"Collegamento non riuscito", L"Couldn't connect")
+                                     : n.profilo ? testi::t(L"Salvata", L"Saved")
+                                     : n.aperta ? testi::t(L"Aperta", L"Open") : testi::t(L"Protetta", L"Secured");
+            float destra = PW - m;
+            if (n.connessa) {   // pulsante "Scollega"
+                const std::wstring s = testi::t(L"Scollega", L"Disconnect");
+                const float ls = larghezzaTesto(s, fmtSotto) + 20 * dpi;
+                const D2D1_RECT_F rs = {PW - m - ls, cy - 13 * dpi, PW - m, cy + 13 * dpi};
+                const int es = aggiungi(rs, A_WIFI_SCOLLEGA, (int)i);
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+                dc->FillRoundedRectangle({rs, 13 * dpi, 13 * dpi}, pennello);
+                evidenzia(es, rs, scuro, 13 * dpi);
+                pennello->SetColor(ink);
+                scrivi(s, fmtNome, rs);
+                destra = rs.left - 8 * dpi;
+            } else if (n.protetta && !n.profilo) {
+                pennello->SetColor(tenue);
+                simboloLucchetto(PW - m - 8 * dpi, cy);
+                destra = PW - m - 20 * dpi;
+            }
+            pennello->SetColor(ink);
+            scrivi(n.nome, fmtVoce, {m + 32 * dpi, y + 7 * dpi, destra, y + 27 * dpi});
+            pennello->SetColor(fallito ? D2D1::ColorF(0.95f, 0.30f, 0.25f, 1) : n.connessa || inCorso ? blu : tenue);
+            scrivi(sotto, fmtSotto, {m + 32 * dpi, y + 26 * dpi, destra, y + 43 * dpi});
+            y += WIFI_RIGA * dpi;
+        }
+    }
+    // in fondo: le impostazioni Wi-Fi di Windows (reti nuove protette, nascoste, aziendali)
+    const D2D1_RECT_F rp = {m - 6 * dpi, PH - WIFI_PIEDE * dpi + 6 * dpi, PW - m + 6 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rp, A_WIFI_IMPOSTAZIONI, 0), rp, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Altre impostazioni Wi-Fi", L"More Wi-Fi settings"), fmtVoce, {m, rp.top, PW - m - 16 * dpi, rp.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
 }
 
 // le uscite in un menu (si sceglie la predefinita) e le impostazioni audio
@@ -820,7 +976,7 @@ inline DWORD WINAPI Motore::threadNotifiche(LPVOID p) {
     {
         notifiche::Lettore l;   // suo: gli oggetti di Windows restano su questo thread
         while (!m->fineN) {
-            WaitForSingleObject(m->eventoN, INFINITE);
+            if (WaitForSingleObject(m->eventoN, INFINITE) != WAIT_OBJECT_0) break;   // (attesa fallita: niente giri a vuoto)
             if (m->fineN) break;
             const LONG g = m->genN;   // richieste arrivate durante la lettura: ne rifara' un'altra (l'evento resta acceso)
             std::vector<notifiche::Notifica> lista;
@@ -838,7 +994,9 @@ inline auto Motore::chiediNotifiche() -> void {
     if (!csNOk) {
         InitializeCriticalSection(&csN); csNOk = true;
         eventoN = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        threadNH = CreateThread(nullptr, 0, threadNotifiche, this, 0, nullptr);
+        // il thread solo con l'evento: senza, la sua attesa fallirebbe subito e rileggerebbe le notifiche in un ciclo
+        // continuo (R20261121-001738-S11)
+        threadNH = eventoN ? CreateThread(nullptr, 0, threadNotifiche, this, 0, nullptr) : nullptr;
         if (threadNH) SetThreadPriority(threadNH, THREAD_PRIORITY_BELOW_NORMAL);
     }
     if (!threadNH) {   // (senza thread: come prima, sul thread principale)
@@ -851,6 +1009,7 @@ inline auto Motore::chiediNotifiche() -> void {
 
 // elenco nuovo dal thread: se il pannello delle notifiche e' aperto cambia altezza con la molla e si ridisegna
 inline auto Motore::notificheLette() -> void {
+    if (!csNOk) return;   // (messaggio arrivato prima che il lettore esista: la sezione critica non c'e', S3)
     EnterCriticalSection(&csN);
     const bool vecchia = genLetta < genValida;
     if (!vecchia) { listaN = lettaN; permessoN = permessoLetto; }
@@ -901,24 +1060,38 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(tenue);
     scrivi(data, fmtVoce, {m + 2 * dpi, 52 * dpi, PW - m, 72 * dpi});
 
-    // calendario del mese, la settimana inizia di lunedi', oggi in un cerchio blu
+    // calendario del mese, oggi in un cerchio blu. Gregoriano: la settimana inizia di lunedi', come sempre. Con un
+    // altro calendario scelto in Windows (persiano, hijri, ebraico, giapponese...; issue #24) mese, giorni e oggi sono
+    // i suoi (calendario.h, ICU di Windows) e la settimana parte dal primo giorno scelto in Windows
     const float ct = N_TESTA * dpi, cb = ct + (N_CAL - 10) * dpi;
     pennello->SetColor(scheda);
     dc->FillRoundedRectangle({{m, ct, PW - m, cb}, 12 * dpi, 12 * dpi}, pennello);
     SYSTEMTIME oggi; GetLocalTime(&oggi);
-    wchar_t mese[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", mese, 64, nullptr);
-    if (mese[0]) mese[0] = (wchar_t)towupper(mese[0]);
+    const calendario::Mese& cm = calendario::meseUtente(testi::locale());
+    std::wstring mese;
+    // (il primo giorno della settimana scelto in Windows vale anche per il gregoriano: prima solo per i calendari di
+    // ICU, e con la domenica scelta la griglia gregoriana partiva comunque di lunedi', R20261121-001738-S17)
+    int giorni = 0, inizio = 0, oggiG = oggi.wDay;   // inizio: colonna del primo del mese
+    const int primoSett = calendario::primoGiornoUtente();
+    if (cm.ok) {
+        mese = cm.titolo; giorni = cm.giorni; oggiG = cm.oggi;
+        inizio = (cm.lunediPrimo - primoSett + 7) % 7;
+    } else {
+        wchar_t b[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", b, 64, nullptr);
+        mese = b;
+        if (!mese.empty()) mese[0] = (wchar_t)towupper(mese[0]);
+        SYSTEMTIME primo = oggi; primo.wDay = 1;
+        FILETIME fp; SystemTimeToFileTime(&primo, &fp); FileTimeToSystemTime(&fp, &primo);   // giorno della settimana del primo
+        inizio = ((primo.wDayOfWeek + 6) % 7 - primoSett + 7) % 7;   // (wDayOfWeek + 6) % 7: 0 = lunedi'
+        static const int giorniMese[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        giorni = giorniMese[oggi.wMonth - 1];
+        if (oggi.wMonth == 2 && ((oggi.wYear % 4 == 0 && oggi.wYear % 100 != 0) || oggi.wYear % 400 == 0)) giorni = 29;
+    }
     pennello->SetColor(ink);
     scrivi(mese, fmtVoce, {m + 12 * dpi, ct + 8 * dpi, PW - m, ct + 28 * dpi});
-    SYSTEMTIME primo = oggi; primo.wDay = 1;
-    FILETIME fp; SystemTimeToFileTime(&primo, &fp); FileTimeToSystemTime(&fp, &primo);   // giorno della settimana del primo
-    const int inizio = (primo.wDayOfWeek + 6) % 7;   // 0 = lunedi'
-    static const int giorniMese[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
-    int giorni = giorniMese[oggi.wMonth - 1];
-    if (oggi.wMonth == 2 && ((oggi.wYear % 4 == 0 && oggi.wYear % 100 != 0) || oggi.wYear % 400 == 0)) giorni = 29;
     const float cw = (PW - 2 * m - 16 * dpi) / 7, x0 = m + 8 * dpi, rh = 18 * dpi, y0 = ct + 54 * dpi;
-    for (int g = 0; g < 7; g++) {   // iniziali dei giorni nella lingua dell'utente (lunedi' 1/1/2024)
-        SYSTEMTIME s{}; s.wYear = 2024; s.wMonth = 1; s.wDay = (WORD)(1 + g);
+    for (int g = 0; g < 7; g++) {   // iniziali dei giorni nella lingua dell'utente (lunedi' 1/1/2024), dal primo giorno
+        SYSTEMTIME s{}; s.wYear = 2024; s.wMonth = 1; s.wDay = (WORD)(1 + (g + primoSett) % 7);
         wchar_t n[16] = L""; GetDateFormatEx(testi::locale(), 0, &s, L"ddd", n, 16, nullptr);
         std::wstring iniziale(1, (wchar_t)towupper(n[0]));
         pennello->SetColor(tenue);
@@ -927,11 +1100,11 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     for (int d = 1; d <= giorni; d++) {
         const int cella = inizio + d - 1;
         const float x = x0 + (cella % 7) * cw, y = y0 + (cella / 7) * rh;
-        if (d == oggi.wDay) {
+        if (d == oggiG) {
             pennello->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1));
             dc->FillEllipse({{x + cw / 2, y + rh / 2}, 9 * dpi, 9 * dpi}, pennello);
             pennello->SetColor(D2D1::ColorF(1, 1, 1, 1));
-        } else pennello->SetColor((cella % 7) >= 5 ? tenue : ink);
+        } else pennello->SetColor((cella + primoSett) % 7 >= 5 ? tenue : ink);   // sabato e domenica piu' tenui
         scrivi(std::to_wstring(d), fmtNome, {x, y, x + cw, y + rh});
     }
 
@@ -1033,9 +1206,18 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // Wi-Fi: interruttore vero se c'e' la scheda; senza (PC col cavo) lo stato della rete, e il clic apre le impostazioni
     const int wf = sis.wifi, bt = sis.bluetooth;
     if (wf >= 0) piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, wf == 1, L"Wi-Fi",
-                            wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink);
+                            wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink, 34);   // (34: spazio per la freccia)
     else piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : testi::t(L"Rete", L"Network"),
                     rete ? testi::t(L"Connessa", L"Connected") : testi::t(L"Non connessa", L"Not connected"), scuro, ink);
+    // Con la scheda Wi-Fi: la parte destra della piastrella e' una freccia che apre l'elenco delle reti (come in
+    // Windows 11; issue #24). Aggiunta dopo la piastrella: nelle zone vince (elementoIn parte dall'ultima)
+    if (wf >= 0) {
+        const D2D1_RECT_F rf = {16 * dpi + mezzo - 30 * dpi, y + 6 * dpi, 16 * dpi + mezzo - 2 * dpi, y + th - 6 * dpi};
+        const int ef = aggiungi(rf, A_WIFI_RETI, 0);
+        evidenzia(ef, rf, scuro, 8 * dpi);
+        pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.55f});
+        chevronDestra((rf.left + rf.right) / 2 + 1 * dpi, (rf.top + rf.bottom) / 2);
+    }
     piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_BLUETOOTH, bt == 1, L"Bluetooth",
                bt < 0 ? testi::t(L"Non disponibile", L"Unavailable") : bt == 1 ? testi::t(L"Acceso", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
     y += th + tg;
@@ -1054,7 +1236,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         std::wstring st = testi::t(L"Spento", L"Off");
         if (comodita::timerSuona()) st = testi::t(L"Finito", L"Done");
         else if (comodita::timerAttivo()) st = comodita::durata(comodita::timerResto()) + testi::t(L" rimasti", L" left");
-        piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), L"Timer", st, scuro, ink);
+        piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), testi::t(L"Timer", L"Timer"), st, scuro, ink);
         const sensori::Sensori& se = sensori::Sensori::io();
         std::wstring sm = !se.micC ? std::wstring(testi::t(L"Nessuno", L"None")) : se.micMuto ? std::wstring(testi::t(L"Muto", L"Muted"))
                         : se.micApp.empty() ? std::wstring(testi::t(L"Non in uso", L"Not in use")) : se.micApp[0];
@@ -1184,7 +1366,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
 
     // scorciatoie tonde
     y += 36 * dpi + (cp ? 8 : 16) * dpi;
-    const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
+    const wchar_t* nomi[4] = {testi::t(L"Widget", L"Widget"), testi::t(L"In background", L"In background"), testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
     const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_APPUNTI};
     for (int i = 0; i < 4; i++) {
         const float rc = (cp ? 22 : 26) * dpi, cx = 16 * dpi + larg * (i + 0.5f) / 4, cy = y + rc;
@@ -1203,11 +1385,32 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
 
 // ---- widget: meteo e notizie ----
 
+// Altezza della scheda del meteo con la ricerca della citta' aperta: campo (34), fino a 6 risultati da 44, unita' (32),
+// margini. W_FISSA: tutto tranne i risultati
+static constexpr float W_SCHEDA = 168, W_CAMPO = 34, W_RIGA = 44, W_UNITA = 32, W_FISSA = 12 + W_CAMPO + 8 + 8 + W_UNITA + 12;
+
 inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
     const float m = 16 * dpi, rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
     const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.62f};
+    // ricerca della citta': la scheda si allunga verso il basso (spingendo giu' le notizie) mentre il meteo svanisce e
+    // compaiono campo, risultati e unita'; chiudendo, lo stesso movimento al contrario
+    {
+        const double obj = wCitta ? 1.0 : 0.0;
+        if (wK != obj) {
+            wK += (obj - wK) * (1 - std::exp(-dtFotogramma / 0.075));
+            if (std::abs(wK - obj) < 0.003) wK = obj; else pAnimazione = true;
+        }
+    }
+    auto tratto01 = [](float x, float a, float b) { return std::clamp((x - a) / (b - a), 0.0f, 1.0f); };
+    const float ek = (float)(wK * wK * (3 - 2 * wK));
+    const bool fa = widD.fahrenheit();
+    // Quanti risultati entrano: il pannello e' alto al massimo quanto lo spazio sopra il dock (altezzaVista), e su uno
+    // schermo basso con la scala alta sei righe spingevano le unita' sotto il bordo, dove non si potevano toccare
+    // (R20261119-132417-S2). PH qui e' l'altezza del contenuto; resta un margine di 16 sopra e sotto la scheda
+    wRighe = std::clamp((int)std::floor((PH / dpi - 32 - W_FISSA) / W_RIGA), 1, 6);
+    const float hRicerca = W_FISSA + wRighe * W_RIGA;
     // meteo: una scheda azzurra come l'app Meteo di iOS
-    const D2D1_RECT_F rm = {m, m, PW - m, m + 168 * dpi};
+    const D2D1_RECT_F rm = {m, m, PW - m, m + (W_SCHEDA + (hRicerca - W_SCHEDA) * ek) * dpi};
     ID2D1GradientStopCollection* stop = nullptr;
     const D2D1_GRADIENT_STOP gs[2] = {{0, D2D1::ColorF(0.24f, 0.52f, 0.92f, 1)}, {1, D2D1::ColorF(0.42f, 0.70f, 0.98f, 1)}};
     dc->CreateGradientStopCollection(gs, 2, &stop);
@@ -1216,39 +1419,144 @@ inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
     if (sf) { dc->FillRoundedRectangle({rm, rp, rp}, sf); sf->Release(); }
     if (stop) stop->Release();
     const D2D1_COLOR_F bianco = D2D1::ColorF(1, 1, 1, 1), biancoT = D2D1::ColorF(1, 1, 1, 0.8f);
-    pennello->SetColor(bianco);
-    scrivi(widD.citta, fmtVoce, {rm.left + 16 * dpi, rm.top + 12 * dpi, rm.right - 16 * dpi, rm.top + 32 * dpi});
-    if (wid.meteoOk) {
-        wchar_t t[16]; swprintf(t, 16, L"%d°", (int)std::lround(wid.temp));
-        scrivi(t, fmtGrande, {rm.left + 16 * dpi, rm.top + 30 * dpi, rm.left + 140 * dpi, rm.top + 74 * dpi});
+    // freccia in giu' dei menu e delle scelte (accanto a un testo)
+    auto freccia = [&](float cx, float cy) { linea(-3.5f, -1.5f, 0, 2, cx, cy, 1.6f); linea(0, 2, 3.5f, -1.5f, cx, cy, 1.6f); };
+
+    // 1) il meteo, che svanisce mentre si apre la ricerca
+    const float aMeteo = 1 - tratto01(ek, 0.0f, 0.55f);
+    if (aMeteo > 0.01f) {
+        dc->PushLayer(D2D1::LayerParameters1(rm, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), aMeteo), nullptr);
+        // il nome della citta' si tocca per cambiarla (issue #12, #14: prima stava solo nel registro)
+        const float lc = std::min(larghezzaTesto(widD.citta, fmtVoce), rm.right - rm.left - 120 * dpi);
+        const D2D1_RECT_F rc = {rm.left + 8 * dpi, rm.top + 7 * dpi, rm.left + 16 * dpi + lc + 22 * dpi, rm.top + 37 * dpi};
+        if (!wCitta) evidenzia(aggiungi(rc, A_W_CITTA, 0), rc, true, 8 * dpi);
         pennello->SetColor(bianco);
-        simboloMeteo(wid.codice, rm.right - 40 * dpi, rm.top + 44 * dpi, 1.4f);
+        scrivi(widD.citta, fmtVoce, {rm.left + 16 * dpi, rm.top + 12 * dpi, rm.left + 16 * dpi + lc, rm.top + 32 * dpi});
         pennello->SetColor(biancoT);
-        wchar_t d[96]; swprintf(d, 96, testi::t(L"%ls · umidità %d%% · %d km/h", L"%ls · humidity %d%% · %d km/h"), widget::descrizione(wid.codice), (int)std::lround(wid.umidita), (int)std::lround(wid.vento));
-        scrivi(d, fmtSotto, {rm.left + 16 * dpi, rm.top + 76 * dpi, rm.right - 16 * dpi, rm.top + 94 * dpi});
-        // i prossimi giorni
-        const size_t n = std::min<size_t>(5, wid.giorni.size());
-        for (size_t i = 0; i < n; i++) {
-            const float cw = (rm.right - rm.left - 16 * dpi) / 5, cx = rm.left + 8 * dpi + cw * (i + 0.5f), y = rm.top + 104 * dpi;
-            const auto& g = wid.giorni[i];
-            pennello->SetColor(biancoT);
-            scrivi(widget::nomeGiorno(g), fmtNome, {cx - cw / 2, y, cx + cw / 2, y + 14 * dpi});
+        freccia(rm.left + 16 * dpi + lc + 10 * dpi, rm.top + 22 * dpi);
+        if (wid.meteoOk) {
+            // i dati arrivano in Celsius e km/h: Fahrenheit e mph si calcolano qui (cambiare unita' non riscarica niente)
+            wchar_t t[16]; swprintf(t, 16, L"%d°", (int)std::lround(widD.gradi(wid.temp)));
             pennello->SetColor(bianco);
-            simboloMeteo(g.codice, cx, y + 27 * dpi, 0.8f);
-            wchar_t mm[32]; swprintf(mm, 32, L"%d°  %d°", (int)std::lround(g.max), (int)std::lround(g.min));
-            scrivi(mm, fmtNome, {cx - cw / 2, y + 40 * dpi, cx + cw / 2, y + 56 * dpi});
+            scrivi(t, fmtGrande, {rm.left + 16 * dpi, rm.top + 30 * dpi, rm.left + 140 * dpi, rm.top + 74 * dpi});
+            simboloMeteo(wid.codice, rm.right - 40 * dpi, rm.top + 44 * dpi, 1.4f);
+            pennello->SetColor(biancoT);
+            wchar_t d[96];
+            const int vento = (int)std::lround(fa ? wid.vento / 1.609344 : wid.vento);
+            swprintf(d, 96, fa ? testi::t(L"%ls · umidità %d%% · %d mph", L"%ls · humidity %d%% · %d mph") : testi::t(L"%ls · umidità %d%% · %d km/h", L"%ls · humidity %d%% · %d km/h"),
+                     widget::descrizione(wid.codice), (int)std::lround(wid.umidita), vento);
+            scrivi(d, fmtSotto, {rm.left + 16 * dpi, rm.top + 76 * dpi, rm.right - 16 * dpi, rm.top + 94 * dpi});
+            // i prossimi giorni
+            const size_t n = std::min<size_t>(5, wid.giorni.size());
+            for (size_t i = 0; i < n; i++) {
+                const float cw = (rm.right - rm.left - 16 * dpi) / 5, cx = rm.left + 8 * dpi + cw * (i + 0.5f), y = rm.top + 104 * dpi;
+                const auto& g = wid.giorni[i];
+                pennello->SetColor(biancoT);
+                scrivi(widget::nomeGiorno(g), fmtNome, {cx - cw / 2, y, cx + cw / 2, y + 14 * dpi});
+                pennello->SetColor(bianco);
+                simboloMeteo(g.codice, cx, y + 27 * dpi, 0.8f);
+                wchar_t mm[32]; swprintf(mm, 32, L"%d°  %d°", (int)std::lround(widD.gradi(g.max)), (int)std::lround(widD.gradi(g.min)));
+                scrivi(mm, fmtNome, {cx - cw / 2, y + 40 * dpi, cx + cw / 2, y + 56 * dpi});
+            }
+        } else {
+            pennello->SetColor(biancoT);
+            scrivi(testi::t(L"Meteo in arrivo…", L"Loading weather…"), fmtSotto, {rm.left + 16 * dpi, rm.top + 40 * dpi, rm.right - 16 * dpi, rm.top + 60 * dpi});
         }
-    } else {
-        pennello->SetColor(biancoT);
-        scrivi(testi::t(L"Meteo in arrivo…", L"Loading weather…"), fmtSotto, {rm.left + 16 * dpi, rm.top + 40 * dpi, rm.right - 16 * dpi, rm.top + 60 * dpi});
+        dc->PopLayer();
     }
-    // notizie
+
+    // 2) la ricerca della citta': campo, risultati, unita'
+    const float aRicerca = tratto01(ek, 0.35f, 1.0f);
+    if (aRicerca > 0.01f) {
+        dc->PushLayer(D2D1::LayerParameters1(rm, nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), aRicerca), nullptr);
+        const float sale = 10 * dpi * (1 - aRicerca);   // il contenuto arriva scendendo appena, insieme alla dissolvenza
+        // campo e "Annulla"
+        const std::wstring annulla = testi::t(L"Annulla", L"Cancel");
+        const float la = larghezzaTesto(annulla, fmtVoce);
+        const D2D1_RECT_F rf = {rm.left + 12 * dpi, rm.top + 12 * dpi - sale, rm.right - la - 28 * dpi, rm.top + (12 + W_CAMPO) * dpi - sale};
+        const D2D1_RECT_F ra = {rf.right + 4 * dpi, rf.top, rm.right - 8 * dpi, rf.bottom};
+        if (wCitta) evidenzia(aggiungi(ra, A_W_ANNULLA, 0), ra, true, 8 * dpi);
+        pennello->SetColor(bianco);
+        scrivi(annulla, fmtVoce, {ra.left + 8 * dpi, ra.top, ra.right, ra.bottom});
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.22f));
+        dc->FillRoundedRectangle({rf, 10 * dpi, 10 * dpi}, pennello);
+        const float lx = rf.left + 18 * dpi, ly = (rf.top + rf.bottom) / 2;
+        pennello->SetColor(biancoT);
+        dc->DrawEllipse({{lx - 2 * dpi, ly - 2 * dpi}, 5.5f * dpi, 5.5f * dpi}, pennello, 1.7f * dpi);
+        linea(2, 2, 6, 6, lx, ly, 1.7f);
+        const D2D1_RECT_F rt = {lx + 14 * dpi, rf.top, rf.right - 10 * dpi, rf.bottom};
+        if (wTesto.empty()) { pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.65f)); scrivi(testi::t(L"Cerca una città", L"Search for a city"), fmtVoce, rt); }
+        else { pennello->SetColor(bianco); scrivi(wTesto, fmtVoce, rt); }
+        // cursore dopo il testo (fermo, come nel launcher); con un testo piu' lungo del campo resta in fondo
+        const float lt = wTesto.empty() ? 0 : std::min(larghezzaTesto(wTesto, fmtVoce), rt.right - rt.left - 2 * dpi);
+        pennello->SetColor(bianco);
+        dc->DrawLine({rt.left + lt + 1.5f * dpi, ly - 8 * dpi}, {rt.left + lt + 1.5f * dpi, ly + 8 * dpi}, pennello, 1.6f * dpi);
+
+        // risultati
+        float y = rf.bottom + 8 * dpi;
+        if (wLuoghi.empty()) {
+            const wchar_t* msg = wStato == widget::R_CERCA ? testi::t(L"Cerco…", L"Searching…")
+                               : wStato == widget::R_ERRORE ? testi::t(L"Nessuna connessione: premi Invio per riprovare", L"No connection: press Enter to try again")
+                               : wStato == widget::R_PRONTA && wTesto == wCercato ? testi::t(L"Nessuna città trovata", L"No city found")
+                               : testi::t(L"Scrivi il nome della città", L"Type the name of the city");
+            pennello->SetColor(biancoT);
+            scrivi(msg, fmtSotto, {rm.left + 18 * dpi, y + 6 * dpi, rm.right - 18 * dpi, y + 26 * dpi});
+        }
+        for (size_t i = 0; i < wLuoghi.size() && (int)i < wRighe; i++) {
+            const D2D1_RECT_F r = {rm.left + 6 * dpi, y, rm.right - 6 * dpi, y + W_RIGA * dpi};
+            if (wCitta) {
+                const int e = aggiungi(r, A_W_LUOGO, (int)i);
+                if ((int)i == wSel) { pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.14f)); dc->FillRoundedRectangle({r, 10 * dpi, 10 * dpi}, pennello); }
+                evidenzia(e, r, true, 10 * dpi);
+            }
+            pennello->SetColor(bianco);
+            scrivi(wLuoghi[i].nome, fmtVoce, {r.left + 12 * dpi, r.top + 4 * dpi, r.right - 12 * dpi, r.top + 24 * dpi});
+            pennello->SetColor(biancoT);
+            scrivi(wLuoghi[i].dove, fmtSotto, {r.left + 12 * dpi, r.top + 23 * dpi, r.right - 12 * dpi, r.top + 40 * dpi});
+            y += W_RIGA * dpi;
+        }
+
+        // unita': Automatica / °C / °F, la scelta e' una pillola bianca che scorre fino al suo posto
+        const D2D1_RECT_F ru = {rm.left + 12 * dpi, rm.top + (hRicerca - 12 - W_UNITA) * dpi + sale, rm.right - 12 * dpi, rm.top + (hRicerca - 12) * dpi + sale};
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.18f));
+        dc->FillRoundedRectangle({ru, 9 * dpi, 9 * dpi}, pennello);
+        const float sw = (ru.right - ru.left) / 3;
+        if (wUnitaPos < 0) wUnitaPos = widD.unita;
+        if (wUnitaPos != widD.unita) {
+            wUnitaPos += (widD.unita - wUnitaPos) * (1 - std::exp(-dtFotogramma / 0.06));
+            if (std::abs(wUnitaPos - widD.unita) < 0.003) wUnitaPos = widD.unita; else pAnimazione = true;
+        }
+        const D2D1_RECT_F rs = {ru.left + 3 * dpi + sw * (float)wUnitaPos, ru.top + 3 * dpi, ru.left - 3 * dpi + sw * (float)(wUnitaPos + 1), ru.bottom - 3 * dpi};
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 0.92f));
+        dc->FillRoundedRectangle({rs, 7 * dpi, 7 * dpi}, pennello);
+        const wchar_t* nomiU[3] = {testi::t(L"Automatica", L"Automatic"), L"°C", L"°F"};
+        for (int i = 0; i < 3; i++) {
+            const D2D1_RECT_F r = {ru.left + sw * i, ru.top, ru.left + sw * (i + 1), ru.bottom};
+            if (wCitta) aggiungi(r, A_W_UNITA, i);
+            // sopra la pillola il testo diventa azzurro (vicino: la pillola scorre, il colore la segue)
+            const float vicino = std::clamp(1 - std::abs((float)wUnitaPos - i), 0.0f, 1.0f);
+            pennello->SetColor(D2D1::ColorF(1 + (0.16f - 1) * vicino, 1 + (0.42f - 1) * vicino, 1 + (0.88f - 1) * vicino, 1));
+            scrivi(nomiU[i], fmtNome, r);
+        }
+        dc->PopLayer();
+    }
+
+    // notizie: la fonte si sceglie toccando il suo nome (di serie segue la lingua; issue #12, #14)
+    const int fe = widD.fonteEffettiva();
     float y = rm.bottom + 16 * dpi;
     pennello->SetColor(ink);
     scrivi(testi::t(L"Notizie", L"News"), fmtTitolo, {m, y, PW - m, y + 22 * dpi});
-    pennello->SetColor(tenue);
-    scrivi(L"ANSA", fmtSotto, {PW - m - 36 * dpi, y + 2 * dpi, PW - m, y + 20 * dpi});
+    {
+        const std::wstring nomeF = fe == widget::F_NESSUNA ? testi::t(L"Spente", L"Off") : widget::infoFonte(fe).nome;
+        const float lf = larghezzaTesto(nomeF, fmtSotto);
+        const D2D1_RECT_F rf = {PW - m - lf - 26 * dpi, y - 3 * dpi, PW - m + 6 * dpi, y + 25 * dpi};
+        if (!wCitta) evidenzia(aggiungi(rf, A_W_FONTE, 0), rf, scuro, 8 * dpi);
+        pennello->SetColor(tenue);
+        scrivi(nomeF, fmtSotto, {PW - m - lf - 16 * dpi, y + 2 * dpi, PW - m - 12 * dpi, y + 20 * dpi});
+        freccia(PW - m - 4 * dpi, y + 11 * dpi);
+    }
     y += 28 * dpi;
+    if (fe == widget::F_NESSUNA) { pennello->SetColor(tenue); scrivi(testi::t(L"Notizie spente: scegli una fonte qui sopra", L"News is off: pick a source above"), fmtSotto, {m, y, PW - m, y + 20 * dpi}); return; }
     if (wid.notizie.empty()) { pennello->SetColor(tenue); scrivi(testi::t(L"Notizie in arrivo…", L"Loading news…"), fmtSotto, {m, y, PW - m, y + 20 * dpi}); }
     for (size_t i = 0; i < wid.notizie.size() && y + 56 * dpi < PH - m; i++) {
         const auto& nz = wid.notizie[i];
@@ -1264,6 +1572,125 @@ inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
         scrivi(nz.quando, fmtSotto, {PW - m - 36 * dpi, y + 6 * dpi, PW - m, y + 22 * dpi});
         y += 58 * dpi;
     }
+}
+
+// Apre la ricerca della citta' nella scheda del meteo. Il timer della finestra del pannello aspetta 0,3 s dopo
+// l'ultimo tasto prima di chiedere (una richiesta per parola, non per lettera) e raccoglie i risultati del thread
+inline auto Motore::apriRicercaCitta() -> void {
+    if (pannelloTipo != P_WIDGET || pChiusura || wCitta) return;
+    wCitta = true;
+    wTesto.clear(); wCercato.clear(); wLuoghi.clear(); wStato = widget::R_VUOTA; wSel = 0;
+    widD.cerca(L"");   // (annulla una ricerca rimasta in corso da prima)
+    widD.ricercaPronta = false;
+    pSopra = pPremuto = -1; evidP.clear();
+    SetTimer(pannello, TIMER_CITTA, 50, nullptr);
+    pAnimazione = true; pDirty = true;
+    scrivi("widget: ricerca della citta' aperta");
+}
+
+inline auto Motore::chiudiRicercaCitta() -> void {
+    if (!wCitta) return;
+    wCitta = false;
+    widD.cerca(L"");
+    KillTimer(pannello, TIMER_CITTA);
+    pSopra = pPremuto = -1; evidP.clear();
+    pAnimazione = true; pDirty = true;
+}
+
+// Fa partire la ricerca del testo scritto e porta SUBITO lo stato del pannello a quello di Dati ("cerco", o vuoto
+// con un testo corto): finche' non arrivano i luoghi del testo nuovo, Invio non puo' scegliere un luogo dell'elenco
+// vecchio. R20261119-133013-S1: prima lo stato locale si aggiornava solo al passo del timer (fino a 50 ms dopo), e due
+// Invio ravvicinati dopo aver cambiato il testo sceglievano un luogo del testo di prima. L'avviso ricercaPronta resta
+// acceso: se il thread finisce subito, il timer rilegge comunque
+inline auto Motore::cercaCitta() -> void {
+    wCercato = wTesto;
+    widD.cerca(wTesto);
+    int s = widget::R_VUOTA;
+    wLuoghi = widD.risultati(s);
+    wStato = s; wSel = 0;
+    pSopra = pPremuto = -1; evidP.clear();
+    pDirty = true;
+}
+
+// dal timer: la ricerca parte 0,3 s dopo l'ultimo tasto; i risultati del thread arrivano qui
+inline auto Motore::passoCitta() -> void {
+    if (wTesto != wCercato && adesso() - wCambiato >= 0.3) cercaCitta();
+    if (widD.ricercaPronta.exchange(false)) {
+        int s = widget::R_VUOTA;
+        wLuoghi = widD.risultati(s);
+        wStato = s; wSel = 0;
+        // (anche il premuto: un clic iniziato su una riga dell'elenco di prima non deve scegliere il luogo nuovo
+        // che ora sta nella stessa riga)
+        pSopra = pPremuto = -1; evidP.clear();
+        pDirty = true;
+    }
+}
+
+inline auto Motore::carattereCitta(wchar_t c) -> void {
+    const std::wstring prima = wTesto;
+    if (c == 13) {   // Invio: il luogo scelto, se i risultati sono quelli del testo scritto; altrimenti si cerca subito
+        if (wTesto == wCercato && wStato == widget::R_PRONTA && wSel >= 0 && wSel < (int)wLuoghi.size()) scegliLuogo(wSel);
+        else if (wStato != widget::R_CERCA || wTesto != wCercato) {
+            // la richiesta parte qui, senza passare dal confronto dei testi di passoCitta: con lo stesso testo di una
+            // ricerca fallita (rete tornata) prima non ripartiva niente (R20261119-132417-S3). Non durante una
+            // ricerca dello stesso testo gia' in corso
+            cercaCitta();
+            scrivi("widget: ricerca chiesta con Invio");
+        }
+        return;
+    }
+    if (c == 8) { if (!wTesto.empty()) wTesto.pop_back(); }
+    else if (c == 127) {   // Ctrl+Backspace: via l'ultima parola
+        while (!wTesto.empty() && wTesto.back() == L' ') wTesto.pop_back();
+        while (!wTesto.empty() && wTesto.back() != L' ') wTesto.pop_back();
+    }
+    else if (c == 22) {   // Ctrl+V: la prima riga degli appunti
+        if (OpenClipboard(pannello)) {
+            if (HANDLE g = GetClipboardData(CF_UNICODETEXT)) {
+                // (mai oltre il blocco: un testo senza terminatore faceva leggere memoria dopo la fine, S2)
+                if (const wchar_t* t = (const wchar_t*)GlobalLock(g)) {
+                    const size_t n = GlobalSize(g) / sizeof(wchar_t);
+                    for (size_t k = 0; k < n && t[k] && t[k] != L'\r' && t[k] != L'\n' && wTesto.size() < 60; k++) if (t[k] >= 32) wTesto += t[k];
+                    GlobalUnlock(g);
+                }
+            }
+            CloseClipboard();
+        }
+    }
+    else if (c >= 32 && wTesto.size() < 60) wTesto += c;
+    if (wTesto != prima) { wCambiato = adesso(); pDirty = true; }
+}
+
+inline auto Motore::scegliLuogo(int i) -> void {
+    // (anche col mouse solo se i risultati sono del testo scritto: prima un clic nei 300 ms dopo aver cambiato il testo
+    // salvava una citta' della ricerca di prima, R20261121-001738-S16)
+    if (!wCitta || i < 0 || i >= (int)wLuoghi.size() || wTesto != wCercato || wStato != widget::R_PRONTA) return;
+    widD.impostaLuogo(wLuoghi[i]);
+    wid = widD.copia();   // (il meteo della citta' di prima e' gia' tolto: "Meteo in arrivo...")
+    scrivi("widget: citta' cambiata");   // (il nome no: e' dove sta l'utente)
+    chiudiRicercaCitta();
+}
+
+// menu della fonte delle notizie, sotto il suo nome
+inline auto Motore::menuFonte(const D2D1_RECT_F& r) -> void {
+    const int f = widD.fonte;
+    std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Fonte delle notizie", L"News source"))};
+    auto v = menu::voce(testi::t(L"Automatica (segue la lingua)", L"Automatic (follows the language)"), 1 + widget::F_AUTO);
+    v.spuntata = f == widget::F_AUTO; voci.push_back(v);
+    for (int i = widget::F_ANSA; i <= widget::F_ALJAZEERA; i++) {
+        auto x = menu::voce(widget::infoFonte(i).nome, (UINT)(1 + i)); x.spuntata = f == i; voci.push_back(x);
+    }
+    voci.push_back(menu::separatore());
+    auto n = menu::voce(testi::t(L"Nascondi le notizie", L"Hide news"), 1 + widget::F_NESSUNA);
+    n.spuntata = f == widget::F_NESSUNA; voci.push_back(n);
+    POINT pt = {(LONG)r.left, (LONG)r.bottom}; ClientToScreen(pannello, &pt);
+    const UINT s = menuScheda(voci, pt, pannello);
+    if (s >= 1 && s <= 1 + widget::F_NESSUNA) {
+        widD.impostaFonte((int)s - 1);
+        wid = widD.copia();
+        if (registro) { char b[48]; snprintf(b, 48, "widget: fonte delle notizie %u", s - 1); scrivi(b); }
+    }
+    pDirty = true;
 }
 
 // simboli del meteo (scala 1 = circa 24 px)
@@ -1324,8 +1751,8 @@ inline auto Motore::simboloTema(float cx, float cy) -> void {
     ID2D1EllipseGeometry *a = nullptr, *b = nullptr; ID2D1PathGeometry* g = nullptr;
     f2d->CreateEllipseGeometry({{cx, cy}, r, r}, &a);
     f2d->CreateEllipseGeometry({{ox, oy}, r * 0.86f, r * 0.86f}, &b);
-    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;   // (Open puo' fallire anche con la geometria creata: R20261121-001738-S4)
+    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
         s->Close(); s->Release();
         dc->FillGeometry(g, pennello);
@@ -1347,14 +1774,14 @@ inline auto Motore::simboloTimer(float cx, float cy) -> void {
 inline auto Motore::simboloMicrofono(float cx, float cy, bool) -> void {
     const float d = dpi;
     dc->FillRoundedRectangle({{cx - 3.5f * d, cy - 9 * d, cx + 3.5f * d, cy + 2 * d}, 3.5f * d, 3.5f * d}, pennello);
-    ID2D1PathGeometry* g = nullptr;
-    if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         s->BeginFigure({cx - 6.5f * d, cy - 1 * d}, D2D1_FIGURE_BEGIN_HOLLOW);
         s->AddArc(D2D1::ArcSegment({cx + 6.5f * d, cy - 1 * d}, {6.5f * d, 6.5f * d}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
         s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
-        dc->DrawGeometry(g, pennello, 1.5f * d, tratto); g->Release();
+        dc->DrawGeometry(g, pennello, 1.5f * d, tratto);
     }
+    if (g) g->Release();
     linea(0, 5.5f, 0, 9, cx, cy, 1.5f);
     if (sensori::Sensori::io().micMuto) linea(-7, -8, 7, 8, cx, cy, 1.6f);
 }
@@ -1374,8 +1801,8 @@ inline auto Motore::simboloLuna(float cx, float cy) -> void {
     ID2D1EllipseGeometry *a = nullptr, *b = nullptr; ID2D1PathGeometry* g = nullptr;
     f2d->CreateEllipseGeometry({{cx, cy}, r, r}, &a);
     f2d->CreateEllipseGeometry({{cx + 4.5f * dpi, cy - 3.5f * dpi}, r * 0.85f, r * 0.85f}, &b);
-    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;
+    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
         s->Close(); s->Release();
         dc->FillGeometry(g, pennello);
@@ -1387,7 +1814,8 @@ inline auto Motore::simboloLuna(float cx, float cy) -> void {
 inline auto Motore::simboloGoccia(float cx, float cy) -> void {
     ID2D1PathGeometry* g = nullptr;
     if (FAILED(f2d->CreatePathGeometry(&g))) return;
-    ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;
+    if (FAILED(g->Open(&s))) { g->Release(); return; }
     const float r = 6 * dpi;
     s->BeginFigure({cx, cy - 10 * dpi}, D2D1_FIGURE_BEGIN_FILLED);
     s->AddBezier(D2D1::BezierSegment({cx + 2 * dpi, cy - 6 * dpi}, {cx + r, cy - 2 * dpi}, {cx + r, cy + 2.5f * dpi}));
@@ -1406,16 +1834,15 @@ inline auto Motore::simboloSole(float cx, float cy) -> void {
 }
 
 inline auto Motore::simboloEnergia(float cx, float cy) -> void {
-    ID2D1PathGeometry* g = nullptr;
-    if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         const float r = 7 * dpi, a0 = -(float)M_PI / 2 + 0.65f, a1 = -(float)M_PI / 2 - 0.65f;
         s->BeginFigure({cx + r * std::cos(a0), cy + r * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
         s->AddArc(D2D1::ArcSegment({cx + r * std::cos(a1), cy + r * std::sin(a1)}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
         s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
         dc->DrawGeometry(g, pennello, 1.9f * dpi, tratto);
-        g->Release();
     }
+    if (g) g->Release();
     linea(0, -9, 0, -2, cx, cy, 1.9f);
 }
 
@@ -1771,7 +2198,7 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             break;
         }
         case A_TIMER: {
-            std::vector<menu::Voce> voci = {menu::titolo(L"Timer")};
+            std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Timer", L"Timer"))};
             const int minuti[] = {1, 3, 5, 10, 15, 25, 30, 45, 60};
             for (int i = 0; i < 9; i++) {
                 wchar_t b[32]; swprintf(b, 32, minuti[i] == 60 ? testi::t(L"1 ora", L"1 hour") : testi::t(L"%d minuti", L"%d minutes"), minuti[i]);
@@ -1839,6 +2266,28 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_NOTIFICHE:    cambiaVista(P_NOTIFICHE, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
         case A_INDIETRO:     tornaIndietro(); break;
         case A_NOTIZIA:      if (e.indice < (int)wid.notizie.size()) { chiudiPannello(); apriPagina(wid.notizie[e.indice].link.c_str()); } break;
+        case A_W_CITTA:      apriRicercaCitta(); break;
+        case A_W_ANNULLA:    chiudiRicercaCitta(); break;
+        case A_W_LUOGO:      scegliLuogo(e.indice); break;
+        case A_W_UNITA:      widD.impostaUnita(e.indice); pDirty = true; if (registro) { char b[48]; snprintf(b, 48, "widget: unita' %d", e.indice); scrivi(b); } break;
+        case A_W_FONTE:      menuFonte(e.r); break;
+        // reti Wi-Fi (wifi.h; issue #24)
+        case A_WIFI_RETI:    cambiaVista(P_WIFI, {(e.r.left + e.r.right) / 2, (e.r.top + e.r.bottom) / 2}); break;
+        case A_WIFI_RADIO:   sis.impostaRadio(1, sis.wifi != 1); wlCercataT = adesso() - 8; pDirty = true; break;   // (riacceso: si cerca fra 2 s)
+        case A_WIFI_RETE:
+            if (e.indice >= 0 && e.indice < (int)wlReti.size()) {
+                const wifi::Rete n = wlReti[e.indice];
+                if (n.connessa) break;
+                // gia' usata (Windows ha la password) o aperta: ci si collega da qui; nuova protetta: le impostazioni di
+                // Windows, che chiedono la password (FluidWin non ne tocca: scelta dell'utente)
+                if (n.profilo || n.aperta) { wlan.collega(n.ssid, n.profilo); copiaWifi(); scrivi(n.profilo ? "wifi: collegamento a una rete salvata" : "wifi: collegamento a una rete aperta"); }
+                else { scrivi("wifi: rete nuova protetta, impostazioni di Windows"); chiudiPannello(); apriPagina(L"ms-settings:network-wifi"); }
+                pDirty = true;
+            }
+            break;
+        case A_WIFI_SCOLLEGA: wlan.scollega(); scrivi("wifi: scollega"); pDirty = true; break;
+        case A_WIFI_IMPOSTAZIONI: chiudiPannello(); apriPagina(L"ms-settings:network-wifi"); break;
+        case A_WIFI_PRIVACY: chiudiPannello(); apriPagina(L"ms-settings:privacy-location"); break;
         case A_LUMINOSITA:   break;
         case A_MIXER_VOL:    break;   // si trascina (procPannello)
         // la riga dell'uscita apre il mixer (volume per uscita e per app)
@@ -1862,8 +2311,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             if (e.indice < (int)listaN.size()) {
                 const notifiche::Notifica n = listaN[e.indice];
                 chiudiPannello();
-                if (!n.aumid.empty()) ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + n.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                lettoreN.rimuovi(n.id);
+                // la notifica se ne va solo se l'app si e' aperta: app disinstallata o non attivabile, la notifica resta
+                // nel centro notifiche di Windows (R20261121-001738-S13)
+                const bool aperta = !n.aumid.empty() && (INT_PTR)ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + n.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+                if (aperta) lettoreN.rimuovi(n.id);
             }
             break;
         case A_RIMUOVI:
@@ -1951,7 +2402,29 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
         case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;
-        case WM_KEYDOWN: if (w == VK_ESCAPE) d->chiudiTutte(); else if (w == VK_BACK) d->tornaIndietro(); return 0;
+        // ricerca della citta' aperta (widget): i tasti scrivono nel campo. Esc chiude solo la ricerca, Backspace
+        // cancella (non torna al centro di controllo), le frecce scelgono il luogo, Invio lo conferma (WM_CHAR)
+        case WM_CHAR:
+            if (d->pannelloTipo == P_WIDGET && d->wCitta && !d->pChiusura && w != 27) d->carattereCitta((wchar_t)w);
+            return 0;
+        case WM_TIMER:
+            if (w == TIMER_CITTA) {
+                if (d->pannelloTipo == P_WIDGET && d->wCitta && !d->pChiusura) d->passoCitta();
+                else KillTimer(h, TIMER_CITTA);
+                return 0;
+            }
+            break;
+        case WM_KEYDOWN:
+            if (d->pannelloTipo == P_WIDGET && d->wCitta && !d->pChiusura) {
+                if (w == VK_ESCAPE) d->chiudiRicercaCitta();
+                else if ((w == VK_UP || w == VK_DOWN) && !d->wLuoghi.empty()) {
+                    d->wSel = std::clamp(d->wSel + (w == VK_DOWN ? 1 : -1), 0, std::min(d->wRighe, (int)d->wLuoghi.size()) - 1);
+                    d->pDirty = true;
+                }
+                return 0;
+            }
+            if (w == VK_ESCAPE) d->chiudiTutte(); else if (w == VK_BACK) d->tornaIndietro();
+            return 0;
         case WM_SYSKEYDOWN: if (w == VK_LEFT) { d->tornaIndietro(); return 0; } break;
         case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
         // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
@@ -2007,7 +2480,7 @@ inline auto Motore::rettCentro() const -> D2D1_RECT_F {
 // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
 inline auto Motore::rettIsolaSchermo() const -> RECT {
     const D2D1_RECT_F r = rettCentro();
-    return {schermo.left + (LONG)r.left, schermo.bottom - H + (LONG)(r.top - PAD), schermo.left + (LONG)r.right, schermo.bottom - H + (LONG)(r.bottom + PAD)};
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});   // (sul lato del dock)
 }
 
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }

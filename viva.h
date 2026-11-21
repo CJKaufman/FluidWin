@@ -159,9 +159,10 @@ public:
             sup->Release();
         }
         // la finestra ha cambiato misura: il pool si rifa' della misura nuova (i prossimi fotogrammi la avranno)
+        // (la misura ricordata cambia solo se il pool si e' rifatto davvero: fallito una volta, prima restava la misura
+        // nuova e non ci si riprovava piu', R20261121-003154-S12)
         if ((dim.Width != w || dim.Height != hh) && dim.Width > 0 && dim.Height > 0 && disp) {
-            w = dim.Width; hh = dim.Height;
-            pool->Recreate(disp, ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, dim);
+            if (SUCCEEDED(pool->Recreate(disp, ABI::Windows::Graphics::DirectX::DirectXPixelFormat_B8G8R8A8UIntNormalized, 2, dim))) { w = dim.Width; hh = dim.Height; }
         }
         chiudi(ultimo); ultimo->Release();
         return fatto;

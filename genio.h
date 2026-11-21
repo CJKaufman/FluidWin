@@ -32,6 +32,40 @@ struct Immagine {
 
 struct Vertice { float x, y, u, v; };
 
+// Il dock puo' stare su ogni bordo (impostazione "Posizione"). Le curve verso il dock (genio, caduta) si calcolano
+// sempre con il dock in basso, in un sistema "canonico" girato: lato 0 in basso (uguale allo schermo), 1 in alto
+// (capovolto), 2 a sinistra, 3 a destra (girati di un quarto); poi i punti tornano sullo schermo
+struct P2 { double x, y; };
+inline P2 canonico(int lato, double x, double y) {
+    switch (lato) {
+        case 1: return {x, -y};
+        case 2: return {y, -x};
+        case 3: return {y, x};
+        default: return {x, y};
+    }
+}
+inline P2 dalCanonico(int lato, double x, double y) {   // l'inversa
+    switch (lato) {
+        case 1: return {x, -y};
+        case 2: return {-y, x};
+        case 3: return {y, x};
+        default: return {x, y};
+    }
+}
+inline RECT rettCanonico(int lato, const RECT& r) {
+    const P2 a = canonico(lato, r.left, r.top), b = canonico(lato, r.right, r.bottom);
+    return {(LONG)std::lround(std::min(a.x, b.x)), (LONG)std::lround(std::min(a.y, b.y)), (LONG)std::lround(std::max(a.x, b.x)), (LONG)std::lround(std::max(a.y, b.y))};
+}
+// frazioni (a da sinistra a destra, b dall'alto in basso) del sistema canonico -> coordinate della foto vera
+inline void uvDalCanonico(int lato, float a, float b, float& u, float& v) {
+    switch (lato) {
+        case 1: u = a; v = 1 - b; break;
+        case 2: u = 1 - b; v = a; break;
+        case 3: u = b; v = a; break;
+        default: u = a; v = b;
+    }
+}
+
 // Cosa disegnare in un fotogramma
 struct Elemento {
     const Immagine* img;
@@ -50,6 +84,7 @@ struct Elemento {
     // arrotondati vanno sul bordo della parte usata, non su quello della foto
     double finU = 1, finV = 1;
     double sfumaX = 0, sfumaY = 0;   // pixel della foto su cui sfuma il suo bordo destro/basso, se finisce prima della griglia
+    int lato = 0;         // bordo della barra (del dock) per la curva del genio: 0 in basso, 1 in alto, 2 a sinistra, 3 a destra
 };
 
 static const int RIGHE = 160;   // righe della griglia: piu' righe = curve piu' morbide
@@ -234,7 +269,9 @@ public:
             // "sotto il punto", ma sullo schermo si vede la foto o lo sfondo, non lei: R20261114-022427-S8)
             COLORREF k = 0; BYTE alfa = 255; DWORD fl = 0;
             const bool opaca = !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) || (GetLayeredWindowAttributes(h, &k, &alfa, &fl) && (!(fl & LWA_ALPHA) || alfa == 255));
-            if (opaca && sopra && GetAncestor(sopra, GA_ROOT) == h && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
+            // (e scoperta per intero, non solo al centro: con un'altra app sopra un angolo, i suoi pixel finivano nella
+            // foto e ricomparivano durante l'animazione, R20261121-003154-S4)
+            if (opaca && sopra && GetAncestor(sopra, GA_ROOT) == h && (!scoperta || scoperta(h, visibile)) && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
         }
         const bool fatto = ok && carica(h, visibile, wr, (const UINT*)bits, out);
         SelectObject(mem, vecchio); DeleteDC(mem); DeleteObject(dib); ReleaseDC(nullptr, scr);
@@ -280,9 +317,28 @@ public:
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         if (FAILED(dev->CreateTexture2D(&td, nullptr, &out.tex))) return false;
         ctx->UpdateSubresource(out.tex, 0, nullptr, px.data(), vw * 4, 0);
-        dev->CreateShaderResourceView(out.tex, nullptr, &out.srv);
+        // (senza vista la foto non c'e': prima una vista nulla andava a GenerateMips e la foto risultava pronta, S5)
+        if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv)) || !out.srv) { out.libera(); return false; }
         ctx->GenerateMips(out.srv);   // rimpicciolita resta morbida, senza sfarfallio
         out.w = vw; out.h = vh;
+        return true;
+    }
+
+    // Texture di un solo colore (LATO_TINTA x LATO_TINTA), per disegnare riquadri pieni con lo stesso shader delle
+    // foto (angoli arrotondati compresi): il "chip" della riduzione a icona. r, g, b, a da 0 a 1; si salva
+    // premoltiplicata, come lo shader si aspetta
+    static const int LATO_TINTA = 64;
+    bool tinta(float r, float g, float b, float a, Immagine& out) {
+        out.libera();
+        const UINT c = ((UINT)std::lround(a * 255) << 24) | ((UINT)std::lround(r * a * 255) << 16) | ((UINT)std::lround(g * a * 255) << 8) | (UINT)std::lround(b * a * 255);
+        std::vector<UINT> px((size_t)LATO_TINTA * LATO_TINTA, c);
+        D3D11_TEXTURE2D_DESC td{}; td.Width = LATO_TINTA; td.Height = LATO_TINTA; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA sd{px.data(), (UINT)(LATO_TINTA * 4), 0};
+        if (FAILED(dev->CreateTexture2D(&td, &sd, &out.tex))) return false;
+        if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv))) { out.libera(); return false; }
+        out.w = out.h = LATO_TINTA;
         return true;
     }
 
@@ -307,8 +363,12 @@ public:
             if (rtv) { rtv->Release(); rtv = nullptr; }
             ctx->Flush();
             if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)hh, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = hh; }
+        }
+        // la vista si rifa' anche a misura invariata se manca (prima, fallita una volta, il genio restava senza
+        // superficie per sempre a quella risoluzione, R20261121-003154-S6)
+        if (!rtv && sc) {
             ID3D11Texture2D* bb = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) { dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release(); }
+            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) && bb) { if (FAILED(dev->CreateRenderTargetView(bb, nullptr, &rtv))) rtv = nullptr; bb->Release(); }
         }
         if (visibile) SetWindowPos(finestra, sotto ? sotto : HWND_TOPMOST, origine.x, origine.y, W, H, SWP_NOACTIVATE);
     }
@@ -410,12 +470,16 @@ private:
     // La curva del genio. Due movimenti che si sovrappongono:
     //  - i lati si piegano verso l'icona, di piu' quanto piu' la riga e' vicina alla barra
     //  - la finestra scivola verso la barra; le righe che la raggiungono si schiacciano nell'icona
+    // Si calcola sempre con la barra in basso: col dock in alto o ai lati (e.lato) finestra e icona passano prima in un
+    // sistema girato in cui il dock e' in basso (canonico), e i vertici tornano indietro; u e v seguono la foto vera
     static void griglia(const Elemento& e, Vertice* out) {
-        const double L = e.finestra.left, T = e.finestra.top, R = e.finestra.right, B = e.finestra.bottom;
+        const int lato = std::clamp(e.lato, 0, 3);
+        const RECT fc = rettCanonico(lato, e.finestra), icc = rettCanonico(lato, e.icona);   // (vedi canonico)
+        const double L = fc.left, T = fc.top, R = fc.right, B = fc.bottom;
         // la "bocca" e' meta' dell'icona: la finestra si stringe piu' a punta prima di entrarci
-        const double ic = (e.icona.left + e.icona.right) / 2.0, mezza = (e.icona.right - e.icona.left) * 0.25;
+        const double ic = (icc.left + icc.right) / 2.0, mezza = (icc.right - icc.left) * 0.25;
         const double il = ic - mezza, ir = ic + mezza;
-        double ty = e.icona.top;
+        double ty = icc.top;
         if (ty < B + 1) ty = B + 1;                         // la finestra tocca gia' la barra: la "bocca" e' appena sotto
         const double piega = morbido(e.p / 0.45);           // i lati si curvano
         const double scivola = morbido((e.p - 0.22) / 0.78); // poi la finestra scende nella barra
@@ -427,8 +491,11 @@ private:
             const double f = morbido((y - T) / std::max(1.0, D));   // 0 in alto, 1 alla barra
             const double s = f * piega;
             const double xl = L + (il - L) * s, xr = R + (ir - R) * s;
-            out[k * 2 + 0] = {(float)xl, (float)y, 0.0f, (float)v};
-            out[k * 2 + 1] = {(float)xr, (float)y, 1.0f, (float)v};
+            const P2 pl = dalCanonico(lato, xl, y), pr = dalCanonico(lato, xr, y);
+            float ul, vl, ur, vr;   // (u e v della foto vera: vedi uvDalCanonico)
+            uvDalCanonico(lato, 0.0f, (float)v, ul, vl); uvDalCanonico(lato, 1.0f, (float)v, ur, vr);
+            out[k * 2 + 0] = {(float)pl.x, (float)pl.y, ul, vl};
+            out[k * 2 + 1] = {(float)pr.x, (float)pr.y, ur, vr};
         }
     }
 

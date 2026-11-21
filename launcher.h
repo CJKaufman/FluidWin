@@ -35,7 +35,15 @@ inline DWORD WINAPI Motore::threadSottofondo(LPVOID p) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     l->fai();
     CoUninitialize();
-    if (!PostMessageW(l->dest, WM_LAVORO_FATTO, 0, (LPARAM)l)) delete l;   // FluidWin si sta chiudendo
+    // Consegna non riuscita con la finestra ancora viva (memoria finita per un momento, coda piena): si riprova per
+    // qualche secondo, perche' il completamento azzera lo stato "in corso" del launcher e perso bloccava le ricerche
+    // successive (R20261121-122837-S3, R20261121-123050-S1). Finestra sparita: FluidWin si sta chiudendo.
+    // Senza limite finche' la finestra vive: dopo 5 s si buttava il completamento, e la ricerca restava "in corso"
+    // fino al riavvio (R20261121-140048-S5); dopo il primo secondo un tentativo ogni mezzo secondo
+    for (int i = 0; !consegna::posta(l->dest, WM_LAVORO_FATTO, 0, l); i++) {
+        if (!IsWindow(l->dest)) { delete l; break; }
+        Sleep(i < 10 ? 100 : 500);
+    }
     return 0;
 }
 
@@ -102,6 +110,11 @@ inline auto Motore::raccogliIcone() -> bool {
             assegna(tutteApp);
             assegna(tuttiGiochi);
             iconeChieste.erase(chiaveIcona(ip.percorso, ip.lato));
+        } else if (ip.lato == 48) {    // file e cartelle del launcher (anche "nessuna": non si richiede a ogni ricerca)
+            auto& v = iconeFile[ip.percorso];
+            if (!v) { v = b; presa = b != nullptr; }
+            iconeChieste.erase(chiaveIcona(ip.percorso, ip.lato));
+            lDirty = true;
         } else if (ip.lato == 64) {    // notifiche
             const std::wstring pre = L"shell:AppsFolder\\";
             if (ip.percorso.rfind(pre, 0) == 0) { iconeN[ip.percorso.substr(pre.size())] = b; presa = true; }
@@ -781,7 +794,165 @@ inline auto Motore::filtra() -> void {
         else if (q.size() >= 3 && sottosequenza(n, q)) livelli[2].push_back(i);
     }
     for (auto& l : livelli) filtrate.insert(filtrate.end(), l.begin(), l.end());
-    lSel = 0; lScrollObj = 0; lDirty = true;
+    lSel = 0; lScrollObj = 0; lDirty = true; lSelTastiera = false;
+    // file e cartelle: testo nuovo -> ricerca 0,2 s dopo l'ultimo tasto (una per parola, non per lettera); testo vuoto
+    // -> via i risultati e scartata una ricerca in corso. (filtra si chiama anche quando arriva l'elenco nuovo delle
+    // app: col testo uguale non si ricerca)
+    lSelFile = -1; lSopraFile = -1;
+    if (lModoGiochi || query.empty()) { lFile.clear(); lFileTesto.clear(); lFileGen++; if (launcher) KillTimer(launcher, TIMER_FILE_L); }
+    else if (query != lFileTesto && launcher) SetTimer(launcher, TIMER_FILE_L, 200, nullptr);
+}
+
+// ---- file e cartelle sotto la griglia (issue #14) ----
+
+// Righe di file che entrano (fino a LF_MAX), lasciando alla griglia almeno una riga di app; -1 senza testo (niente
+// sezione). L'indice LF_ESPLORA della riga "Cerca in Esplora file" e' questo stesso numero
+inline auto Motore::lFileRighe() const -> int {
+    if (lModoGiochi || query.empty()) return -1;
+    const float spazio = LH - 14 * dpi - lGrigliaTop() - lCellaH() - (LF_TESTA + LF_ESPLORA) * dpi;
+    const int entrano = std::max(0, (int)std::floor(spazio / (LF_RIGA * dpi)));
+    return std::min({(int)lFile.size(), LF_MAX, entrano});
+}
+
+// altezza a cui va la sezione (lFileH la insegue in renderLauncher)
+inline auto Motore::lFileAlto() const -> float {
+    const int r = lFileRighe();
+    return r < 0 ? 0.0f : (LF_TESTA + r * LF_RIGA + LF_ESPLORA) * dpi;
+}
+
+// riga della sezione sotto il punto: 0..righe-1 i file, righe = "Cerca in Esplora file", -1 fuori
+inline auto Motore::lFileIn(float x, float y) const -> int {
+    const int r = lFileRighe();
+    if (r < 0 || x < 16 * dpi || x > LW - 16 * dpi) return -1;
+    const float top = LH - 14 * dpi - (float)lFileH, fondo = LH - 14 * dpi;
+    if (y < top || y >= fondo) return -1;
+    const float y0 = top + LF_TESTA * dpi;
+    if (y < y0) return -1;
+    const int k = (int)((y - y0) / (LF_RIGA * dpi));
+    if (k < r) return lFileTesto == query ? k : -1;   // (righe di un testo vecchio: si vedono sbiadite, non si toccano)
+    const float ye = y0 + r * LF_RIGA * dpi;
+    return y >= ye && y < ye + LF_ESPLORA * dpi ? r : -1;
+}
+
+// la ricerca nel thread; il risultato si usa solo se e' ancora del testo scritto (generazione e testo uguali)
+// Una ricerca alla volta: con Windows Search lento le ricerche vecchie si accumulavano nel pool. Arrivata la risposta,
+// se il testo e' cambiato intanto ne parte una sola col testo di adesso (R20261121-002818-S10)
+inline auto Motore::cercaFileLauncher() -> void {
+    if (lModoGiochi || query.empty() || !lAperto) return;
+    if (lFileInCorso) { lFileAttesa = true; return; }
+    const std::wstring q = query;
+    const unsigned g = ++lFileGen;
+    auto ris = std::make_shared<std::vector<indice::File>>();
+    lFileInCorso = true; lFileAttesa = false;
+    inSottofondo([q, ris] { *ris = indice::cerca(q, LF_MAX, true); },
+                 [this, q, g, ris] {
+                     lFileInCorso = false;
+                     // (anche a testo uguale se la generazione e' cambiata: svuotato e riscritto lo stesso testo, la
+                     // risposta vecchia si scarta e senza nuova ricerca l'elenco restava vuoto, R20261121-115814-S1)
+                     if (lFileAttesa) { lFileAttesa = false; if (!lModoGiochi && lAperto && !lChiusura && !query.empty() && (q != query || g != lFileGen)) { cercaFileLauncher(); return; } }
+                     if (lModoGiochi || g != lFileGen || !lAperto || lChiusura || q != query) return;
+                     // "Cerca in Esplora file" scelto con le frecce resta lui anche se arrivano file (stava all'indice
+                     // delle righe, e il primo file prendeva il suo posto: Invio apriva il file, R20261121-002818-S8)
+                     const bool esplora = lSelFile >= 0 && lSelFile == lFileRighe();
+                     lFile = std::move(*ris); lFileTesto = q;
+                     if (esplora) lSelFile = lFileRighe();
+                     // (le icone di file gia' viste restano; oltre 200 la cache si svuota)
+                     if (iconeFile.size() > 200) { for (auto& [p, b] : iconeFile) if (b) b->Release(); iconeFile.clear(); }
+                     for (const auto& f : lFile) if (!iconeFile.count(f.percorso)) chiediIcona(f.percorso, 48);
+                     lSopraFile = -1; lSelFile = std::min(lSelFile, lFileRighe());
+                     lDirty = true;
+                 });
+}
+
+// apre il file (o la cartella) k, oppure la ricerca completa in Esplora file (k = righe)
+inline auto Motore::apriFile(int k) -> void {
+    const int r = lFileRighe();
+    if (r < 0 || k < 0 || k > r) return;
+    if (k == r) {
+        const std::wstring cerca = indice::cercaInEsplora(query);
+        chiudiLauncher();
+        ShellExecuteW(nullptr, L"open", cerca.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        scrivi("launcher: ricerca in Esplora file");
+        return;
+    }
+    // (solo risultati del testo scritto: R20261119-195000-S2, prima "fattura" -> "contratto", Giu' e Invio prima dei
+    // risultati nuovi apriva la fattura)
+    if (k >= (int)lFile.size() || lFileTesto != query) return;
+    const std::wstring p = lFile[k].percorso;
+    chiudiLauncher();
+    ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    scrivi("launcher: file aperto");   // (il percorso no: e' dell'utente)
+}
+
+inline auto Motore::menuFile(int k, POINT pt) -> void {
+    if (k < 0 || k >= (int)lFile.size() || k >= lFileRighe() || lFileTesto != query) return;
+    const indice::File f = lFile[k];   // (copia: il menu ha un suo ciclo dei messaggi, l'elenco puo' cambiare)
+    const int s = (int)menu::mostra({menu::titolo(f.nome), menu::voce(testi::t(L"Apri", L"Open"), 1),
+                                     menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 2)}, pt, launcher);
+    if (s == 1) { chiudiLauncher(); ShellExecuteW(nullptr, L"open", f.percorso.c_str(), nullptr, nullptr, SW_SHOWNORMAL); }
+    else if (s == 2) { chiudiLauncher(); ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + f.percorso + L"\"").c_str(), nullptr, SW_SHOWNORMAL); }
+}
+
+// true se un'animazione della sezione e' in corso (il launcher deve ridisegnarsi)
+inline auto Motore::disegnaFileLauncher(bool scuro, D2D1_COLOR_F ink) -> bool {
+    bool muove = false;
+    const int r = lFileRighe();
+    if (lFileH < 1) return false;
+    const float top = LH - 14 * dpi - (float)lFileH, fondo = LH - 14 * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+    dc->PushAxisAlignedClip({0, top, LW, fondo}, D2D1_ANTIALIAS_MODE_ALIASED);
+    // linea sopra, titolo
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({24 * dpi, top + 0.5f}, {LW - 24 * dpi, top + 0.5f}, pennello, 1.0f);
+    pennello->SetColor(tenue);
+    scrivi(testi::t(L"File e cartelle", L"Files and folders"), fmtSotto, {28 * dpi, top + 6 * dpi, LW - 28 * dpi, top + LF_TESTA * dpi});
+    auto evidenziaRiga = [&](const D2D1_RECT_F& rr, int k) {
+        const bool sopra = k == lSopraFile, scelta = k == lSelFile;
+        if (!sopra && !scelta) return;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, sopra ? 0.12f : 0.08f) : D2D1::ColorF(1, 1, 1, sopra ? 0.55f : 0.4f));
+        dc->FillRoundedRectangle({rr, 8 * dpi, 8 * dpi}, pennello);
+        if (scelta) { pennello->SetColor(D2D1::ColorF(0.2f, 0.5f, 1.0f, 0.7f)); dc->DrawRoundedRectangle({rr, 8 * dpi, 8 * dpi}, pennello, 1.5f * dpi); }
+    };
+    float y = top + LF_TESTA * dpi;
+    // Righe di un testo vecchio (si sta scrivendo, i risultati nuovi non sono arrivati): restano al loro posto, cosi'
+    // la sezione non salta a ogni lettera, ma sbiadiscono e non si possono scegliere (R20261119-195000-S2). L'opacita'
+    // va verso il suo valore con dolcezza (lFileOp)
+    {
+        const double obj = lFileTesto == query ? 1.0 : 0.45;
+        lFileOp += (obj - lFileOp) * (1 - std::exp(-dtFotogramma / 0.06));
+        if (std::abs(lFileOp - obj) < 0.004) lFileOp = obj; else muove = true;
+    }
+    if (lFileOp < 0.999) dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), (float)lFileOp), nullptr);
+    for (int k = 0; k < r && k < (int)lFile.size(); k++) {
+        const indice::File& f = lFile[k];
+        const D2D1_RECT_F rr = {20 * dpi, y + 2 * dpi, LW - 20 * dpi, y + (LF_RIGA - 2) * dpi};
+        evidenziaRiga(rr, k);
+        const float cy = y + LF_RIGA * dpi / 2, ix = 30 * dpi;
+        const D2D1_RECT_F ri = {ix, cy - 14 * dpi, ix + 28 * dpi, cy + 14 * dpi};
+        auto it = iconeFile.find(f.percorso);
+        if (it != iconeFile.end() && it->second) dc->DrawBitmap(it->second, ri, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        else { pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.35f)); dc->FillRoundedRectangle({ri, 5 * dpi, 5 * dpi}, pennello); }   // (icona in arrivo)
+        pennello->SetColor(ink);
+        scrivi(f.nome, fmtVoce, {ix + 38 * dpi, y + 4 * dpi, LW - 32 * dpi, y + 24 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(f.cartella, fmtSotto, {ix + 38 * dpi, y + 23 * dpi, LW - 32 * dpi, y + 40 * dpi});
+        y += LF_RIGA * dpi;
+    }
+    if (lFileOp < 0.999) dc->PopLayer();
+    // "Cerca «testo» in Esplora file": la ricerca completa di Windows
+    {
+        const D2D1_RECT_F rr = {20 * dpi, y + 2 * dpi, LW - 20 * dpi, y + (LF_ESPLORA - 2) * dpi};
+        evidenziaRiga(rr, r);
+        const float cy = y + LF_ESPLORA * dpi / 2, lx = 44 * dpi;
+        pennello->SetColor(blu);
+        dc->DrawEllipse({{lx - 2 * dpi, cy - 2 * dpi}, 6 * dpi, 6 * dpi}, pennello, 1.8f * dpi);
+        linea(2.5f, 2.5f, 7, 7, lx, cy);
+        const std::wstring t = testi::t(L"Cerca “", L"Search “") + testi::isola(query) + testi::t(L"” in Esplora file", L"” in File Explorer");
+        scrivi(t, fmtVoce, {lx + 24 * dpi, y, LW - 32 * dpi, y + LF_ESPLORA * dpi});
+    }
+    dc->PopAxisAlignedClip();
+    return muove;
 }
 
 // misure della griglia (coordinate del launcher)
@@ -804,7 +975,8 @@ inline auto Motore::lCursoreBarra() const -> D2D1_RECT_F {
 
 inline auto Motore::lGrigliaTop() const -> float { return 84 * dpi; }
 
-inline auto Motore::lGrigliaBottom() const -> float { return LH - 14 * dpi; }
+// (la sezione dei file, quando c'e', sta sotto e la griglia si accorcia della sua altezza animata)
+inline auto Motore::lGrigliaBottom() const -> float { return LH - 14 * dpi - (float)lFileH; }
 
 inline auto Motore::lScrollMax() const -> double {
     const int righe = ((int)filtrate.size() + 5) / 6;
@@ -853,8 +1025,14 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
         const auto pos = posizioniRiposo();
         const wchar_t* chiave = g ? AVVIO_GIOCHI : AVVIO_LAUNCHER;
         for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == chiave) ax = pos[i] + S / 2;
-        ancora = {(LONG)std::clamp(schermo.left + ax - rettLauncher.left, 40 * dpi, LW - 40 * dpi),
-                  (LONG)std::min(LH + LEXTRA - 4, (float)(schermo.bottom - H + yBaseRiposo() - S / 2 - rettLauncher.top))};
+        const RECT ic = aSchermo({ax - S / 2, yBaseRiposo() - S, ax + S / 2, yBaseRiposo()});
+        const float icx = (ic.left + ic.right) / 2.0f - rettLauncher.left, icy = (ic.top + ic.bottom) / 2.0f - rettLauncher.top;
+        switch (lato) {
+            case 1: ancora = {(LONG)std::clamp(icx, 40 * dpi, LW - 40 * dpi), 0}; break;
+            case 2: ancora = {0, (LONG)std::clamp(icy, 40 * dpi, LH - 40 * dpi)}; break;
+            case 3: ancora = {(LONG)LW, (LONG)std::clamp(icy, 40 * dpi, LH - 40 * dpi)}; break;
+            default: ancora = {(LONG)std::clamp(icx, 40 * dpi, LW - 40 * dpi), (LONG)std::min(LH + LEXTRA - 4, icy)};
+        }
     };
     if (lAperto && !lChiusura && lModoGiochi == giochi) { chiudiLauncher(); return; }
     if (lAperto && !lChiusura && lModoGiochi != giochi) {
@@ -875,6 +1053,8 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
             dirty = true;
         }
         lChiusura = false; lDirty = true; lRipreso = true;
+        // una ricerca dei file arrivata durante la chiusura e' stata scartata: si rifa' (R20261119-195000-S3)
+        if (!lModoGiochi && !query.empty() && lFileTesto != query) SetTimer(launcher, TIMER_FILE_L, 200, nullptr);
         prendiFuoco(launcher);
         scrivi("launcher: riaperto mentre si chiudeva");
         return;
@@ -883,12 +1063,30 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
     caricaElenco(giochi);
     if (!nessunaScheda()) { if (dopo != 1) { chiudiTutte(); apriDopo(1, giochi ? 1 : 0); } return; }
     primaDelLauncher = GetForegroundWindow();
-    query.clear(); filtra(); lSopra = -1; lScroll = 0;
+    query.clear(); filtra(); lSopra = -1; lScroll = 0; lFileH = 0;   // (la sezione dei file riparte chiusa)
     lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false; lRipreso = false;
-    const int x0 = schermo.left + (int)std::round((W - LW) / 2);
-    const int y1 = schermo.bottom - H + (int)std::round(yBaseRiposo() - S - PAD - 18 * dpi);
-    LH = std::clamp((float)(y1 - schermo.top) - 12 * dpi, 300 * dpi, LHMAX);
-    rettLauncher = {x0, y1 - (int)LH, x0 + (int)LW, y1};
+    // sopra il dock, al centro; la finestra scende fino all'icona "App" (o "Giochi"). Col dock in alto: sotto, al centro;
+    // ai lati: accanto al dock, a meta' altezza. Li' la finestra non arriva all'icona: cresce dal suo bordo piu' vicino all'icona
+    const POINT o = origine();
+    const D2D1_POINT_2F bi = fis(0, yBaseRiposo() - S - PAD);   // bordo interno del dock (nella finestra del dock)
+    const int stacco = (int)std::round(18 * dpi);
+    int x0 = schermo.left + (int)std::round((schermo.right - schermo.left - LW) / 2), y0 = 0;
+    if (lato == 0) {
+        const int y1 = o.y + (int)std::round(bi.y) - stacco;
+        // schermi bassi (1366x768 al 125%: ~520 punti sopra il dock): il launcher si accorcia invece di uscire in alto
+        LH = std::clamp((float)(y1 - schermo.top) - 12 * dpi, 300 * dpi, LHMAX);
+        y0 = y1 - (int)LH;
+    } else if (lato == 1) {
+        y0 = o.y + (int)std::round(bi.y) + stacco;
+        LH = std::clamp((float)(schermo.bottom - y0) - 12 * dpi, 300 * dpi, LHMAX);
+    } else {
+        LH = std::clamp((float)(schermo.bottom - schermo.top) - 24 * dpi, 300 * dpi, LHMAX);
+        y0 = schermo.top + (int)std::round((schermo.bottom - schermo.top - LH) / 2);
+        x0 = lato == 2 ? o.x + (int)std::round(bi.x) + stacco : o.x + (int)std::round(bi.x) - stacco - (int)LW;
+        // (schermo stretto: dentro lo schermo anche a costo di coprire un poco il dock, R20261120-190507-S2)
+        x0 = std::clamp(x0, (int)schermo.left + 8, std::max((int)schermo.left + 8, (int)schermo.right - 8 - (int)LW));
+    }
+    rettLauncher = {x0, y0, x0 + (int)LW, y0 + (int)LH};
     aggiornaAncora(giochi);
     SetWindowRgn(launcher, nullptr, FALSE);
     SetWindowPos(launcher, HWND_TOPMOST, x0, rettLauncher.top, (int)LW, (int)(LH + LEXTRA), SWP_NOACTIVATE);
@@ -1934,6 +2132,24 @@ inline auto Motore::renderLauncher() -> bool {
         // aperto: fuori dal launcher (sopra il dock) i clic devono passare
         SetWindowRgn(launcher, CreateRectRgn(0, 0, (int)LW, (int)LH), FALSE); lRegione = true;
     }
+    // sezione dei file: l'altezza insegue quella giusta (compare e sparisce scorrendo, la griglia si accorcia con lei)
+    {
+        const double fh = verso(lFileH, lFileAlto(), 0.07);
+        if (fh != lFileH) {
+            lFileH = fh; anim = true;
+            // La griglia si accorcia: l'app scelta con le frecce resta in vista (R20261119-195000-S4; prima solo il
+            // limite dello scorrimento, e poteva finire sotto la sezione). Posizione assoluta, calcolata sull'obiettivo
+            // dello scorrimento e non sulla posizione animata: chiamata a ogni fotogramma, selezionaVisibile sommava
+            // ogni volta il ritardo dell'animazione, e lo scorrimento andava oltre e rimbalzava (R20261119-195720-S2).
+            // Solo per una scelta fatta con la tastiera: rotella e barra hanno la precedenza (R20261119-195720-S1)
+            if (lSelTastiera && !query.empty() && lSelFile < 0 && lSel >= 0 && lSel < (int)filtrate.size()) {
+                const int numeroRiga = lSel / 6;   // (divisione intera voluta: la riga della griglia, 6 app per riga)
+                const double alto = lGrigliaBottom() - lGrigliaTop(), riga = numeroRiga * (double)lCellaH();
+                lScrollObj = std::max(riga + lCellaH() - alto, std::min(lScrollObj, riga));   // (non clamp: con una griglia piu' bassa di una riga il minimo supererebbe il massimo)
+            }
+            lScrollObj = std::clamp(lScrollObj, 0.0, lScrollMax());
+        }
+    }
     const double sc = verso(lScroll, lScrollObj, 0.06);
     if (sc != lScroll) { lScroll = sc; anim = true; }
     raccogliIcone();   // (quelle che arrivano dal thread rimettono lDirty)
@@ -1986,7 +2202,7 @@ inline auto Motore::renderLauncher() -> bool {
         const auto r = lCella(i);
         if (r.bottom < lGrigliaTop() - lCellaH() || r.top > lGrigliaBottom() + lCellaH()) continue;
         AppL& a = el[filtrate[i]];
-        const bool sopra = i == lSopra, scelta = i == lSel && !query.empty();
+        const bool sopra = i == lSopra, scelta = i == lSel && !query.empty() && lSelFile < 0;   // (con una riga dei file scelta, solo quella)
         if (sopra || scelta) {
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, sopra ? 0.12f : 0.08f) : D2D1::ColorF(1, 1, 1, sopra ? 0.55f : 0.4f));
             const D2D1_RECT_F h = {r.left + 4 * dpi, r.top + 2 * dpi, r.right - 4 * dpi, r.bottom - 2 * dpi};
@@ -2007,6 +2223,7 @@ inline auto Motore::renderLauncher() -> bool {
                fmtNome, {0, lGrigliaTop() + 40 * dpi, LW, lGrigliaTop() + 70 * dpi});
     }
     dc->PopAxisAlignedClip();
+    if (disegnaFileLauncher(scuro, ink)) anim = true;
     // barra di scorrimento sottile, solo se serve; col mouse sopra (o trascinandola) si allarga, come su macOS
     if (lScrollMax() > 0) {
         const D2D1_RECT_F b = lCursoreBarra();
@@ -2033,9 +2250,9 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
                 const D2D1_RECT_F c = d->lCursoreBarra();
                 if (y < c.top || y >= c.bottom) {
                     const double pagina = (b.bottom - b.top) * 0.9;
-                    d->lScrollObj = std::clamp(d->lScrollObj + (y < c.top ? -pagina : pagina), 0.0, d->lScrollMax());
+                    d->lScrollObj = std::clamp(d->lScrollObj + (y < c.top ? -pagina : pagina), 0.0, d->lScrollMax()); d->lSelTastiera = false;
                 } else {
-                    d->lTrascinoBarra = true; d->lPresaY = y; d->lPresaScroll = d->lScroll;
+                    d->lTrascinoBarra = true; d->lPresaY = y; d->lPresaScroll = d->lScroll; d->lSelTastiera = false;
                     SetCapture(h);
                 }
                 d->lDirty = true;
@@ -2059,12 +2276,17 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             }
             const int s = d->lCellaIn(x, y);
             if (s != d->lSopra) { d->lSopra = s; d->lDirty = true; }
+            const int sf = d->lFileIn(x, y);
+            if (sf != d->lSopraFile) { d->lSopraFile = sf; d->lDirty = true; }
             const D2D1_RECT_F re = d->rettEnergia();
             const bool e = x >= re.left && x < re.right && y >= re.top && y < re.bottom;
             if (e != d->lSopraEnergia) { d->lSopraEnergia = e; d->lDirty = true; }
             return 0;
         }
-        case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraEnergia = false; d->lSopraBarra = false; d->lDirty = true; return 0;
+        case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraFile = -1; d->lSopraEnergia = false; d->lSopraBarra = false; d->lDirty = true; return 0;
+        case WM_TIMER:
+            if (w == TIMER_FILE_L) { KillTimer(h, TIMER_FILE_L); d->cercaFileLauncher(); return 0; }
+            break;
         case WM_LBUTTONUP: {
             if (d->lTrascinoBarra) { d->lTrascinoBarra = false; ReleaseCapture(); d->lDirty = true; return 0; }
             { const D2D1_RECT_F b = d->lRettBarra(); if (d->lScrollMax() > 0 && x >= b.left && x < b.right && y >= b.top && y < b.bottom) return 0; }
@@ -2075,6 +2297,7 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             }
             const int i = d->lCellaIn(x, y);
             if (i >= 0) d->avviaApp(i);
+            else { const int k = d->lFileIn(x, y); if (k >= 0) d->apriFile(k); }
             return 0;
         }
         case WM_RBUTTONUP: {   // il menu di Windows dell'app (amministratore, percorso, disinstalla...)
@@ -2085,6 +2308,9 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
                 else if (y < d->LH) d->menuSpazioGiochi(p);
             } else if (i >= 0) {
                 d->menuApp(i, p);
+            } else {
+                const int k = d->lFileIn(x, y);
+                if (k >= 0) d->menuFile(k, p);
             }
             return 0;
         }
@@ -2108,8 +2334,16 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
                     float ax = d->W / 2.0f;
                     const auto pos = d->posizioniRiposo();
                     for (size_t i = 0; i < d->voci.size() && i < pos.size(); i++) if (d->voci[i].avvio == AVVIO_GIOCHI) ax = pos[i] + d->S / 2;
-                    d->ancora = {(LONG)std::clamp(d->schermo.left + ax - d->rettLauncher.left, 40 * d->dpi, d->LW - 40 * d->dpi), d->ancora.y};
-                    d->query.clear(); d->lSopra = -1; d->lScroll = d->lScrollObj = 0;
+                    const RECT ic = d->aSchermo({ax - d->S / 2, d->yBaseRiposo() - d->S, ax + d->S / 2, d->yBaseRiposo()});
+                    const float icx = (ic.left + ic.right) / 2.0f - d->rettLauncher.left, icy = (ic.top + ic.bottom) / 2.0f - d->rettLauncher.top;
+                    switch (d->lato) {
+                        case 1: d->ancora = {(LONG)std::clamp(icx, 40 * d->dpi, d->LW - 40 * d->dpi), 0}; break;
+                        case 2: d->ancora = {0, (LONG)std::clamp(icy, 40 * d->dpi, d->LH - 40 * d->dpi)}; break;
+                        case 3: d->ancora = {(LONG)d->LW, (LONG)std::clamp(icy, 40 * d->dpi, d->LH - 40 * d->dpi)}; break;
+                        default: d->ancora = {(LONG)std::clamp(icx, 40 * d->dpi, d->LW - 40 * d->dpi), (LONG)std::min(d->LH + d->LEXTRA - 4, icy)};
+                    }
+                    d->query.clear(); d->lFile.clear(); d->lFileTesto.clear(); d->lFileGen++; d->lSelFile = -1; d->lSopraFile = -1; d->lFileH = 0;
+                    d->lSopra = -1; d->lScroll = d->lScrollObj = 0;
                     d->dirty = true;
                 }
                 d->leggiTuttiGiochi(true);
@@ -2123,12 +2357,22 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             else if (d->menuShell2) { if (SUCCEEDED(d->menuShell2->HandleMenuMsg(m, w, l))) return m == WM_INITMENUPOPUP ? 0 : TRUE; }
             break;
         case WM_MOUSEWHEEL:
+            d->lSelTastiera = false;   // (la rotella ha la precedenza sulla scelta da tastiera)
             d->lScrollObj = std::clamp(d->lScrollObj - GET_WHEEL_DELTA_WPARAM(w) / (double)WHEEL_DELTA * d->lCellaH() * 0.9, 0.0, d->lScrollMax());
             d->lDirty = true; return 0;
         case WM_CHAR:
             if (w == 27) d->chiudiLauncher();
-            // Invio: con una ricerca la prima trovata (o quella scelta con le frecce); senza, quella scelta
-            else if (w == 13) d->avviaApp(!d->query.empty() || d->lSopra == d->lSel ? d->lSel : -1);
+            // Invio: con una ricerca la prima trovata (o quella scelta con le frecce); senza, quella scelta. Una riga dei
+            // file scelta con le frecce: quella. Nessuna app trovata: il primo file, se i risultati sono del testo
+            // scritto (altrimenti la ricerca completa in Esplora file, non un file di un testo vecchio)
+            else if (w == 13) {
+                if (d->lSelFile >= 0) d->apriFile(d->lSelFile);
+                else if (!d->lModoGiochi && d->filtrate.empty() && !d->query.empty()) {
+                    const int r = d->lFileRighe();
+                    d->apriFile(r > 0 && d->lFileTesto == d->query ? 0 : r);
+                }
+                else d->avviaApp(!d->query.empty() || d->lSopra == d->lSel ? d->lSel : -1);
+            }
             else if (w == 8) { if (!d->query.empty()) { d->query.pop_back(); d->filtra(); } }
             else if (w == 127 || (w == 8 && (GetKeyState(VK_CONTROL) & 0x8000))) {   // Ctrl+Backspace: via l'ultima parola
                 while (!d->query.empty() && d->query.back() == L' ') d->query.pop_back();
@@ -2150,6 +2394,28 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             else if (w >= 32) { d->query += (wchar_t)w; d->filtra(); }
             return 0;
         case WM_KEYDOWN: {
+            // Frecce su e giu' fra griglia e file: dall'ultima riga di app (o senza app) la freccia giu' entra nei file;
+            // nei file su e giu' scorrono le righe, fino a "Cerca in Esplora file"; su dalla prima torna alla griglia.
+            // Gli altri tasti di spostamento riportano nella griglia
+            {
+                const int r = d->lFileRighe();
+                if (r >= 0 && (w == VK_UP || w == VK_DOWN)) {
+                    // (con righe di un testo vecchio si sceglie solo "Cerca in Esplora file": R20261119-195000-S2)
+                    const bool validi = d->lFileTesto == d->query;
+                    if (d->lSelFile >= 0) {
+                        if (w == VK_DOWN) d->lSelFile = validi ? std::min(d->lSelFile + 1, r) : r;
+                        else if (d->lSelFile > 0 && validi) d->lSelFile--;
+                        else if (!d->filtrate.empty()) d->lSelFile = -1;
+                        d->lDirty = true;
+                        return 0;
+                    }
+                    if (w == VK_DOWN && (d->filtrate.empty() || d->lSel + 6 >= (int)d->filtrate.size())) { d->lSelFile = validi ? 0 : r; d->lDirty = true; return 0; }
+                }
+                if (d->lSelFile >= 0 && (w == VK_LEFT || w == VK_RIGHT || w == VK_PRIOR || w == VK_NEXT || w == VK_HOME || w == VK_END)) {
+                    d->lSelFile = -1;
+                    if (d->filtrate.empty()) return 0;
+                }
+            }
             int s = d->lSel;
             // pagine: tante righe quante se ne vedono
             const int righePagina = std::max(1, (int)((d->lGrigliaBottom() - d->lGrigliaTop()) / d->lCellaH()));
@@ -2161,7 +2427,7 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             if (d->query.empty() && d->lSopra != d->lSel) s = d->lSel;
             d->lSel = std::clamp(s, 0, std::max(0, (int)d->filtrate.size() - 1));
             if (d->query.empty() && !d->filtrate.empty()) d->lSopra = d->lSel;
-            d->selezionaVisibile(); d->lDirty = true;
+            d->lSelTastiera = true; d->selezionaVisibile(); d->lDirty = true;
             return 0;
         }
         case WM_ACTIVATE:

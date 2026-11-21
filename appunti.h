@@ -47,8 +47,13 @@ public:
         static const UINT ESCLUDI = RegisterClipboardFormatW(L"ExcludeClipboardContentFromMonitorProcessing");
         static const UINT CRONO = RegisterClipboardFormatW(L"CanIncludeInClipboardHistory");
         bool vietato = IsClipboardFormatAvailable(ESCLUDI) != FALSE;
+        // col segno presente si archivia solo se si legge davvero un DWORD che lo permette: illeggibile o troppo corto
+        // vale come vietato (prima contava come permesso, e un testo riservato poteva finire nella cronologia, S2)
         if (!vietato && IsClipboardFormatAvailable(CRONO)) {
-            if (HANDLE hc = GetClipboardData(CRONO)) { if (const DWORD* p = (const DWORD*)GlobalLock(hc)) { vietato = *p == 0; GlobalUnlock(hc); } }
+            vietato = true;
+            if (HANDLE hc = GetClipboardData(CRONO)) {
+                if (GlobalSize(hc) >= sizeof(DWORD)) { if (const DWORD* p = (const DWORD*)GlobalLock(hc)) { vietato = *p == 0; GlobalUnlock(hc); } }
+            }
         }
         Voce v;
         bool c = false;
@@ -92,18 +97,20 @@ public:
     // rimette negli appunti la voce scelta (e la porta in cima)
     bool ricopia(UINT id) {
         auto it = std::find_if(voci.begin(), voci.end(), [id](const Voce& v) { return v.id == id; });
-        if (it == voci.end() || !finestra || !apri()) return false;
-        EmptyClipboard();
+        if (it == voci.end() || !finestra) return false;
+        // il blocco pronto e riempito PRIMA di svuotare gli appunti: con la memoria finita prima si svuotavano e basta,
+        // e un GlobalLock fallito passava un puntatore nullo a memcpy (R20261121-002056-S6)
+        const void* dati = it->immagine ? (const void*)it->dib.data() : (const void*)it->testo.c_str();
+        const size_t n = it->immagine ? it->dib.size() : (it->testo.size() + 1) * sizeof(wchar_t);
+        HGLOBAL g = n ? GlobalAlloc(GMEM_MOVEABLE, n) : nullptr;
+        if (!g) return false;
+        void* p = GlobalLock(g);
+        if (!p) { GlobalFree(g); return false; }
+        memcpy(p, dati, n); GlobalUnlock(g);
+        if (!apri()) { GlobalFree(g); return false; }
         bool ok = false;
-        if (it->immagine) {
-            if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, it->dib.size())) {
-                memcpy(GlobalLock(g), it->dib.data(), it->dib.size()); GlobalUnlock(g);
-                ok = SetClipboardData(CF_DIB, g) != nullptr; if (!ok) GlobalFree(g);
-            }
-        } else if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (it->testo.size() + 1) * sizeof(wchar_t))) {
-            memcpy(GlobalLock(g), it->testo.c_str(), (it->testo.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g);
-            ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr; if (!ok) GlobalFree(g);
-        }
+        if (EmptyClipboard()) ok = SetClipboardData(it->immagine ? CF_DIB : CF_UNICODETEXT, g) != nullptr;
+        if (!ok) GlobalFree(g);   // (riuscito: il blocco ora e' degli appunti)
         CloseClipboard();
         if (ok) {
             ignora++;

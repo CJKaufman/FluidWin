@@ -9,6 +9,7 @@
 #include <windows.h>
 #include "pool.h"
 #include <algorithm>
+#include <new>
 #include <vector>
 
 namespace stampa {
@@ -46,7 +47,8 @@ inline DWORD WINAPI thread(LPVOID p) {
         HGDIOBJ vecchio = SelectObject(mem, dib);
         l->ok = PrintWindow(l->h, mem, PW_RENDERFULLCONTENT);
         GdiFlush();
-        if (l->ok) l->px.assign((const UINT*)bits, (const UINT*)bits + (size_t)l->w * l->hh);
+        // (memoria finita: foto non riuscita invece di un'eccezione che chiuderebbe FluidWin, R20261121-001054-S18)
+        if (l->ok) { try { l->px.assign((const UINT*)bits, (const UINT*)bits + (size_t)l->w * l->hh); } catch (const std::bad_alloc&) { l->ok = FALSE; l->px.clear(); } }
         SelectObject(mem, vecchio);
     }
     if (dib) DeleteObject(dib);
@@ -61,7 +63,8 @@ inline DWORD WINAPI thread(LPVOID p) {
 // Foto in sottofondo: parte adesso e non si aspetta (nullptr = non partita). Poi pronta() a ogni fotogramma e,
 // quando lo e', prendi(); se non serve piu', abbandona(). Tutta la finestra (w x hh = GetWindowRect), BGRA
 inline Lavoro* avvia(HWND h, int w, int hh, int priorita = THREAD_PRIORITY_NORMAL) {
-    if (w <= 0 || hh <= 0 || !IsWindow(h) || IsHungAppWindow(h)) return nullptr;
+    // (al massimo 8K x 8K: una finestra piu' grande e' un errore o un caso che non vale due copie in memoria)
+    if (w <= 0 || hh <= 0 || (long long)w * hh > 7680LL * 4320 * 2 || !IsWindow(h) || IsHungAppWindow(h)) return nullptr;
     if (!prenota(h)) return nullptr;   // ce n'e' gia' una ferma su questa finestra
     Lavoro* l = new Lavoro{h, w, hh, {}, FALSE, CreateEventW(nullptr, TRUE, FALSE, nullptr), 2};
     // nel pool di thread (vedi pool.h): "lungo" perche' con un'app bloccata PrintWindow puo' non tornare per molto

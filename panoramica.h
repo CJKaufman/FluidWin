@@ -17,7 +17,9 @@ public:
     std::function<bool(HWND)> idonea;   // finestra d'app normale
     bool aperta() const { return inCorso; }
     // va sulla finestra scelta (Alt lasciato dopo Alt+Tab)
-    void scegliSelezionata() { diag += L"; alt lasciato"; if (inCorso && !chiudendo && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; } }
+    // (sempre chiusa lasciando Alt: col mouse sullo spazio vuoto fra le miniature restava aperta, S8. Niente sotto: nessuna
+    // scelta, come Esc)
+    void scegliSelezionata() { diag += L"; alt lasciato"; if (inCorso && !chiudendo) { chiudendo = true; scelta = sopra >= 0 && sopra < (int)el.size() ? el[sopra].h : nullptr; } }
     // aperta e non ancora in chiusura (un Tab con Alt premuto si puo' mandare alla finestra)
     bool attiva() const { return inCorso && !chiudendo; }
     std::wstring diag;   // per il registro: com'e' andata l'ultima apertura con Alt+Tab
@@ -44,9 +46,14 @@ public:
             DWORD cl = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cl, sizeof(cl));
             if (!cl) f.push_back(h);
         }
+        // un Tab avanti e uno indietro (passi 0): si resta sulla finestra di partenza, come Alt+Tab di Windows. Prima si
+        // andava alla prima dell'elenco (R20261121-121040 su S9)
+        if (passi == 0) return fg;
         if (f.empty()) return nullptr;
+        // avanti: la prima e' quella usata prima; indietro (Maiusc): la prima e' l'ultima dell'elenco. Prima anche i passi
+        // all'indietro toglievano uno, e il primo Alt+Maiusc+Tab sceglieva la penultima (R20261121-003154-S9)
         const int n = (int)f.size();
-        const HWND h = f[(((passi - 1) % n) + n) % n];
+        const HWND h = f[passi > 0 ? (passi - 1) % n : ((passi % n) + n) % n];
         if (IsIconic(h)) ripristinaAltrui(h);   // (un'app bloccata non ferma FluidWin; portaDavanti ripiega da sola)
         portaDavanti(h);
         return h;
@@ -63,7 +70,9 @@ public:
         v.aggiornaTema();
         schermo = vetro::areaPrincipale();
         v.posiziona(schermo.left, schermo.top, schermo.right - schermo.left, schermo.bottom - schermo.top, HWND_TOPMOST, SWP_SHOWWINDOW);
-        if (!fTitolo) fTitolo = v.formato(12.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+        // (rifatto se lo schermo ha un'altra scala: prima restava quello della prima apertura, S15)
+        if (fTitolo && fDpi != v.dpi) { fTitolo->Release(); fTitolo = nullptr; }
+        if (!fTitolo) { fTitolo = v.formato(12.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER); fDpi = v.dpi; }
         // con Alt+Tab la griglia e' nell'ordine in cui Tab le scorre, come il selettore di Windows: prima quella in primo
         // piano, poi le altre dalla piu' recente. Nell'ordine di lettura (raccogli) Tab saltava qua e la' nella griglia.
         // Dall'angolo resta l'ordine di lettura, con meno incroci mentre le finestre si dispongono
@@ -79,7 +88,7 @@ public:
         std::sort(perZ.begin(), perZ.end(), [](const Elemento* a, const Elemento* b) { return a->z > b->z; });
         for (Elemento* e : perZ) if (FAILED(DwmRegisterThumbnail(v.fin, e->h, &e->th))) e->th = nullptr;
         prima = GetForegroundWindow();
-        inCorso = true; chiudendo = false; giaDavanti = false; scelta = nullptr; sopra = -1; k = 0;
+        inCorso = true; chiudendo = false; giaDavanti = false; disattivata = false; scelta = nullptr; sopra = -1; k = 0;
         altTab = daAltTab; ordZ.clear(); GetCursorPos(&mouseInizio);
         if (daAltTab) {
             // Tab va avanti nell'ordine di sovrapposizione (le ultime usate prima), che e' anche quello della griglia;
@@ -110,7 +119,8 @@ public:
             diag += L"; scelta " + std::wstring(c) + (GetForegroundWindow() == scelta ? L" (davanti)" : L" (NON davanti)");
         } else {
             diag += L"; nessuna scelta";
-            if (prima && IsWindow(prima)) SetForegroundWindow(prima);
+            // (chiusa perche' l'utente ha attivato un'altra app: il primo piano resta a lei, S7)
+            if (!disattivata && prima && IsWindow(prima)) SetForegroundWindow(prima);
         }
     }
 
@@ -149,7 +159,7 @@ public:
                 return true;
             // un'altra finestra in primo piano: si chiude senza scegliere. Non se si sta gia' chiudendo con una scelta
             // (Alt lasciato): la scelta si perdeva e si tornava alla finestra di prima
-            case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && inCorso && !chiudendo) { diag += L"; disattivata"; chiudendo = true; scelta = nullptr; } return true;
+            case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && inCorso && !chiudendo) { diag += L"; disattivata"; chiudendo = true; scelta = nullptr; disattivata = true; } return true;
             case WM_CLOSE: if (inCorso) { chiudendo = true; scelta = nullptr; } return true;
         }
         return false;
@@ -177,6 +187,9 @@ private:
     bool giaDavanti = false;   // la scelta e' gia' stata portata davanti all'inizio della chiusura (vedi ciclo)
     int sopra = -1;
     double k = 0;   // 0 finestre al loro posto, 1 griglia
+    double kChiusura = 1;          // k all'inizio della chiusura (la curva parte da li', vedi ciclo)
+    bool disattivata = false;      // chiusa perche' un'altra app e' diventata attiva (il primo piano resta a lei)
+    float fDpi = 0;                // scala con cui e' stato fatto fTitolo
 
     void raccogli() {
         el.clear();
@@ -305,7 +318,7 @@ private:
             }
             const double t = ora();
             if (chiudendo && tC < 0) {
-                tC = t;
+                tC = t; kChiusura = std::min(k, 1.0);
                 // La finestra scelta viene davanti subito, sotto la panoramica che si chiude: prima arrivava solo a
                 // chiusura finita, 280-300 ms dopo aver lasciato Alt (misurato), e Alt+Tab sembrava lento. Le ridotte a
                 // icona restano a dopo: ripristinarle fa partire il genio, che a panoramica aperta non si disegna
@@ -316,7 +329,9 @@ private:
             const double durApri = altTab ? 0.22 : 0.30, durChiudi = altTab ? 0.20 : 0.26;
             double nuovo;
             if (tC < 0) nuovo = vetro::uscita(t / durApri);                       // apertura: verso la griglia
-            else nuovo = std::min(k, 1.0) * (1 - vetro::uscita((t - tC) / durChiudi));   // chiusura: tutte tornano al loro posto
+            // chiusura: tutte tornano al loro posto. Da dov'erano all'inizio della chiusura, fisso: prima si partiva dal k
+            // del fotogramma prima, e a 144 Hz si chiudeva piu' in fretta che a 60 (S13)
+            else nuovo = kChiusura * (1 - vetro::uscita((t - tC) / durChiudi));
             if (tC >= 0 && t - tC >= durChiudi) { k = 0; aggiornaMiniature(); DwmFlush(); return; }
             const bool cambia = std::abs(nuovo - k) > 1e-4;
             k = nuovo;

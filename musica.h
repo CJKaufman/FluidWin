@@ -20,6 +20,7 @@
 #include <vector>
 #include <thread>
 #include <mutex>
+#include <deque>
 #include <atomic>
 #include <algorithm>
 
@@ -102,12 +103,13 @@ public:
 
     // comandi: li esegue il thread di lettura (che possiede la sessione)
     enum { NIENTE, PLAY_PAUSA, AVANTI, INDIETRO };
-    void comando(int c) { daFare = c; }
+    // in coda, nell'ordine dei clic: prima un posto solo, e due "Avanti" veloci diventavano un salto (S19)
+    void comando(int c) { std::lock_guard<std::mutex> g(mx); if (daFare.size() < 8) daFare.push_back(c); }
 
 private:
     std::thread lavoro;
     std::atomic<bool> basta{false};
-    std::atomic<int> daFare{NIENTE};
+    std::deque<int> daFare;   // protetta da mx
     std::mutex mx;
     Brano brano;
     void* gestore = nullptr;   // IGlobalSystemMediaTransportControlsSessionManager
@@ -125,7 +127,8 @@ private:
             if (!leggi(false) && !basta) { Sleep(300); leggi(true); }
             // un comando si esegue subito; poi si rilegge presto (lo stato cambia in poco tempo)
             for (int i = 0; i < 10 && !basta; i++) {
-                const int c = daFare.exchange(NIENTE);
+                int c = NIENTE;
+                { std::lock_guard<std::mutex> g(mx); if (!daFare.empty()) { c = daFare.front(); daFare.pop_front(); } }
                 if (c != NIENTE) { esegui(c); Sleep(150); break; }
                 Sleep(100);
             }

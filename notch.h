@@ -9,6 +9,9 @@
 // fermo sopra per un attimo (senza tasti premuti) o mentre mostra una notifica. Un clic sull'ora apre le notifiche.
 // Con un'app a schermo intero (video, presentazioni, giochi) non c'e' (vedi modo()): il volume lo mostra allora
 // l'indicatore di vetro.
+// Notch spento nelle impostazioni (1.3.0, "a scomparsa"): a riposo (ora, musica, timer) sta sopra il bordo dello schermo;
+// per volume, notifiche, avvisi, sveglia del timer e scaffale scende dall'alto e poi risale. Musica e timer li mostra il
+// dock (una capsula all'inizio, con i loro controlli al passaggio del mouse: comandoMusica()).
 //
 // Disegno: una finestra a strati di misura fissa (la piu' grande che serve), la forma disegnata al centro con
 // Direct2D software in un DIB tenuto da parte; ogni fotogramma e' un UpdateLayeredWindow. La trasparenza col mouse
@@ -45,7 +48,9 @@ enum Modo { NORMALE = 0, NASCOSTO = 2 };
 
 class Notch {
 public:
+    inline static void (*registroScaffale)(const char*, unsigned long) = nullptr;
     std::function<void()> clic;             // clic sull'ora: le notifiche
+    std::function<void(const std::wstring&)> apriMusica;   // clic sulla musica: l'app che suona (AUMID dato da Windows)
     std::function<void()> clicNotifica;     // clic sulla notifica mostrata: apre l'app
     std::function<void()> chiudiNotifica;   // la x sulla notifica: la toglie
     std::function<void()> notificaFinita;   // la notifica non c'e' piu' (chi la manda puo' passare alla prossima)
@@ -111,12 +116,36 @@ public:
         bersagli(); ridisegna();
     }
 
-    // notch acceso o spento dalle impostazioni. Spento non si vede mai: volume, notifiche e avvisi rispondono false
-    // (volume e notifiche li mostrano allora l'indicatore e il banner di vetro)
+    // notch acceso (sempre visibile) o spento dalle impostazioni: spento e' "a scomparsa", compare solo quando ha
+    // qualcosa da mostrare (vedi l'inizio del file). Prima spento non si vedeva mai e volume e notifiche passavano al vetro
+    // (indicatore e banner): ora il vetro resta solo sopra le app a schermo intero (modo NASCOSTO)
+    // Accendendolo scende dal bordo, spegnendolo risale (la stessa molla degli eventi a scomparsa): prima cambiava di colpo
     void abilita(bool si) {
         if (si == abilitato) return;
         abilitato = si;
-        visibilita();
+        if (!si) sopra = false;
+        superficie();         // (spento le ali dei bordi animati vogliono una superficie piu' larga)
+        sincronizzaSegni();   // luna e tazzina gia' giuste mentre scende, senza aspettare il prossimo giro di controlla
+        bersagli(); anima();
+        if (!animando) ridisegna();   // (non visibile: niente animazione, solo il disegno)
+    }
+    bool fisso() const { return abilitato; }
+    void aggiornaAngoli() { ridisegna(); }   // impostazione "Angoli" cambiata (vedi ridisegna)
+    // col dock in alto il notch sta sul bordo in basso (impostazione "Posizione" del dock)
+    bool basso = false;
+    void inBasso(bool b) { if (b != basso) { basso = b; ridisegna(); } }
+
+    // musica e timer per la capsula del dock (notch a scomparsa)
+    const musica::Brano& musicaOra() const { return brano; }
+    // tasti della musica dalla capsula del dock: 0 indietro, 1 play/pausa, 2 avanti
+    void comandoMusica(int b) {
+        if (b < 0 || b > 2) return;
+        lettore.comando(b == 0 ? musica::Lettore::INDIETRO : b == 1 ? musica::Lettore::PLAY_PAUSA : musica::Lettore::AVANTI);
+        if (b == 1) brano.suona = !brano.suona;   // subito, senza aspettare la prossima lettura
+        // fra poco si rilegge lo stato vero anche se il lettore non ha cambiato versione: un comando rifiutato
+        // lasciava il simbolo al contrario per sempre (R20261121-002056-S11)
+        risincronizzaAlle = adesso() + 1.5;
+        if (visibile && !animando && salita() < 0.5) ridisegna();
     }
 
     // volume 0..1 dai tasti; false se il notch non si vede (allora lo mostra l'indicatore di vetro)
@@ -134,7 +163,12 @@ public:
     bool notifica(const std::wstring& app, const std::wstring& titolo, const std::wstring& testo, const std::vector<UINT>& px, int w, int h) {
         if (!visibile || modoAtt != NORMALE) return false;
         nApp = app; nTitolo = titolo; nTesto = testo; nPx = px; nW = w; nH = h; iconaNuova = true;
-        notificaAttiva = true; fineNotifica = adesso() + 5.5;
+        // la pausa conta dall'arrivo: stesso istante per la scadenza e per il primo controllo. Prima il primo controllo
+        // aggiungeva anche il tempo di prima (R20261121-120306-S3); con 0 invece perdeva quello fra arrivo e primo
+        // controllo (R20261121-123420-S3)
+        const double ora = adesso();
+        notificaAttiva = true; fineNotifica = ora + 5.5; tControllo = ora;
+        tOnda = adesso();
         bersagli(); anima();
         return true;
     }
@@ -147,6 +181,7 @@ public:
     bool avviso(const std::wstring& testo, int simbolo, int valore, bool acceso) {
         if (!visibile) return false;
         testoAvviso = testo; avvisoAcceso = acceso; simboloAvviso = simbolo; valoreAvviso = valore;
+        tOnda = adesso();
         larghezzaAvviso = fOra ? larghezza(testo, fPiccolo ? fPiccolo : fOra) : 160 * dpi;
         fineAvviso = adesso() + (simbolo == sensori::S_PUNTINA ? 1.6 : 2.5);
         bersagli(); anima();
@@ -155,6 +190,25 @@ public:
 
 private:
     enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA, SCAFFALE, TIMER_APERTO };
+    enum Bordo { CLASSICO, MAREA, ECO, VELO };
+    static constexpr double DURATA_ECO = 0.78;
+    double tOnda = 0;
+    bool sondaFile = false;
+    Bordo bordo() const {
+        if (abilitato) return CLASSICO;
+        if (scena == VOLUME) return MAREA;
+        if (scena == SCAFFALE) return VELO;
+        if (scena == NOTIFICA) return ECO;
+        if (scena == AVVISO) {
+            if (simboloAvviso == sensori::S_ALIMENTAZIONE) return avvisoAcceso ? ECO : MAREA;
+            if (simboloAvviso == sensori::S_CUFFIE || simboloAvviso == sensori::S_BATTERIA) return ECO;
+        }
+        return CLASSICO;
+    }
+    RECT zonaFile() const {
+        int cx = posX() + W2 / 2, sx = (int)std::round(100 * dpi), h = (int)std::round(18 * dpi);
+        return {cx - sx, basso ? schermo.bottom - h : schermo.top, cx + sx, basso ? schermo.bottom : schermo.top + h};
+    }
 
     HWND fin = nullptr;
     bool acceso = false, visibile = false, abilitato = true;
@@ -185,9 +239,12 @@ private:
         }
     };
     Molla mw, mh, mr;
+    Molla my;   // a scomparsa: quanto la forma e' salita sopra il bordo dello schermo (0 = giu', tutta visibile)
+    Molla distensione;  // avvicina le ali al limite della superficie durante l'uscita
     int scena = ORA, scenaPrima = ORA;
     double tScena = 0, tPrec = 0;
     bool animando = false;
+    D2D1_MATRIX_3X2_F base = D2D1::Matrix3x2F::Identity();   // a scomparsa: la salita sopra il bordo (contenuti)
     float alfa = 1;   // alfa della finestra (sempre piena: UpdateLayeredWindow la usa a ogni fotogramma)
 
     // contenuti
@@ -200,26 +257,32 @@ private:
     double tSegnoSilenzio = -10, tSegnoSveglio = -10;   // quando sono comparse o sparite (dissolvenza)
     // (in uscita piu' in fretta: il notch intanto si stringe e il segno non deve arrivare sopra l'ora)
     float alfaSegno(bool acceso, double t0) const { const float k = (float)std::clamp((adesso() - t0) / (acceso ? 0.3 : 0.14), 0.0, 1.0); const float e = k * k * (3 - 2 * k); return acceso ? e : 1 - e; }
-    bool notificaAttiva = false; double fineNotifica = 0;
+    bool notificaAttiva = false; double fineNotifica = 0, tControllo = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
     musica::Lettore lettore; musica::Brano brano; UINT versioneBrano = 0xFFFFFFFF; bool copertinaNuova = false;
+    double risincronizzaAlle = 0;   // dopo play/pausa: quando rileggere lo stato vero (vedi comandoMusica)
 
     // mouse
     bool sopra = false, cliccabileOra = false;
     int attesa = 0, fuori = 0, pulsanteSopra = -1;
     bool sopraX = false, mouseDentro = false;
     ULONGLONG tCima = 0;
+    // il mouse sopra conta solo col notch fisso: a scomparsa musica e timer li controlla il dock, e passare sopra una
+    // notifica non deve lasciare aperta la musica quando la notifica finisce
+    bool sopraVale() const { return sopra && abilitato; }
+    static bool aRiposo(int s) { return s == ORA || s == MUSICA || s == TIMER; }
 
     std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero, fGrande}; }
 
     static double adesso() { return vetro::secondi(); }
 
     void visibilita() {
-        const bool si = acceso && abilitato && modoAtt != NASCOSTO && fin;
+        const bool si = acceso && modoAtt != NASCOSTO && fin;   // (spento: a scomparsa, la finestra c'e' lo stesso)
         if (si == visibile) return;
         visibile = si;
         if (si) {
             KillTimer(fin, 2); SetTimer(fin, 2, 50, nullptr);   // mouse, musica, scadenze
+            sincronizzaSegni();   // (cambiati mentre era nascosto: controlla non girava)
             bersagli(true); ridisegna();
             ShowWindow(fin, SW_SHOWNOACTIVATE);
             SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -252,49 +315,91 @@ private:
         if (t < fineAvviso) return AVVISO;
         if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
-        if (trascinoSopra || t < fineScaffale) return SCAFFALE;
-        if (sopra && comodita::timerAttivo()) return TIMER_APERTO;   // col mouse sopra: il timer grande, +1 min e stop
-        if (sopra && !scaffale.empty()) return SCAFFALE;
-        if (sopra && brano.c) return APERTO;
+        if (trascinoSopra || (abilitato ? t < fineScaffale : !scaffale.empty())) return SCAFFALE;
+        // col mouse sopra (solo col notch fisso): il timer grande (+1 min e stop), lo scaffale, la musica aperta
+        const bool sv = sopraVale();
+        if (sv && comodita::timerAttivo()) return TIMER_APERTO;
+        if (sv && !scaffale.empty()) return SCAFFALE;
+        if (sv && brano.c) return APERTO;
         if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
         return ORA;
+    }
+    // Microfono e webcam in uso: pallini arancione e verde, come su iPhone. Solo col notch acceso: stanno dentro, a destra,
+    // in uno spazio che il notch a riposo (ora, musica, timer) si tiene in piu'. Prima stavano fuori, nel vuoto accanto al
+    // notch; col notch spento non ci sono (l'utente non li voleva nel dock)
+    int nPunti() const {
+        if (!abilitato) return 0;
+        const sensori::Sensori& se = sensori::Sensori::io();
+        return (se.micApp.empty() ? 0 : 1) + (se.camApp.empty() ? 0 : 1);
+    }
+    float puntiW() const { const int n = nPunti(); return n ? (8.0f + 8.0f * n) * dpi : 0.0f; }
+    // con musica e timer a riposo: posto per tazzina (a sinistra) e luna (a destra), uguale ai due lati. Prima i due
+    // segni c'erano solo con l'ora: con un brano in riproduzione non si vedevano mai (non disturbare acceso e nessun segno)
+    float segniW() const { return (segnoSveglio || segnoSilenzio) ? 22 * dpi : 0.0f; }
+    // s: la scena. Con l'ora i pallini stanno a meta' fra la fine della data e il bordo (stesso spazio dai due lati; con
+    // la luna accesa fra lei e il bordo); con musica e timer nel loro spazio a destra
+    void puntiSensori(int s, float h, float a) {
+        const int n = nPunti();
+        if (!n) return;
+        const sensori::Sensori& se = sensori::Sensori::io();
+        const float d = dpi, Rv = (W2 + (float)mw.x) / 2;   // (il bordo vero, che con la molla si muove)
+        float x0 = Rv - puntiW();                            // inizio dello spazio libero a destra
+        if (s == ORA) x0 = segnoSilenzio ? Rv - puntiW() - 8 * d : W2 / 2.0f + (lo + std::round(7 * d) + lg) / 2;   // (fine della data, vedi ora)
+        float cx = (x0 + Rv) / 2 - (n - 1) * 4 * d;
+        if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); cx += 8 * d; }
+        if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, a); rt->FillEllipse({{cx, h / 2}, 2.8f * d, 2.8f * d}, pen); }
     }
 
     void misura(int s, float& w, float& h, float& R) const {
         const float d = dpi;
         switch (s) {
-            case MUSICA:   w = largoOra + 62 * d; h = 22 * d; R = 9 * d; break;
+            case MUSICA:   w = largoOra + 62 * d + 2 * puntiW() + 2 * segniW(); h = 22 * d; R = 9 * d; break;   // (puntiW: microfono e webcam)
             case APERTO:   w = 372 * d; h = 96 * d; R = 26 * d; break;
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
             case SCAFFALE: w = 372 * d; h = 96 * d; R = 26 * d; break;
             // avviso: largo quanto simbolo e testo con un margine uguale ai due lati (vedi AVVISO in disegna)
             case AVVISO:   w = std::clamp(larghezzaAvviso + (AV_SIMBOLO + AV_SPAZIO + 2 * AV_MARGINE) * d, 150 * d, 372 * d); h = 32 * d; R = 14 * d; break;
-            case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
+            case TIMER:    w = largoOra + 104 * d + 2 * puntiW() + 2 * segniW(); h = 22 * d; R = 9 * d; break;
             case TIMER_APERTO: w = 312 * d; h = 60 * d; R = 24 * d; break;
             case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
                            {   // posto per scaffale e tazzina (a sinistra) e luna (a destra), uguale ai due lati: l'ora resta al centro
-                               const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = segnoSilenzio ? 22 * d : 0;
+                               const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = (segnoSilenzio ? 22 * d : 0) + puntiW();
                                w += 2 * std::max(sx, dx);
                            }
-                           if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
+                           if (sopraVale()) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
+        }
+        if (!abilitato) {
+            if (s == SCAFFALE && scaffale.empty()) { w = 196 * d; h = 32 * d; }
+            if (s == VOLUME) { w = 216 * d; h = 28 * d; }
+            if (s == AVVISO && simboloAvviso != sensori::S_PUNTINA) { w = std::min(w, 316 * d); h = 28 * d; }
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
     }
 
     // aggiorna scena e misure da raggiungere; 'subito' salta l'animazione
+    // A scomparsa: verso una scena di riposo il notch prima risale mostrando ancora quella di prima, e solo quando e' tutto
+    // sopra il bordo passa (di colpo, non si vede) a quella di riposo; verso un evento scende cambiando forma
     void bersagli(bool subito = false) {
-        const int s = scenaVoluta();
+        int s = scenaVoluta();
+        const bool via = !abilitato && aRiposo(s);
+        const bool salito = my.obj > 0 && my.x >= my.obj - 0.5 && my.v == 0;   // gia' tutto sopra il bordo, fermo
+        if (via && !aRiposo(scena) && !subito && visibile && mw.x != 0 && !salito) s = scena;
+        const bool scatto = via && salito && s != scena;   // (dietro il bordo: niente dissolvenza ne' molla)
         if (s != scena) { scenaPrima = scena; scena = s; tScena = adesso(); }
         float w, h, R; misura(scena, w, h, R);
         mw.obj = w; mh.obj = h; mr.obj = R;
-        if (subito || !visibile || mw.x == 0) {
+        my.obj = via ? h + std::round(8 * dpi) : 0;   // (anche i raccordi, alti 6 px)
+        distensione.obj = via && bordo() != CLASSICO ? 100.0 : 0.0;
+        if (subito || scatto || !visibile || mw.x == 0) {
             mw.x = w; mh.x = h; mr.x = R; mw.v = mh.v = mr.v = 0; scenaPrima = scena;
+            my.x = my.obj; my.v = 0;
+            distensione.x = distensione.obj; distensione.v = 0;
             return;
         }
-        if (mw.x != w || mh.x != h || mr.x != R || scenaPrima != scena) anima();
+        if (mw.x != w || mh.x != h || mr.x != R || my.x != my.obj || scenaPrima != scena) anima();
     }
 
     void anima() {
@@ -307,10 +412,13 @@ private:
         const double t = adesso(), dt = std::clamp(t - tPrec, 0.001, 0.034);
         tPrec = t;
         bool ancora = false;
-        for (Molla* m : {&mw, &mh, &mr}) ancora |= m->passo(dt);
+        for (Molla* m : {&mw, &mh, &mr, &my}) ancora |= m->passo(dt);
+        // Usa la stessa scala in pixel delle altre molle, anche per la soglia di arresto.
+        ancora |= distensione.passo(dt);
         if (std::fabs(livelloVis - livello) > 0.002f) { livelloVis += (livello - livelloVis) * (float)std::min(1.0, dt * 18); ancora = true; }
         else livelloVis = livello;
         if (scenaPrima != scena) { if (t - tScena < 0.32) ancora = true; else scenaPrima = scena; }   // (dissolvenza: 0,06 + 0,24)
+        if (bordo() == ECO && t - tOnda < DURATA_ECO) ancora = true;
         if ((scena == TIMER || scena == TIMER_APERTO) && t - tScena < 0.45) ancora = true;   // comparsa del timer
         if (t - tSegnoSveglio < 0.32 || t - tSegnoSilenzio < 0.32) ancora = true;           // tazzina e luna
         ridisegna();
@@ -321,16 +429,36 @@ private:
 
     RECT corpo() const {   // la forma sullo schermo (coordinate dello schermo)
         const int x = posX() + (int)((W2 - mw.x) / 2);
-        return {x, schermo.top, x + (int)mw.x, schermo.top + (int)mh.x};
+        const int alto = std::max(0, (int)(mh.x - salita()));   // (a scomparsa la parte salita oltre il bordo non c'e')
+        if (basso) return {x, (int)schermo.bottom - alto, x + (int)mw.x, (int)schermo.bottom};
+        return {x, schermo.top, x + (int)mw.x, schermo.top + alto};
     }
+    double salita() const { return std::max(0.0, my.x); }   // (la molla puo' scendere un poco sotto lo 0: niente stacco)
     int posX() const { return schermo.left + (schermo.right - schermo.left - W2) / 2; }
+    int yFin() const { return basso ? (int)schermo.bottom - H2 : (int)schermo.top; }   // cima della finestra sullo schermo
+    // col notch in basso i contenuti della scena s stanno contro il bordo in basso della finestra: quanto scendono
+    // rispetto al notch in alto (i contenuti si calcolano sempre come in alto)
+    float scesa(int s) const { if (!basso) return 0; float w, h, R; misura(s, w, h, R); return (float)H2 - h; }
 
+    // luna e tazzina dallo stato di comodita.h (che vale anche col notch non visibile); true se e' cambiato qualcosa
+    bool sincronizzaSegni() {
+        const double t = adesso();
+        bool cambiato = false;
+        if (comodita::silenzio() != segnoSilenzio) { segnoSilenzio = comodita::silenzio(); tSegnoSilenzio = t; cambiato = true; }
+        if (comodita::sveglio() != segnoSveglio) { segnoSveglio = comodita::sveglio(); tSegnoSveglio = t; cambiato = true; }
+        return cambiato;
+    }
     void controlla() {
         if (!visibile) return;
         const double t = adesso();
         bool ridisegnare = false;
         // musica
         const UINT v = lettore.versione();
+        if (risincronizzaAlle > 0 && t >= risincronizzaAlle) {
+            risincronizzaAlle = 0;
+            const bool vero = lettore.stato().suona;
+            if (vero != brano.suona) { brano.suona = vero; ridisegnare = true; }
+        }
         if (v != versioneBrano) {
             versioneBrano = v;
             musica::Brano b = lettore.stato();
@@ -344,17 +472,17 @@ private:
             if (sec != secondoTimer) { secondoTimer = sec; ridisegnare = true; }
         }
         if (scena == SUONA) ridisegnare = true;
-        // microfono e webcam (pallini fuori dal notch)
-        if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; }
+        // microfono e webcam (pallini dentro il notch: il loro spazio cambia la sua larghezza)
+        if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; bersagli(); anima(); }
         // lunetta (non disturbare) e tazzina (tieni sveglio)
-        if (comodita::silenzio() != segnoSilenzio) { segnoSilenzio = comodita::silenzio(); tSegnoSilenzio = t; bersagli(); anima(); }
-        if (comodita::sveglio() != segnoSveglio) { segnoSveglio = comodita::sveglio(); tSegnoSveglio = t; bersagli(); anima(); }
+        if (sincronizzaSegni()) { bersagli(); anima(); }
         // mouse
         POINT p; GetCursorPos(&p);
         RECT c = corpo();
         const int m = (int)(4 * dpi);
         RECT largo = {c.left - m, c.top, c.right + m, c.bottom + m};
-        const bool dentro = PtInRect(&largo, p) != FALSE;
+        if (basso) largo = {c.left - m, c.top - m, c.right + m, c.bottom};   // (in basso si allarga verso l'alto)
+        const bool dentro = c.bottom > c.top + 2 && PtInRect(&largo, p) != FALSE;   // (salito sopra il bordo: mai)
         const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
         // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
         if (!sopra) {
@@ -365,21 +493,30 @@ private:
             if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
         }
         // tasto sotto il mouse (aperto) e x della notifica
-        const POINT pc = {p.x - posX(), p.y - schermo.top};
+        const POINT pc = {p.x - posX(), p.y - yFin() - (int)scesa(scena)};   // (coordinate dei contenuti)
         const int ps = scena == APERTO ? pulsante(pc.x, pc.y) : scena == TIMER_APERTO ? tastoTimerIn(pc.x, pc.y) : -1;
         const bool sx = scena == NOTIFICA && dentro && sullaX(pc.x, pc.y);
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
         // scadenze: volume e notifica (ferma finche' c'e' sopra il mouse)
+        // (i 5,5 s contano solo mentre la notifica si vede: coperta da una scena piu' importante, per esempio la sveglia
+        // del timer, il tempo si ferma. Prima poteva scadere senza essere mai comparsa, R20261121-002056-S5)
+        if (notificaAttiva && scena != NOTIFICA && tControllo > 0) fineNotifica += t - tControllo;
+        tControllo = t;
         if (notificaAttiva && t >= fineNotifica) { if (dentro) fineNotifica = t + 1.5; else finisciNotifica(); }
         // con il tasto premuto e il mouse sul notch (un file trascinato da Esplora file) il notch si fa trovare dal
         // trascinamento: trasparente al mouse, Windows non glielo darebbe mai
-        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro) || scena == SUONA || scena == SCAFFALE || (tasti && dentro)));
+        // (a scomparsa, salito sopra il bordo: mai cliccabile, la cima dello schermo resta alle finestre)
+        const bool giu = c.bottom > c.top + 2;
+        const RECT zona = zonaFile();
+        const bool vicino = !abilitato && modoAtt == NORMALE && tasti && PtInRect(&zona, p);
+        if (vicino != sondaFile) { sondaFile = vicino; ridisegnare = true; }
+        cliccabile(modoAtt == NORMALE && (vicino || (giu && (sopraVale() || (scena == NOTIFICA && dentro) || scena == SUONA || scena == SCAFFALE || (tasti && dentro)))));
         const int prima = scena;
         bersagli();
         if (scena != prima) ridisegnare = false;   // ci pensa l'animazione
         if (ridisegnare && !animando) ridisegna();
         // le barrette della musica si muovono: si ridisegna solo il loro rettangolino (tutto il notch costava ~3% di CPU)
-        else if (brano.suona && (scena == MUSICA || scena == APERTO) && !animando) ridisegnaBarrette();
+        else if (brano.suona && (scena == MUSICA || scena == APERTO) && !animando && salita() < 0.5) ridisegnaBarrette();
         // ogni 2 s di nuovo in cima (un'app sempre in primo piano aperta dopo poteva coprirlo)
         if (GetTickCount64() - tCima > 2000) { tCima = GetTickCount64(); SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
     }
@@ -446,11 +583,15 @@ private:
             const int b = pulsante(x, y);
             if (b >= 0) {
                 lettore.comando(b == 0 ? musica::Lettore::INDIETRO : b == 1 ? musica::Lettore::PLAY_PAUSA : musica::Lettore::AVANTI);
-                if (b == 1) brano.suona = !brano.suona;   // subito, senza aspettare la prossima lettura
+                // subito, senza aspettare la prossima lettura; poi si rilegge lo stato vero, se l'app rifiuta la pausa
+                // (come dalla capsula: R20261121-120306 su S11)
+                if (b == 1) { brano.suona = !brano.suona; risincronizzaAlle = adesso() + 1.5; }
                 ridisegna();
                 return;
             }
         }
+        // musica (piccola o aperta, fuori dai tasti): l'app che sta riproducendo in primo piano
+        if ((scena == MUSICA || scena == APERTO) && !brano.aumid.empty() && apriMusica) { apriMusica(brano.aumid); return; }
         if (clic) clic();
     }
 
@@ -466,7 +607,7 @@ private:
     }
 
     void superficie() {
-        const int w = (int)std::round(392 * dpi), h = (int)std::round(100 * dpi);   // la scena piu' grande + i raccordi
+        const int w = (int)std::round((abilitato ? 392 : 560) * dpi), h = (int)std::round(100 * dpi);
         if (rt && w == W2 && h == H2) return;
         libera();
         W2 = w; H2 = h;
@@ -498,7 +639,7 @@ private:
         const float d = dpi;
         auto crea = [&](const wchar_t* fam, DWRITE_FONT_WEIGHT p, float px, IDWriteTextFormat** f, bool taglia, DWRITE_TEXT_ALIGNMENT al = DWRITE_TEXT_ALIGNMENT_LEADING) {
             if (FAILED(fdw->CreateTextFormat(fam, nullptr, p, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * d, L"it-it", f)) || !*f) return;
-            (*f)->SetTextAlignment(al); (*f)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); (*f)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            testi::allinea(*f, al); (*f)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); (*f)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             if (taglia) {   // testo troppo lungo: finisce con "…"
                 IDWriteInlineObject* e = nullptr; fdw->CreateEllipsisTrimmingSign(*f, &e);
                 DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0}; (*f)->SetTrimming(&tr, e);
@@ -571,45 +712,94 @@ private:
         rt->Clear(D2D1::ColorF(0, 0, 0, 0));
         const float f = std::round(6 * dpi);   // raccordo con il bordo in alto
         const float w = (float)std::max(2.0, mw.x), h = (float)std::max((double)f + 2, mh.x);
-        const float R = std::clamp((float)mr.x, 0.0f, std::min(w / 2, h - f));
+        // impostazione "Angoli": raccordi e angoli in basso in proporzione (squadrati: un rettangolo attaccato al bordo)
+        const float k = raggio::fattore(), fr = f * k;
+        const float R = std::clamp((float)mr.x, 0.0f, std::min(w / 2, h - f)) * k;
         const float x0 = (W2 - w) / 2, x1 = x0 + w;
+        // a scomparsa: forma e contenuti salgono insieme sopra il bordo (tutto sopra: niente da disegnare)
+        const float su = (float)salita();
+        const bool tutta = su < h + 1;
+        base = su > 0 ? D2D1::Matrix3x2F::Translation(0, -su) : D2D1::Matrix3x2F::Identity();
+        // in basso (dock in alto): la forma si capovolge contro il bordo in basso e scende oltre; i contenuti restano
+        // dritti (base sposta solo, vedi contenuto)
+        if (basso) base = D2D1::Matrix3x2F::Translation(0, su);
+        const D2D1_MATRIX_3X2_F forma = basso ? D2D1::Matrix3x2F(1, 0, 0, -1, 0, (float)H2 + su) : base;
+        const Bordo stile = bordo();
+        const float apertura = std::clamp(1.0f - su / h, 0.0f, 1.0f);
+        if (stile != CLASSICO) base = D2D1::Matrix3x2F::Identity();
+        rt->SetTransform(stile == CLASSICO ? forma : (basso ? D2D1::Matrix3x2F(1,0,0,-1,0,(float)H2) : base));
         ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
-        if (f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
-            s->BeginFigure({x0 - f, 0}, D2D1_FIGURE_BEGIN_FILLED);
-            s->AddArc({{x0, f}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
+        if (tutta && f2d && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            // (archi solo se hanno una misura: a raggio zero un lato dritto fino all'angolo)
+            if (stile != CLASSICO) {
+                const float centro = W2 * 0.5f;
+                const bool pieno = stile == VELO && !scaffale.empty();
+                const float stesa = (float)std::clamp(distensione.x / 100.0, 0.0, 1.0);
+                const bool notificaGrande = scena == NOTIFICA;
+                const float piano = w * (pieno || notificaGrande ? 0.48f : 0.39f);
+                const float riposo = piano + (pieno ? 85.0f : notificaGrande ? 70.0f : 43.0f) * dpi;
+                const float fine = std::min(centro - dpi, riposo + (centro - dpi - riposo) * stesa);
+                const float ala = std::max(dpi, fine - piano);
+                const float fase = (float)std::clamp((adesso() - tOnda) / DURATA_ECO, 0.0, 1.0);
+                s->BeginFigure({centro - fine, 0}, D2D1_FIGURE_BEGIN_FILLED);
+                for (int j = 0; j <= 160; ++j) {
+                    const float x = fine * (j / 80.0f - 1.0f);
+                    const float k = std::clamp((std::abs(x) - piano) / ala, 0.0f, 1.0f);
+                    const float arco = std::min(1.0f, std::abs(x) / std::max(dpi, piano));
+                    float y = h * (1 - (pieno ? 0.0f : 0.08f)*arco*arco) * (1 - k*k*(3-2*k));
+                    if (stile == ECO && fase < 1 && k > 0) {
+                        const float z = (k - fase) * 6;
+                        y += 11 * dpi * std::exp(-z*z) * std::sin(3.14159f*k) * (1-fase);
+                    }
+                    s->AddLine({centro + x, apertura * y});
+                }
+            } else {
+            s->BeginFigure({x0 - fr, 0}, D2D1_FIGURE_BEGIN_FILLED);
+            if (fr >= 0.5f) s->AddArc({{x0, fr}, {fr, fr}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
             s->AddLine({x0, h - R});
-            s->AddArc({{x0 + R, h}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+            if (R >= 0.5f) s->AddArc({{x0 + R, h}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
             s->AddLine({x1 - R, h});
-            s->AddArc({{x1, h - R}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
-            s->AddLine({x1, f});
-            s->AddArc({{x1 + f, 0}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});   // raccordo a destra
+            if (R >= 0.5f) s->AddArc({{x1, h - R}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+            s->AddLine({x1, fr});
+            if (fr >= 0.5f) s->AddArc({{x1 + fr, 0}, {fr, fr}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});   // raccordo a destra
+            }
             s->EndFigure(D2D1_FIGURE_END_CLOSED);
             s->Close(); s->Release();
-            colore(0, 0, 0, 1);
+            if (stile == CLASSICO) colore(0, 0, 0, 1);
+            else colore(0, 0, 0, (stile == VELO ? 0.80f : 0.84f) * std::min(1.0f, apertura * 4.0f));
             rt->FillGeometry(g, pen);
+            if (stile == ECO || stile == VELO) {
+                const float impulso = stile == ECO ? 1.0f - (float)std::clamp((adesso() - tOnda) / DURATA_ECO, 0.0, 1.0) : 0.0f;
+                colore(0.60f, 0.78f, 0.76f, apertura * (0.27f + 0.14f * impulso));
+                rt->DrawGeometry(g, pen, 1.2f * dpi);
+            }
             // contenuti dentro la forma: quello di prima sfuma via, il nuovo compare mentre la forma cambia
             ID2D1Layer* strato = nullptr;
             if (SUCCEEDED(rt->CreateLayer(&strato))) {
                 rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), g), strato);
+                rt->SetTransform(base);
                 const double t = adesso() - tScena;
                 if (scenaPrima != scena) {
                     // dissolvenze addolcite (smoothstep): prima erano lineari, e quella in uscita durava 0,12 s
                     auto morbida = [](double k) { k = std::clamp(k, 0.0, 1.0); return (float)(k * k * (3 - 2 * k)); };
                     const float a = 1 - morbida(t / 0.16);
-                    if (a > 0) contenuto(scenaPrima, a);
+                    if (a > 0 && (abilitato || !aRiposo(scenaPrima))) contenuto(scenaPrima, a);
                     contenuto(scena, morbida((t - 0.06) / 0.24));
                 } else contenuto(scena, 1);
                 rt->PopLayer();
                 strato->Release();
             }
-            // pallini fuori dal notch, a destra, come su iPhone: arancione il microfono, verde la webcam
-            const sensori::Sensori& se = sensori::Sensori::io();
-            if (w < 330 * dpi) {
-                float px = x1 + f + 7 * dpi;
-                if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); px += 10 * dpi; }
-                if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); }
-            }
         }
+        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        // Una finestra layered completamente trasparente non riceve DragEnter.
+        // Solo durante l'avvicinamento con un tasto premuto si arma il bersaglio OLE.
+        if (sondaFile && !abilitato && visibile) {
+            RECT z = zonaFile();
+            colore(0, 0, 0, 0.008f);
+            rt->FillRectangle({(float)(z.left-posX()),(float)(z.top-yFin()),(float)(z.right-posX()),(float)(z.bottom-yFin())}, pen);
+        }
+        // (i pallini di microfono e webcam non stanno piu' fuori dal notch, nel vuoto: dentro, vedi puntiSensori; col
+        // notch spento li mostra il dock, piccoli)
         if (g) g->Release();
         if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { libera(); return; }
         mostraAlfa();
@@ -619,9 +809,12 @@ private:
     bool zonaBarrette(D2D1_RECT_F& r, D2D1_POINT_2F& o) const {
         float w, h, R; misura(scena, w, h, R);
         const float L = sinistra(scena), d = dpi;
-        if (scena == MUSICA) o = {L + w - 25 * d, h / 2};
+        // (vedi contenutoScena: lo spazio dei pallini e quello di luna e tazzina. Senza segniW il ridisegno parziale
+        // metteva un secondo gruppo di barrette 22 px piu' a destra, sopra la luna: R20261121-002056-S12)
+        if (scena == MUSICA) o = {L + w - puntiW() - segniW() - 25 * d, h / 2};
         else if (scena == APERTO) o = {L + w - 35 * d, 24 * d};
         else return false;
+        o.y += scesa(scena);   // (notch in basso: contro il bordo in basso)
         r = {std::floor(o.x - 2), std::floor(o.y - 8 * d), std::ceil(o.x + 13 * d + 2), std::ceil(o.y + 8 * d)};
         return true;
     }
@@ -643,38 +836,52 @@ private:
     void mostraAlfa(const RECT* sporco = nullptr) {
         if (!mem) return;
         GdiFlush();
-        POINT pos = {posX(), schermo.top}, zero = {0, 0}; SIZE sz = {W2, H2};
+        POINT pos = {posX(), yFin()}, zero = {0, 0}; SIZE sz = {W2, H2};
         BLENDFUNCTION bl = {AC_SRC_OVER, 0, (BYTE)std::lround(255 * std::clamp(alfa, 0.0f, 1.0f)), AC_SRC_ALPHA};
         UPDATELAYEREDWINDOWINFO u{sizeof(u), nullptr, &pos, &sz, mem, &zero, 0, &bl, ULW_ALPHA, sporco};
         UpdateLayeredWindowIndirect(fin, &u);
     }
 
+    // contenuti della scena s: in basso scendono contro il bordo in basso (base li sposta, e chi la compone la segue)
     void contenuto(int s, float a) {
+        if (!basso) { contenutoScena(s, a); return; }
+        const D2D1_MATRIX_3X2_F b0 = base;
+        base = D2D1::Matrix3x2F::Translation(0, scesa(s)) * b0;
+        rt->SetTransform(base);
+        contenutoScena(s, a);
+        base = b0;
+    }
+    // tazzina e luna (ora, musica e timer a riposo): compaiono e spariscono con una dissolvenza e crescendo un poco.
+    // Stanno attaccate ai bordi VERI del notch (che con la molla si allarga o si stringe), non a quelli finali: prima,
+    // spegnendone una, saltava subito verso il centro e poi spariva. dopoScaffale: la tazzina dopo il segno dello scaffale
+    void segni(bool dopoScaffale, float h, float a) {
+        const float d = dpi;
+        const float as = alfaSegno(segnoSveglio, tSegnoSveglio), al = alfaSegno(segnoSilenzio, tSegnoSilenzio);
+        const float Lv = (W2 - (float)mw.x) / 2, Rv = Lv + (float)mw.x;
+        if (as > 0.01f) {
+            const D2D1_POINT_2F c = {Lv + (dopoScaffale ? 46 : 17) * d, h / 2};
+            rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c) * base);
+            tazzina(c.x, c.y, 0.8f * a * as);
+            rt->SetTransform(base);
+        }
+        if (al > 0.01f) {
+            const D2D1_POINT_2F c = {Rv - 17 * d - puntiW(), h / 2};   // (a sinistra dei pallini, se ci sono)
+            rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c) * base);
+            lunetta(c.x, c.y, 0.8f * a * al);
+            rt->SetTransform(base);
+        }
+    }
+    void contenutoScena(int s, float a) {
         if (a <= 0.001f) return;
         float w, h, R; misura(s, w, h, R);
-        const float L = sinistra(s), d = dpi;
+        float L = sinistra(s); const float d = dpi;
+        // musica e timer a riposo: i pallini di microfono e webcam a destra, e lo stesso spazio a sinistra (contenuto al centro)
+        if (s == MUSICA || s == TIMER) { L += puntiW() + segniW(); w -= 2 * (puntiW() + segniW()); }
+        if (s == ORA || s == MUSICA || s == TIMER) { puntiSensori(s, h, a); segni(s == ORA && !scaffale.empty(), h, a); }
         switch (s) {
             case ORA:
                 ora(L, w, h, a);
                 if (!scaffale.empty()) segnoScaffale(L + 18 * d, h / 2, a);
-                {   // tazzina e luna: compaiono e spariscono con una dissolvenza e crescendo un poco. Stanno attaccate ai
-                    // bordi VERI del notch (che con la molla si allarga o si stringe), non a quelli finali: prima, spegnendone
-                    // una, saltava subito verso il centro e poi spariva
-                    const float as = alfaSegno(segnoSveglio, tSegnoSveglio), al = alfaSegno(segnoSilenzio, tSegnoSilenzio);
-                    const float Lv = (W2 - (float)mw.x) / 2, Rv = Lv + (float)mw.x;
-                    if (as > 0.01f) {
-                        const D2D1_POINT_2F c = {Lv + (scaffale.empty() ? 17 : 46) * d, h / 2};
-                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c));
-                        tazzina(c.x, c.y, 0.8f * a * as);
-                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
-                    }
-                    if (al > 0.01f) {
-                        const D2D1_POINT_2F c = {Rv - 17 * d, h / 2};
-                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c));
-                        lunetta(c.x, c.y, 0.8f * a * al);
-                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
-                    }
-                }
                 break;
             case AVVISO: {
                 // simbolo e testo come un blocco solo, centrato nel notch (prima stavano a sinistra di un notch largo almeno
@@ -682,7 +889,7 @@ private:
                 const float tw = std::min(larghezzaAvviso, w - (AV_SIMBOLO + AV_SPAZIO + 2 * AV_MARGINE) * d);
                 const float x0 = L + (w - (AV_SIMBOLO + AV_SPAZIO) * d - tw) / 2;
                 const float cx = x0 + AV_SIMBOLO * d / 2, cy = h / 2;
-                if (simboloAvviso == sensori::S_BATTERIA) batteriaSimbolo(cx, cy, a, valoreAvviso, avvisoAcceso);
+                if (simboloAvviso == sensori::S_BATTERIA || simboloAvviso == sensori::S_ALIMENTAZIONE) batteriaSimbolo(cx, cy, a, valoreAvviso, avvisoAcceso);
                 else if (simboloAvviso == sensori::S_CUFFIE) cuffie(cx, cy, a);
                 else puntina(cx, cy, a, avvisoAcceso);
                 const float xt = x0 + (AV_SIMBOLO + AV_SPAZIO) * d;
@@ -774,8 +981,8 @@ private:
         ID2D1EllipseGeometry *e1 = nullptr, *e2 = nullptr; ID2D1PathGeometry* g = nullptr;
         f->CreateEllipseGeometry({{cx, cy}, r, r}, &e1);
         f->CreateEllipseGeometry({{cx + 2.8f * dpi, cy - 2.2f * dpi}, r * 0.85f, r * 0.85f}, &e2);
-        if (e1 && e2 && SUCCEEDED(f->CreatePathGeometry(&g))) {
-            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        ID2D1GeometrySink* s = nullptr;   // (Open puo' fallire: R20261121-002056-S17)
+        if (e1 && e2 && SUCCEEDED(f->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
             e1->CombineWithGeometry(e2, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
             s->Close(); s->Release();
             colore(0.62f, 0.55f, 1.0f, a);   // viola, come la luna di Non disturbare su iPhone
@@ -808,7 +1015,7 @@ private:
     // ---- scaffale ----
     // File appoggiati sul notch (riferimenti: i file restano dove sono). Si trascinano sopra da qualsiasi app, si
     // riprendono trascinandoli fuori (uno o "Tutti"); dopo un trascinamento riuscito escono dallo scaffale.
-    struct Oggetto { std::wstring percorso, nome; std::vector<UINT> px; int w = 0, h = 0; ID2D1Bitmap* b = nullptr; };
+    struct Oggetto { std::wstring percorso, nome; std::vector<UINT> px; int w = 0, h = 0; ID2D1Bitmap* b = nullptr; bool provata = false; };
     std::vector<Oggetto> scaffale;
     bool trascinoSopra = false, trascinoMio = false;
     double fineScaffale = 0;
@@ -820,42 +1027,76 @@ private:
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropTarget) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
         ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
         ULONG STDMETHODCALLTYPE Release() override { return 1; }
-        HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* o, DWORD, POINTL, DWORD* e) override {
+        HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* o, DWORD, POINTL p, DWORD* e) override {
             FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
             ok = o && !n->trascinoMio && n->modoAtt == NORMALE && o->QueryGetData(&f) == S_OK;
-            if (ok) { n->trascinoSopra = true; n->bersagli(); }
-            *e = ok ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+            return DragOver(0, p, e);
+        }
+        HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL p, DWORD* e) override {
+            RECT z = n->zonaFile(), corpo = n->corpo();
+            const bool dentro = ok && (n->abilitato || PtInRect(&z, {p.x,p.y}) ||
+                (n->trascinoSopra && PtInRect(&corpo, {p.x,p.y})));
+            if (dentro != n->trascinoSopra) { n->trascinoSopra = dentro; n->bersagli(); }
+            *e = dentro ? DROPEFFECT_COPY : DROPEFFECT_NONE;
             return S_OK;
         }
-        HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* e) override { *e = ok ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK; }
         HRESULT STDMETHODCALLTYPE DragLeave() override { if (n->trascinoSopra) { n->trascinoSopra = false; n->bersagli(); } return S_OK; }
         HRESULT STDMETHODCALLTYPE Drop(IDataObject* o, DWORD, POINTL, DWORD* e) override {
+            tracciaScaffale("deposito: ingresso");
             *e = DROPEFFECT_NONE;
+            const bool accetta = ok && n->trascinoSopra;
             n->trascinoSopra = false;
-            if (ok && o) {
+            if (accetta && o) {
                 FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
                 if (SUCCEEDED(o->GetData(&f, &m))) {
                     // l'handle del blocco, non il puntatore di GlobalLock (audit FW-AUDIT-016, come nel dock)
+                    // Tutti i file o nessuno: prima oltre il cinquantesimo si scartavano in silenzio e la sorgente riceveva
+                    // comunque COPY (S20). Fino a 200 in tutto; le miniature solo per i primi 12 (le altre si
+                    // vedrebbero solo scorrendo), perche' la shell le legge qui, sul thread dell'interfaccia (S8)
+                    bool preso = false;
                     if (const HDROP hd = (HDROP)m.hGlobal) {
                         const UINT k = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
-                        for (UINT i = 0; i < k && i < 50; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) n->appoggia(p); }
+                        std::vector<std::wstring> percorsi;
+                        for (UINT i = 0; i < k && k + n->scaffale.size() <= 200; i++) {
+                            const UINT len = DragQueryFileW(hd, i, nullptr, 0);
+                            std::wstring p(len + 1, L'\0');
+                            if (!len || DragQueryFileW(hd, i, p.data(), len + 1) != len) { percorsi.clear(); break; }
+                            p.resize(len); percorsi.push_back(std::move(p));
+                        }
+                        if (k && percorsi.size() == k) {
+                            for (const auto& p : percorsi) n->appoggia(p, n->scaffale.size() < 12);
+                            preso = true;
+                        }
                     }
                     ReleaseStgMedium(&m);
-                    *e = DROPEFFECT_COPY;   // copia: il file resta dov'era
+                    *e = preso ? DROPEFFECT_COPY : DROPEFFECT_NONE;   // copia: il file resta dov'era
                     n->fineScaffale = adesso() + 1.8;   // si vede un attimo cosa e' entrato
                 }
             }
             n->bersagli(); n->ridisegna();
+            tracciaScaffale("deposito: fine");
             return S_OK;
         }
     } bersaglio;
 
-    void appoggia(const std::wstring& p) {
+    static void tracciaScaffale(const char* fase, unsigned long esito = 0) {
+        if (registroScaffale) registroScaffale(fase, esito);
+    }
+
+    void appoggia(const std::wstring& p, bool conMiniatura = true) {
         for (auto& o : scaffale) if (!_wcsicmp(o.percorso.c_str(), p.c_str())) return;
         Oggetto o; o.percorso = p;
         const size_t s = p.find_last_of(L"\\/"); o.nome = s == std::wstring::npos ? p : p.substr(s + 1);
-        IShellItemImageFactory* fab = nullptr;   // icona o anteprima (poche e piccole: subito)
+        if (conMiniatura) miniatura(o);
+        scaffale.push_back(std::move(o));
+    }
+    // icona o anteprima (poche e piccole: subito), una volta per oggetto
+    void miniatura(Oggetto& o) {
+        o.provata = true;
+        const std::wstring& p = o.percorso;
+        IShellItemImageFactory* fab = nullptr;
         if (SUCCEEDED(SHCreateItemFromParsingName(p.c_str(), nullptr, IID_PPV_ARGS(&fab)))) {
+            tracciaScaffale("deposito: lettura miniatura");
             HBITMAP hb = nullptr;
             const int lato = (int)std::lround(40 * dpi);
             if (SUCCEEDED(fab->GetImage({lato, lato}, SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
@@ -874,7 +1115,6 @@ private:
             }
             fab->Release();
         }
-        scaffale.push_back(std::move(o));
     }
 
     void svuotaScaffale() { for (auto& o : scaffale) if (o.b) o.b->Release(); scaffale.clear(); }
@@ -900,6 +1140,7 @@ private:
 
     // trascina fuori un oggetto (o tutti): un trascinamento vero di Windows con i file della shell
     void trascinaFuori(int i) {
+        tracciaScaffale("uscita: preparazione");
         std::vector<size_t> quali;
         if (i == TUTTI) for (size_t k = 0; k < scaffale.size(); k++) quali.push_back(k);
         else if (i >= 0 && i < (int)scaffale.size()) quali.push_back(i);
@@ -907,27 +1148,46 @@ private:
         std::vector<PIDLIST_ABSOLUTE> id;
         for (size_t k : quali) { PIDLIST_ABSOLUTE p = nullptr; if (SUCCEEDED(SHParseDisplayName(scaffale[k].percorso.c_str(), nullptr, &p, 0, nullptr)) && p) id.push_back(p); }
         IShellItemArray* arr = nullptr; IDataObject* dati = nullptr;
-        if (!id.empty() && SUCCEEDED(SHCreateShellItemArrayFromIDLists((UINT)id.size(), (PCIDLIST_ABSOLUTE_ARRAY)id.data(), &arr)) && arr &&
-            SUCCEEDED(arr->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&dati))) && dati) {
+        tracciaScaffale("uscita: percorsi risolti", (unsigned long)id.size());
+        HRESULT hr = E_FAIL;
+        if (!id.empty() && id.size() == quali.size()) {
+            hr = SHCreateShellItemArrayFromIDLists((UINT)id.size(), (PCIDLIST_ABSOLUTE_ARRAY)id.data(), &arr);
+            tracciaScaffale("uscita: creazione elenco Shell", (unsigned long)hr);
+            if (SUCCEEDED(hr) && arr) {
+                hr = arr->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&dati));
+                tracciaScaffale("uscita: oggetto dati Shell", (unsigned long)hr);
+            }
+        }
+        if (SUCCEEDED(hr) && dati) {
             trascinoMio = true;
             DWORD effetto = DROPEFFECT_NONE;
+            tracciaScaffale("uscita: entra DoDragDrop");
             const HRESULT r = DoDragDrop(dati, &fonte, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effetto);
+            tracciaScaffale("uscita: ritorno DoDragDrop", (unsigned long)r);
+            tracciaScaffale("uscita: effetto", effetto);
             trascinoMio = false;
             if (r == DRAGDROP_S_DROP && effetto != DROPEFFECT_NONE) {   // arrivato: esce dallo scaffale (nel dubbio resta)
                 for (auto it = quali.rbegin(); it != quali.rend(); ++it) { if (scaffale[*it].b) scaffale[*it].b->Release(); scaffale.erase(scaffale.begin() + *it); }
+                // le voci che ora entrano fra le visibili prendono la miniatura qui, fuori dal disegno (fra BeginDraw ed
+                // EndDraw un provider lento fermava il notch, R20261121-123420-S4)
+                for (size_t i = 0; i < scaffale.size() && i < (size_t)MAX_VISTI; i++) if (!scaffale[i].provata) miniatura(scaffale[i]);
             }
             dati->Release();
         }
         if (arr) arr->Release();
         for (auto p : id) CoTaskMemFree(p);
         bersagli(); ridisegna();
+        tracciaScaffale("uscita: fine");
     }
 
     struct Fonte : IDropSource {
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropSource) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
         ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
         ULONG STDMETHODCALLTYPE Release() override { return 1; }
-        HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL esc, DWORD k) override { return esc ? DRAGDROP_S_CANCEL : !(k & MK_LBUTTON) ? DRAGDROP_S_DROP : S_OK; }
+        HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL esc, DWORD k) override {
+            if (esc || !(k & MK_LBUTTON)) tracciaScaffale(esc ? "OLE: annullamento" : "OLE: rilascio");
+            return esc ? DRAGDROP_S_CANCEL : !(k & MK_LBUTTON) ? DRAGDROP_S_DROP : S_OK;
+        }
         HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
     } fonte;
 
@@ -948,6 +1208,14 @@ private:
 
     void scaffaleScena(float L, float w, float h, float a) {
         const float d = dpi;
+        if (!abilitato && scaffale.empty()) {
+            const auto prima = fTitolo->GetTextAlignment();
+            fTitolo->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            scrivi(testi::t(L"Lascia qui i file", L"Drop files here"), fTitolo,
+                   {L + 12*d, 0, L + w - 12*d, h}, a);
+            fTitolo->SetTextAlignment(prima);
+            return;
+        }
         if (scaffale.empty() || trascinoSopra) {   // zona dove lasciare i file
             const D2D1_RECT_F z = {L + 20 * d, (scaffale.empty() ? 14 : 32) * d, L + w - 20 * d, h - 10 * d};
             ID2D1StrokeStyle* tr = nullptr;
@@ -971,6 +1239,8 @@ private:
         const int vis = (int)std::min<size_t>(scaffale.size(), MAX_VISTI);
         for (int i = 0; i < vis; i++) {
             Oggetto& o = scaffale[i];
+            // (miniatura di un file entrato oltre il dodicesimo: si legge quando diventa visibile, all'uscita delle
+            // voci davanti, R20261121-120306-S4)
             if (!o.b) bitmap(rt, o.b, o.px, o.w, o.h);
             const D2D1_RECT_F r = rettOggetto(i);
             const float cx = (r.left + r.right) / 2, l = 17 * d;
@@ -1160,13 +1430,13 @@ private:
         switch (m) {
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
             case WM_TIMER: if (n && w == 2) n->controlla(); return 0;
-            case WM_LBUTTONDOWN: if (n) { n->premutoX = (short)LOWORD(l); n->premutoY = (short)HIWORD(l); n->premutoS = n->scena == SCAFFALE ? n->oggettoIn(n->premutoX, n->premutoY) : -1; } return 0;
+            case WM_LBUTTONDOWN: if (n) { n->premutoX = (short)LOWORD(l); n->premutoY = (short)HIWORD(l) - (int)n->scesa(n->scena); n->premutoS = n->scena == SCAFFALE ? n->oggettoIn(n->premutoX, n->premutoY) : -1; } return 0;
             case WM_MOUSEMOVE:   // trascinamento fuori dallo scaffale
-                if (n && n->premutoS != -1 && (w & MK_LBUTTON) && (std::abs((short)LOWORD(l) - n->premutoX) > 5 || std::abs((short)HIWORD(l) - n->premutoY) > 5)) {
+                if (n && n->premutoS != -1 && (w & MK_LBUTTON) && (std::abs((short)LOWORD(l) - n->premutoX) > 5 || std::abs((short)HIWORD(l) - (int)n->scesa(n->scena) - n->premutoY) > 5)) {
                     const int s = n->premutoS; n->premutoS = -1; n->trascinaFuori(s);
                 }
                 return 0;
-            case WM_LBUTTONUP: if (n) { const bool premuto = n->premutoS != -1 || n->scena != SCAFFALE; n->premutoS = -1; if (premuto) n->clicca((short)LOWORD(l), (short)HIWORD(l)); } return 0;
+            case WM_LBUTTONUP: if (n) { const bool premuto = n->premutoS != -1 || n->scena != SCAFFALE; n->premutoS = -1; if (premuto) n->clicca((short)LOWORD(l), (short)HIWORD(l) - (int)n->scesa(n->scena)); } return 0;
             case WM_CLOSE: return 0;
         }
         return DefWindowProcW(h, m, w, l);
