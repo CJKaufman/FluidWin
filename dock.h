@@ -24,6 +24,7 @@
 #include <propvarutil.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <winhttp.h>
 #include "raggio.h"
 #include "sistema.h"
 #include "vetro.h"
@@ -3292,7 +3293,7 @@ private:
     RECT rettLauncher{};                   // il launcher vero e proprio (la finestra arriva piu' in basso, fino all'icona)
     POINT ancora{};                        // icona "App": da qui cresce e qui rientra (coordinate della finestra)
     std::vector<AppL> tutteApp, tuttiGiochi;
-    bool lModoGiochi = false, lavoroGiochi = false, lDialogoAperto = false;
+    bool lModoGiochi = false, lavoroGiochi = false, lDialogoAperto = false, lScaricaIconeInCorso = false;
     double gLetto = -1e9;
     std::vector<AppL>& elencoAttivo() { return lModoGiochi ? tuttiGiochi : tutteApp; }
     const std::vector<AppL>& elencoAttivo() const { return lModoGiochi ? tuttiGiochi : tutteApp; }
@@ -3391,6 +3392,9 @@ private:
     static void salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
     static std::unordered_map<std::wstring, std::wstring> leggiNomiGiochi();
     static void salvaNomiGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
+    static auto leggiChiaveSteamGridDB() -> std::wstring;
+    static auto salvaChiaveSteamGridDB(const std::wstring& k) -> void;
+    static auto scaricaIconaGiocoOnline(const AppL& a, const std::wstring& apiKey) -> std::wstring;
     bool appartieneAiGiochi(const AppL& a) const;
 
     static bool iniziali(const std::wstring& nome, const std::wstring& q);
@@ -3470,6 +3474,14 @@ private:
     void cambiaIconaGioco(const AppL& a);
 
     void rinominaGioco(const AppL& a);
+
+    auto scaricaIconaGioco(const AppL& a) -> void;
+
+    auto scaricaTutteIconeOnline() -> void;
+
+    auto impostaChiaveSteamGridDB() -> void;
+
+    auto dialogoTestoVetro(const std::wstring& titolo, const std::wstring& sottotitolo, const std::wstring& iniziale, const std::wstring& conferma, std::wstring& out, bool consentiVuoto = false) -> bool;
 
     void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"", const std::wstring& argomenti = L"");
 

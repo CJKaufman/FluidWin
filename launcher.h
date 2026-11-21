@@ -572,6 +572,329 @@ inline auto Motore::salvaNomiGiochi(const std::unordered_map<std::wstring, std::
     salvaMappaGiochi(L"NomiGiochi", m);
 }
 
+inline auto Motore::leggiChiaveSteamGridDB() -> std::wstring {
+    DWORD cb = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"SteamGridDBKey", RRF_RT_REG_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return L"";
+    std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"SteamGridDBKey", RRF_RT_REG_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return L"";
+    return buf.data();
+}
+
+inline auto Motore::salvaChiaveSteamGridDB(const std::wstring& k) -> void {
+    std::wstring pulita;
+    pulita.reserve(k.size());
+    for (wchar_t ch : k) {
+        if (ch != L'\t' && ch != L'\r' && ch != L'\n') pulita.push_back(ch);
+    }
+    const size_t ini = pulita.find_first_not_of(L' ');
+    if (ini == std::wstring::npos) {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"SteamGridDBKey");
+        return;
+    }
+    const size_t fin = pulita.find_last_not_of(L' ');
+    pulita = pulita.substr(ini, fin - ini + 1);
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"SteamGridDBKey", REG_SZ, pulita.c_str(), (DWORD)((pulita.size() + 1) * sizeof(wchar_t)));
+}
+
+static inline std::wstring cartellaCacheIconeGiochi() {
+    wchar_t base[MAX_PATH] = L"";
+    if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, base))) return L"";
+    const std::wstring d1 = std::wstring(base) + L"\\FluidWin";
+    const std::wstring d2 = d1 + L"\\IconeGiochi";
+    CreateDirectoryW(d1.c_str(), nullptr);
+    CreateDirectoryW(d2.c_str(), nullptr);
+    return esisteCartella(d2) ? d2 : L"";
+}
+
+static inline std::wstring hashChiaveGioco(const std::wstring& s) {
+    unsigned long long h = 14695981039346656037ULL;
+    for (wchar_t c : s) {
+        const unsigned short u = (unsigned short)c;
+        h ^= (unsigned char)(u & 0xFF);
+        h *= 1099511628211ULL;
+        h ^= (unsigned char)(u >> 8);
+        h *= 1099511628211ULL;
+    }
+    wchar_t buf[24];
+    swprintf(buf, 24, L"%016llx", h);
+    return buf;
+}
+
+static inline std::wstring utf8AWide(const std::string& s) {
+    if (s.empty()) return L"";
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring out((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), out.data(), n);
+    return out;
+}
+
+static inline std::wstring codificaUrl(const std::wstring& s) {
+    if (s.empty()) return L"";
+    const int n = WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return L"";
+    std::string u((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, s.data(), (int)s.size(), u.data(), n, nullptr, nullptr);
+    static const wchar_t* const hex = L"0123456789ABCDEF";
+    std::wstring out;
+    out.reserve(u.size() * 2);
+    for (unsigned char b : u) {
+        if ((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z') || (b >= '0' && b <= '9') ||
+            b == '-' || b == '_' || b == '.' || b == '~') {
+            out.push_back((wchar_t)b);
+        } else {
+            out.push_back(L'%');
+            out.push_back(hex[b >> 4]);
+            out.push_back(hex[b & 0x0F]);
+        }
+    }
+    return out;
+}
+
+static inline std::string httpPrendi(const std::wstring& url, const std::wstring& bearer = L"", size_t maxBytes = 8 * 1024 * 1024) {
+    if (url.empty()) return {};
+    URL_COMPONENTSW uc{};
+    uc.dwStructSize = sizeof(uc);
+    wchar_t host[256] = L"";
+    std::vector<wchar_t> path(url.size() + 16, L'\0');
+    uc.lpszHostName = host;
+    uc.dwHostNameLength = 256;
+    uc.lpszUrlPath = path.data();
+    uc.dwUrlPathLength = (DWORD)path.size();
+    if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) return {};
+    if (uc.nScheme != INTERNET_SCHEME_HTTPS && uc.nScheme != INTERNET_SCHEME_HTTP) return {};
+
+    struct HttpGuard {
+        HINTERNET s = nullptr, c = nullptr, r = nullptr;
+        ~HttpGuard() {
+            if (r) WinHttpCloseHandle(r);
+            if (c) WinHttpCloseHandle(c);
+            if (s) WinHttpCloseHandle(s);
+        }
+    } h;
+
+    h.s = WinHttpOpen(L"FluidWin", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!h.s) return {};
+    WinHttpSetTimeouts(h.s, 5000, 5000, 8000, 12000);
+    h.c = WinHttpConnect(h.s, host, uc.nPort, 0);
+    if (!h.c) return {};
+    const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    h.r = WinHttpOpenRequest(h.c, L"GET", path.data(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!h.r) return {};
+
+    const std::wstring hdr = bearer.empty() ? L"" : (L"Authorization: Bearer " + bearer + L"\r\n");
+    const BOOL okSend = WinHttpSendRequest(
+        h.r,
+        hdr.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : hdr.c_str(),
+        hdr.empty() ? 0 : (DWORD)-1L,
+        WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+    if (!okSend || !WinHttpReceiveResponse(h.r, nullptr)) return {};
+
+    DWORD stato = 0, ls = sizeof(stato);
+    if (!WinHttpQueryHeaders(h.r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &stato, &ls, WINHTTP_NO_HEADER_INDEX) || stato != 200) {
+        return {};
+    }
+
+    std::string out;
+    DWORD avail = 0;
+    while (WinHttpQueryDataAvailable(h.r, &avail) && avail > 0) {
+        if (out.size() + (size_t)avail > maxBytes) return {};
+        const size_t prev = out.size();
+        out.resize(prev + (size_t)avail);
+        DWORD letti = 0;
+        if (!WinHttpReadData(h.r, out.data() + prev, avail, &letti) || !letti) {
+            out.resize(prev);
+            break;
+        }
+        out.resize(prev + (size_t)letti);
+    }
+    return out;
+}
+
+static inline std::wstring primoIdInArrayJson(const std::wstring& txt, const wchar_t* arrayKey) {
+    size_t i = trovaChiaveJson(txt, arrayKey);
+    if (i == std::wstring::npos || i >= txt.size() || txt[i] != L'[') return L"";
+    i++;
+    int depth = 1;
+    while (i < txt.size() && depth > 0) {
+        if (txt[i] == L'"') {
+            std::wstring s;
+            if (!leggiStringaJson(txt, i, s)) break;
+            size_t j = i;
+            while (j < txt.size() && iswspace(txt[j])) j++;
+            if (j < txt.size() && txt[j] == L':') {
+                j++;
+                while (j < txt.size() && iswspace(txt[j])) j++;
+                if (s == L"id" && j < txt.size() && iswdigit(txt[j])) {
+                    std::wstring id;
+                    while (j < txt.size() && iswdigit(txt[j])) id.push_back(txt[j++]);
+                    return id;
+                }
+            }
+        } else {
+            if (txt[i] == L'[') depth++;
+            else if (txt[i] == L']') depth--;
+            i++;
+        }
+    }
+    return L"";
+}
+
+static inline std::wstring migliorUrlInDataJson(const std::wstring& txt) {
+    size_t i = trovaChiaveJson(txt, L"data");
+    if (i == std::wstring::npos || i >= txt.size() || txt[i] != L'[') return L"";
+    i++;
+    int depth = 1;
+    std::wstring migliore;
+    int migliorPunti = 0;
+    auto valuta = [](const std::wstring& u) -> int {
+        if (u.rfind(L"https://", 0) != 0 && u.rfind(L"http://", 0) != 0) return 0;
+        const size_t q = u.find_first_of(L"?#");
+        const std::wstring base = minuscolo(q == std::wstring::npos ? u : u.substr(0, q));
+        if (finisceCon(base, L".png") || finisceCon(base, L".ico")) return 3;
+        if (finisceCon(base, L".jpg") || finisceCon(base, L".jpeg")) return 2;
+        return 1;
+    };
+    while (i < txt.size() && depth > 0) {
+        if (txt[i] == L'"') {
+            std::wstring s;
+            if (!leggiStringaJson(txt, i, s)) break;
+            size_t j = i;
+            while (j < txt.size() && iswspace(txt[j])) j++;
+            if (j < txt.size() && txt[j] == L':') {
+                j++;
+                while (j < txt.size() && iswspace(txt[j])) j++;
+                if (s == L"url" && j < txt.size() && txt[j] == L'"') {
+                    std::wstring val;
+                    if (leggiStringaJson(txt, j, val)) {
+                        const int p = valuta(val);
+                        if (p > migliorPunti) {
+                            migliorPunti = p;
+                            migliore = std::move(val);
+                            if (migliorPunti >= 3) return migliore;
+                        }
+                    }
+                    i = j;
+                    continue;
+                }
+            }
+        } else {
+            if (txt[i] == L'[') depth++;
+            else if (txt[i] == L']') depth--;
+            i++;
+        }
+    }
+    return migliore;
+}
+
+static inline std::wstring estensioneDaMagic(const std::string& b, bool soloJpgPng = false) {
+    if (b.size() >= 8 && (unsigned char)b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return L".png";
+    if (b.size() >= 2 && (unsigned char)b[0] == 0xFF && (unsigned char)b[1] == 0xD8) return L".jpg";
+    if (soloJpgPng) return L"";
+    if (b.size() >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0) return L".ico";
+    if (b.size() >= 12 && memcmp(b.data(), "RIFF", 4) == 0 && memcmp(b.data() + 8, "WEBP", 4) == 0) return L".webp";
+    return L"";
+}
+
+static inline bool scriviFileBinario(const std::wstring& percorso, const std::string& bytes) {
+    if (percorso.empty() || bytes.empty()) return false;
+    const std::wstring tmp = percorso + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    size_t scritti = 0;
+    bool ok = true;
+    while (scritti < bytes.size()) {
+        DWORD n = 0;
+        const DWORD chunk = (DWORD)std::min<size_t>(bytes.size() - scritti, 1024 * 1024);
+        if (!WriteFile(h, bytes.data() + scritti, chunk, &n, nullptr) || n == 0) { ok = false; break; }
+        scritti += (size_t)n;
+    }
+    CloseHandle(h);
+    if (!ok) { DeleteFileW(tmp.c_str()); return false; }
+    if (!MoveFileExW(tmp.c_str(), percorso.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+inline auto Motore::scaricaIconaGiocoOnline(const AppL& a, const std::wstring& apiKey) -> std::wstring {
+    const std::wstring cacheDir = cartellaCacheIconeGiochi();
+    if (cacheDir.empty()) return L"";
+    const std::wstring base = cacheDir + L"\\" + hashChiaveGioco(chiaveGioco(a));
+
+    auto estraiCifre = [](const std::wstring& s, size_t pos) -> std::wstring {
+        std::wstring out;
+        while (pos < s.size() && iswdigit(s[pos])) out.push_back(s[pos++]);
+        return out;
+    };
+
+    const std::wstring avv = minuscolo(a.avvio);
+    std::wstring platform, pid;
+    if (avv.rfind(L"steam://rungameid/", 0) == 0) {
+        platform = L"steam";
+        pid = estraiCifre(avv, 18);
+    } else if (avv.rfind(L"uplay://launch/", 0) == 0) {
+        platform = L"uplay";
+        pid = estraiCifre(avv, 15);
+    } else if (avv.rfind(L"goggalaxy://opengameview/", 0) == 0) {
+        platform = L"gog";
+        pid = estraiCifre(avv, 25);
+    }
+
+    auto salva = [&](const std::string& bytes, bool soloJpgPng) -> std::wstring {
+        const std::wstring ext = estensioneDaMagic(bytes, soloJpgPng);
+        if (ext.empty()) return L"";
+        const std::wstring dest = base + ext;
+        return scriviFileBinario(dest, bytes) ? dest : L"";
+    };
+
+    if (!apiKey.empty()) {
+        auto prendiUrlSgdb = [&](const std::wstring& ep) -> std::wstring {
+            const std::string body = httpPrendi(L"https://www.steamgriddb.com/api/v2/" + ep, apiKey, 2 * 1024 * 1024);
+            return body.empty() ? L"" : migliorUrlInDataJson(utf8AWide(body));
+        };
+
+        std::wstring imgUrl;
+        if (!platform.empty() && !pid.empty()) {
+            imgUrl = prendiUrlSgdb(L"icons/" + platform + L"/" + pid);
+            if (imgUrl.empty()) imgUrl = prendiUrlSgdb(L"grids/" + platform + L"/" + pid + L"?dimensions=512x512,1024x1024");
+        }
+        if (imgUrl.empty() && !a.nome.empty()) {
+            const std::string sr = httpPrendi(L"https://www.steamgriddb.com/api/v2/search/autocomplete/" + codificaUrl(a.nome), apiKey, 2 * 1024 * 1024);
+            const std::wstring gid = sr.empty() ? L"" : primoIdInArrayJson(utf8AWide(sr), L"data");
+            if (!gid.empty()) {
+                imgUrl = prendiUrlSgdb(L"icons/game/" + gid);
+                if (imgUrl.empty()) imgUrl = prendiUrlSgdb(L"grids/game/" + gid + L"?dimensions=512x512,1024x1024");
+            }
+        }
+        if (!imgUrl.empty()) {
+            const std::string imgBytes = httpPrendi(imgUrl);
+            const std::wstring salvato = salva(imgBytes, false);
+            if (!salvato.empty()) return salvato;
+        }
+    }
+
+    std::wstring steamId = (platform == L"steam") ? pid : L"";
+    if (steamId.empty() && !a.nome.empty()) {
+        const std::string sr = httpPrendi(L"https://store.steampowered.com/api/storesearch/?term=" + codificaUrl(a.nome) + L"&l=english&cc=US", L"", 2 * 1024 * 1024);
+        if (!sr.empty()) steamId = primoIdInArrayJson(utf8AWide(sr), L"items");
+    }
+    if (!steamId.empty()) {
+        const std::wstring urls[2] = {
+            L"https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/" + steamId + L"/library_600x900.jpg",
+            L"https://shared.fastly.steamstatic.com/store_item_assets/steam/apps/" + steamId + L"/header.jpg"
+        };
+        for (const auto& u : urls) {
+            const std::string imgBytes = httpPrendi(u);
+            const std::wstring salvato = salva(imgBytes, true);
+            if (!salvato.empty()) return salvato;
+        }
+    }
+    return L"";
+}
+
 inline auto Motore::leggiTuttiGiochi(bool subito) -> void {
     gLetto = adesso();
     if (subito) { Cronometro cr(this, "leggiTuttiGiochi"); applicaTuttiGiochi(elencaTuttiGiochi()); return; }
@@ -1751,13 +2074,17 @@ inline auto Motore::cambiaIconaGioco(const AppL& a) -> void {
     lDirty = true;
 }
 
-inline auto Motore::rinominaGioco(const AppL& a) -> void {
-    if (lDialogoAperto) return;
+inline auto Motore::dialogoTestoVetro(const std::wstring& titolo, const std::wstring& sottotitolo, const std::wstring& iniziale, const std::wstring& conferma, std::wstring& out, bool consentiVuoto) -> bool {
+    if (lDialogoAperto) return false;
     lDialogoAperto = true;
 
-    struct DialogoRinomina {
+    struct DialogoTesto {
         vetro::Finestra v;
+        std::wstring titolo;
+        std::wstring sottotitolo;
+        std::wstring testoConferma;
         std::wstring testo;
+        bool consentiVuoto = false;
         int caret = 0;
         int selIni = 0;
         int selFin = 0;
@@ -1769,10 +2096,11 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         bool hovCancel = false;
         bool trackingMouse = false;
         bool draggingSel = false;
-        int pressedBtn = 0; // 1 = Cancel, 2 = Save
+        int pressedBtn = 0;
         ULONGLONG tFade = 0;
 
         IDWriteTextFormat* fTitolo = nullptr;
+        IDWriteTextFormat* fSotto = nullptr;
         IDWriteTextFormat* fInput = nullptr;
         IDWriteTextFormat* fBtn = nullptr;
         ID2D1LinearGradientBrush* sheen = nullptr;
@@ -1790,9 +2118,14 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
             return pulita.substr(ini, fin - ini + 1);
         }
 
+        bool inputValido() const {
+            return consentiVuoto || !trim(testo).empty();
+        }
+
         void aggiornaFormati() {
             const float s = v.dpi;
             if (!fTitolo) fTitolo = v.formato(14.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            if (!fSotto && !sottotitolo.empty()) fSotto = v.formato(11.5f * s, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING, true);
             if (!fInput) {
                 fInput = v.formato(13.5f * s);
                 if (fInput) {
@@ -1824,6 +2157,7 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         void libera() {
             if (sheen) { sheen->Release(); sheen = nullptr; }
             if (fTitolo) { fTitolo->Release(); fTitolo = nullptr; }
+            if (fSotto) { fSotto->Release(); fSotto = nullptr; }
             if (fInput) { fInput->Release(); fInput = nullptr; }
             if (fBtn) { fBtn->Release(); fBtn = nullptr; }
         }
@@ -1831,7 +2165,8 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         D2D1_RECT_F rectInput() const {
             const float s = v.dpi;
             const float pad = 18.0f * s;
-            return { pad, 50.0f * s, (float)v.W - pad, 88.0f * s };
+            const float top = sottotitolo.empty() ? 50.0f * s : 84.0f * s;
+            return { pad, top, (float)v.W - pad, top + 38.0f * s };
         }
 
         D2D1_RECT_F rectCancel() const {
@@ -1951,8 +2286,10 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
                 v.pen, 1.0f);
 
             const float pad = 18.0f * s;
-            v.testo(testi::t(L"Rinomina gioco", L"Rename game"), fTitolo,
-                { pad, 16.0f * s, (float)v.W - pad, 40.0f * s }, v.inchiostro());
+            v.testo(titolo, fTitolo, { pad, 16.0f * s, (float)v.W - pad, 40.0f * s }, v.inchiostro());
+            if (!sottotitolo.empty() && fSotto) {
+                v.testo(sottotitolo, fSotto, { pad, 42.0f * s, (float)v.W - pad, 78.0f * s }, v.inchiostro(0.68f));
+            }
 
             const D2D1_RECT_F ri = rectInput();
             const float inRad = 10.0f * s;
@@ -2018,12 +2355,12 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
             v.testo(testi::t(L"Annulla", L"Cancel"), fBtn, rc, v.inchiostro());
 
             const D2D1_RECT_F rs = rectSave();
-            const bool valido = !trim(testo).empty();
+            const bool valido = inputValido();
             v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, !valido ? 0.40f : (hovSave ? 1.0f : 0.90f)));
             v.rt->FillRoundedRectangle(D2D1::RoundedRect(rs, btnRad, btnRad), v.pen);
             v.pen->SetColor(D2D1::ColorF(1, 1, 1, valido ? 0.28f : 0.10f));
             v.rt->DrawLine({ rs.left + btnRad, rs.top + 0.75f }, { rs.right - btnRad, rs.top + 0.75f }, v.pen, 1.0f);
-            v.testo(testi::t(L"Salva", L"Save"), fBtn, rs, D2D1::ColorF(1, 1, 1, valido ? 1.0f : 0.55f));
+            v.testo(testoConferma, fBtn, rs, D2D1::ColorF(1, 1, 1, valido ? 1.0f : 0.55f));
 
             v.finisci();
         }
@@ -2047,23 +2384,23 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
                     }
                     return false;
                 case WM_CHAR: {
-                    if (w == 0x01) { // Ctrl+A
+                    if (w == 0x01) {
                         selIni = 0;
                         selFin = caret = (int)testo.size();
                         resetBlink(h);
                         return true;
                     }
-                    if (w == 0x03) { // Ctrl+C
+                    if (w == 0x03) {
                         copiaSelezione(h);
                         return true;
                     }
-                    if (w == 0x18) { // Ctrl+X
+                    if (w == 0x18) {
                         copiaSelezione(h);
                         eliminaSelezione();
                         resetBlink(h);
                         return true;
                     }
-                    if (w == 0x16) { // Ctrl+V
+                    if (w == 0x16) {
                         incolla(h);
                         return true;
                     }
@@ -2090,7 +2427,7 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
                 }
                 case WM_KEYDOWN:
                     if (w == VK_RETURN) {
-                        if (!trim(testo).empty()) { confermato = true; finito = true; }
+                        if (inputValido()) { confermato = true; finito = true; }
                         return true;
                     }
                     if (w == VK_ESCAPE) {
@@ -2198,7 +2535,7 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
                         ReleaseCapture();
                         if (btn == 1 && dentro(rectCancel(), mx, my)) {
                             finito = true;
-                        } else if (btn == 2 && dentro(rectSave(), mx, my) && !trim(testo).empty()) {
+                        } else if (btn == 2 && dentro(rectSave(), mx, my) && inputValido()) {
                             confermato = true;
                             finito = true;
                         }
@@ -2226,25 +2563,29 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         }
     } dlg;
 
-    dlg.testo = a.nome;
+    dlg.titolo = titolo;
+    dlg.sottotitolo = sottotitolo;
+    dlg.testoConferma = conferma;
+    dlg.consentiVuoto = consentiVuoto;
+    dlg.testo = iniziale;
     dlg.selIni = 0;
     dlg.selFin = dlg.caret = (int)dlg.testo.size();
 
-    const wchar_t* clsName = L"FluidWin.RinominaGioco";
+    const wchar_t* clsName = L"FluidWin.DialogoTesto";
     WNDCLASSW wc{};
     if (!GetClassInfoW(GetModuleHandleW(nullptr), clsName, &wc)) {
         wc.style = CS_DBLCLKS;
-        wc.lpfnWndProc = vetro::procedura<DialogoRinomina>;
+        wc.lpfnWndProc = vetro::procedura<DialogoTesto>;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.lpszClassName = clsName;
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassW(&wc);
     }
 
-    std::wstring nuovoNome;
-    if (dlg.v.crea(clsName, vetro::procedura<DialogoRinomina>, &dlg, true, 2, true, true)) {
-        const int W = (int)std::lround(360 * dpi);
-        const int H = (int)std::lround(154 * dpi);
+    bool ok = false;
+    if (dlg.v.crea(clsName, vetro::procedura<DialogoTesto>, &dlg, true, 2, true, true)) {
+        const int W = (int)std::lround((sottotitolo.empty() ? 360.0f : 460.0f) * dpi);
+        const int H = (int)std::lround((sottotitolo.empty() ? 154.0f : 190.0f) * dpi);
         RECT rl{};
         GetWindowRect(launcher, &rl);
         int wx = rl.left + ((rl.right - rl.left) - W) / 2;
@@ -2276,7 +2617,8 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         }
 
         if (dlg.confermato) {
-            nuovoNome = DialogoRinomina::trim(dlg.testo);
+            out = DialogoTesto::trim(dlg.testo);
+            ok = true;
         }
 
         KillTimer(dlg.v.fin, 1);
@@ -2289,14 +2631,109 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
 
     lDialogoAperto = false;
     if (lAperto && !lChiusura) prendiFuoco(launcher);
+    return ok;
+}
 
-    if (dlg.confermato && !nuovoNome.empty()) {
+inline auto Motore::rinominaGioco(const AppL& a) -> void {
+    std::wstring nuovoNome;
+    if (dialogoTestoVetro(
+            testi::t(L"Rinomina gioco", L"Rename game"),
+            L"",
+            a.nome,
+            testi::t(L"Salva", L"Save"),
+            nuovoNome,
+            false) && !nuovoNome.empty()) {
         auto nm = leggiNomiGiochi();
         nm[chiaveGioco(a)] = nuovoNome;
         salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
         lDirty = true;
     }
+}
+
+inline auto Motore::impostaChiaveSteamGridDB() -> void {
+    std::wstring k;
+    if (dialogoTestoVetro(
+            testi::t(L"Chiave API SteamGridDB", L"SteamGridDB API key"),
+            testi::t(L"Lascia vuoto per usare solo Steam (steamgriddb.com/profile/preferences/api)",
+                     L"Leave empty for Steam-only fallback (steamgriddb.com/profile/preferences/api)"),
+            leggiChiaveSteamGridDB(),
+            testi::t(L"Salva", L"Save"),
+            k,
+            true)) {
+        salvaChiaveSteamGridDB(k);
+    }
+}
+
+inline auto Motore::scaricaIconaGioco(const AppL& a) -> void {
+    AppL copia = a;
+    copia.icona = nullptr;
+    const std::wstring chiave = chiaveGioco(a);
+    const std::wstring apiKey = leggiChiaveSteamGridDB();
+    auto ris = std::make_shared<std::wstring>();
+    inSottofondo(
+        [copia, apiKey, ris] { *ris = scaricaIconaGiocoOnline(copia, apiKey); },
+        [this, chiave, ris] {
+            if (ris->empty()) return;
+            const std::wstring& p = *ris;
+            auto ic = leggiIconeGiochi();
+            ic[chiave] = p;
+            salvaIconeGiochi(ic);
+            iconeChieste.erase(chiaveIcona(p, 96));
+            for (auto& g : tuttiGiochi) {
+                if (chiaveGioco(g) == chiave) {
+                    if (g.icona) { g.icona->Release(); g.icona = nullptr; }
+                    g.iconaFile = p;
+                    g.iconaPers = true;
+                    g.provata = true;
+                }
+            }
+            chiediIcona(p, 96);
+            lDirty = true;
+        });
+}
+
+inline auto Motore::scaricaTutteIconeOnline() -> void {
+    if (lScaricaIconeInCorso) return;
+    std::vector<AppL> lista;
+    for (const auto& g : tuttiGiochi) {
+        if (!g.iconaPers) {
+            AppL c = g;
+            c.icona = nullptr;
+            lista.push_back(std::move(c));
+        }
+    }
+    if (lista.empty()) return;
+    lScaricaIconeInCorso = true;
+    const std::wstring apiKey = leggiChiaveSteamGridDB();
+    auto ris = std::make_shared<std::vector<std::pair<std::wstring, std::wstring>>>();
+    inSottofondo(
+        [lista = std::move(lista), apiKey, ris] {
+            for (const auto& g : lista) {
+                const std::wstring p = scaricaIconaGiocoOnline(g, apiKey);
+                if (!p.empty()) ris->push_back({chiaveGioco(g), p});
+            }
+        },
+        [this, ris] {
+            lScaricaIconeInCorso = false;
+            if (ris->empty()) return;
+            auto ic = leggiIconeGiochi();
+            for (const auto& [chiave, p] : *ris) {
+                ic[chiave] = p;
+                iconeChieste.erase(chiaveIcona(p, 96));
+                for (auto& g : tuttiGiochi) {
+                    if (chiaveGioco(g) == chiave) {
+                        if (g.icona) { g.icona->Release(); g.icona = nullptr; }
+                        g.iconaFile = p;
+                        g.iconaPers = true;
+                        g.provata = true;
+                    }
+                }
+                chiediIcona(p, 96);
+            }
+            salvaIconeGiochi(ic);
+            lDirty = true;
+        });
 }
 
 inline auto Motore::menuGioco(int i, POINT pt) -> void {
@@ -2317,6 +2754,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (hasCartella || hasFile)
         vv.push_back(menu::voce(testi::t(L"Apri percorso", L"Open folder"), 3));
     vv.push_back(menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 6));
+    vv.push_back(menu::voce(testi::t(L"Scarica icona online", L"Fetch icon online"), 10));
     if (a.iconaPers)
         vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 7));
     vv.push_back(menu::voce(testi::t(L"Rinomina…", L"Rename…"), 8));
@@ -2410,14 +2848,21 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         nm.erase(chiaveGioco(a));
         salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
+    } else if (cmd == 10) {
+        scaricaIconaGioco(a);
     }
 }
 
 inline auto Motore::menuSpazioGiochi(POINT pt) -> void {
     const auto nascosti = leggiGiochiNascosti();
+    auto v4 = menu::voce(testi::t(L"Scarica icone online", L"Fetch icons online"), 4);
+    v4.disattivata = lScaricaIconeInCorso;
     std::vector<menu::Voce> vv = {
         menu::voce(testi::t(L"Aggiungi gioco…", L"Add game shortcut…"), 1),
-        menu::voce(testi::t(L"Aggiorna giochi", L"Refresh games"), 2)
+        menu::voce(testi::t(L"Aggiorna giochi", L"Refresh games"), 2),
+        menu::separatore(),
+        v4,
+        menu::voce(testi::t(L"Chiave API SteamGridDB…", L"SteamGridDB API key…"), 5)
     };
     if (!nascosti.empty()) {
         vv.push_back(menu::separatore());
@@ -2427,6 +2872,8 @@ inline auto Motore::menuSpazioGiochi(POINT pt) -> void {
     if (cmd == 1) aggiungiGiocoDialogo();
     else if (cmd == 2) leggiTuttiGiochi(true);
     else if (cmd == 3) { salvaGiochiNascosti({}); leggiTuttiGiochi(true); }
+    else if (cmd == 4) scaricaTutteIconeOnline();
+    else if (cmd == 5) impostaChiaveSteamGridDB();
 }
 
 // Accensione: come il pulsante dello Start
