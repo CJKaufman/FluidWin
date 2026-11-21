@@ -4202,11 +4202,13 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                                                       menu::voce(gPausa ? testi::t(L"Riprendi animazioni", L"Resume animations")
                                                                         : testi::t(L"Metti in pausa", L"Pause"), 1),
                                                       menu::separatore(),
+                                                      menu::voce(testi::t(L"Riavvia", L"Restart"), 4),
                                                       menu::voce(testi::t(L"Esci", L"Exit"), 2)}, pt, h, true);
                 if (GetForegroundWindow() == h) attivaFinestraInCima();   // il fuoco non resta alla nostra finestra invisibile
                 if (scelta == 1) impostaPausa(!gPausa);
                 else if (scelta == 2) PostQuitMessage(0);
                 else if (scelta == 3) apriImpostazioni(true);
+                else if (scelta == 4) riavvia("richiesto dal menu tray");
             }
             return 0;
         case WM_DISPLAYCHANGE:
@@ -4584,6 +4586,24 @@ static void riavvia(const char* perche) {
     gRiavvio = true;
     logf("riavvio: %s", perche);
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    constexpr wchar_t suf[] = L".exe.vecchio";
+    constexpr size_t sufLen = sizeof(suf) / sizeof(suf[0]) - 1;
+    const size_t exeLen = wcslen(exe);
+    for (size_t pos = exeLen; pos >= sufLen; pos--) {
+        if (_wcsnicmp(exe + pos - sufLen, suf, sufLen) == 0) {
+            bool soloCifre = true;
+            for (size_t k = pos; k < exeLen; k++) if (exe[k] < L'0' || exe[k] > L'9') { soloCifre = false; break; }
+            if (soloCifre) {
+                wchar_t pulito[MAX_PATH];
+                const size_t keep = pos - (sufLen - 4);
+                wcsncpy(pulito, exe, keep);
+                pulito[keep] = L'\0';
+                if (GetFileAttributesW(pulito) != INVALID_FILE_ATTRIBUTES) wcscpy(exe, pulito);
+            }
+            break;
+        }
+        if (exe[pos - 1] < L'0' || exe[pos - 1] > L'9') break;
+    }
     wchar_t cmd[MAX_PATH + 96]; swprintf(cmd, MAX_PATH + 96, L"\"%ls\" --dopo %lu%ls", exe, GetCurrentProcessId(), gLog ? L" --log" : L"");
     STARTUPINFOW si{}; si.cb = sizeof(si); PROCESS_INFORMATION pi;
     // non riuscito: si riprova fra 10 s (non a ogni fotogramma). Prima gRiavvio restava acceso e FluidWin rimaneva per
@@ -4794,6 +4814,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.esci = [] { logf("esci dal menu del dock"); PostQuitMessage(0); };
     gImpostazioni.esci = [] { logf("esci dalle impostazioni"); PostQuitMessage(0); };
     gDock.impostazioni = [](const RECT* da) { gImpostazioni.apri(da, da == nullptr); };
+    gDock.riavvia = [] { riavvia("richiesto dall'utente"); };
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };

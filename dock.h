@@ -2820,7 +2820,7 @@ private:
     jumplist::Indice jumpList;           // comandi delle app (tasto destro sulle icone), letti dai file di Windows
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_APP_CHIUDI, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
-                  A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
+                  A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_RIAVVIA, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
@@ -3451,6 +3451,7 @@ public:
     // da cui le impostazioni crescono
     void (*impostazioni)(const RECT* da) = nullptr;
     void (*esci)() = nullptr;   // "Esci da FluidWin" (issue #16): l'uscita normale, che rimette Windows com'era
+    void (*riavvia)() = nullptr;
     // le impostazioni aperte dal centro di controllo si sono richiuse nel suo rettangolo: il centro ricompare li'
     void riapriControllo();
     // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
@@ -3905,11 +3906,13 @@ private:
             }
             if (vv.size() > 1) vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
+            if (riavvia) vv.push_back(menu::voce(testi::t(L"Riavvia FluidWin", L"Quick restart"), 5));
             // (con la barra di Windows nascosta l'icona nell'area di notifica non si vede: qui l'uscita si trova, #16)
             if (esci) vv.push_back(menu::voce(testi::t(L"Esci da FluidWin", L"Quit FluidWin"), 4));
             const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (sub) DestroyMenu(sub);
             if (s == 1 && impostazioni) impostazioni(nullptr);
+            else if (s == 5 && riavvia) riavvia();
             else if (s == 4 && esci) esci();
             else if (s == 2) mostraDesktop();
             else if (s == 3) ripristinaDesktop();

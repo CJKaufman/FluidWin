@@ -1250,6 +1250,33 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     const bool tScuro = sistema::Sistema::temaScuro();
     piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TEMA, tScuro, testi::t(L"Tema scuro", L"Dark theme"), tScuro ? testi::t(L"Attivo", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
     piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_FLUIDWIN, false, L"FluidWin", testi::t(L"Impostazioni", L"Settings"), scuro, ink);
+    if (riavvia) {
+        const float cx = PW - 16 * dpi - 18 * dpi, cy = y + th / 2, rr = 13 * dpi;
+        const int e = aggiungi({cx - rr - 2 * dpi, cy - rr - 2 * dpi, cx + rr + 2 * dpi, cy + rr + 2 * dpi}, A_RIAVVIA, 0);
+        const double h = evidenzia(e, {0, 0, 0, 0}, scuro, 0);
+        const float sc = (e == pPremuto) ? 0.92f : 1.0f;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f + 0.10f * (float)h) : D2D1::ColorF(0, 0, 0, 0.07f + 0.08f * (float)h));
+        dc->FillEllipse({{cx, cy}, rr * sc, rr * sc}, pennello);
+        pennello->SetColor(ink);
+        ID2D1PathGeometry* g = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
+            ID2D1GeometrySink* s = nullptr;
+            if (SUCCEEDED(g->Open(&s))) {
+                const float ar = 5.5f * dpi;
+                s->BeginFigure({cx + ar, cy}, D2D1_FIGURE_BEGIN_HOLLOW);
+                s->AddArc(D2D1::ArcSegment({cx, cy - ar}, {ar, ar}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                s->EndFigure(D2D1_FIGURE_END_OPEN);
+                s->BeginFigure({cx - 3.0f * dpi, cy - ar - 2.4f * dpi}, D2D1_FIGURE_BEGIN_HOLLOW);
+                s->AddLine({cx, cy - ar});
+                s->AddLine({cx - 3.0f * dpi, cy - ar + 2.4f * dpi});
+                s->EndFigure(D2D1_FIGURE_END_OPEN);
+                s->Close();
+                s->Release();
+                dc->DrawGeometry(g, pennello, 1.5f * dpi, tratto);
+            }
+            g->Release();
+        }
+    }
     // tieni sveglio e non disturbare (comodita.h): il clic apre il menu delle durate
     y += th + tg;
     piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_SVEGLIO, comodita::sveglio(), testi::t(L"Non dormire", L"Keep awake"),
@@ -2585,6 +2612,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             if (impostazioni) impostazioni(da ? &r : nullptr);
             break;
         }
+        case A_RIAVVIA:
+            nascondiPannello();
+            if (riavvia) riavvia();
+            break;
         case A_TIMER: {
             std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Timer", L"Timer"))};
             const int minuti[] = {1, 3, 5, 10, 15, 25, 30, 45, 60};
@@ -2771,6 +2802,15 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             const int e = d->elementoIn(x, y);
             if (e >= 0 && d->elementi[e].azione == A_RETE) { d->chiudiPannello(); apriPagina(L"ms-settings:network-status"); return 0; }
             if (e >= 0 && d->elementi[e].azione == A_BLUETOOTH) { d->chiudiPannello(); apriPagina(L"ms-settings:bluetooth"); return 0; }
+            if (e >= 0 && (d->elementi[e].azione == A_FLUIDWIN || d->elementi[e].azione == A_RIAVVIA)) {
+                POINT pt{(LONG)x, (LONG)y}; ClientToScreen(h, &pt);
+                std::vector<menu::Voce> voci = {menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni", L"Settings"), 1)};
+                if (d->riavvia) voci.push_back(menu::voce(testi::t(L"Riavvia FluidWin", L"Quick restart"), 2));
+                const int s = (int)d->menuScheda(voci, pt, h);
+                if (s == 1) d->eseguiPannello(Elemento{{}, A_FLUIDWIN, 0});
+                else if (s == 2) d->eseguiPannello(Elemento{{}, A_RIAVVIA, 0});
+                return 0;
+            }
             if (e < 0 || (d->elementi[e].azione != A_APP && d->elementi[e].azione != A_APP_CHIUDI)) return 0;
             const int indice = d->elementi[e].indice;
             if (indice < 0 || indice >= (int)d->appSfondo.size()) return 0;
