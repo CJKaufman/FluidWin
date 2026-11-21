@@ -3032,7 +3032,6 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
         float scrollY = 0.0f;
         int hovTile = -1;
         bool hovClose = false;
-        bool hovKey = false;
         bool hovCancel = false;
         bool trackingMouse = false;
         int pressedKind = 0;
@@ -3058,13 +3057,6 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
             const float s = v.dpi;
             const float pad = 20.0f * s, sz = 28.0f * s;
             return { (float)v.W - pad - sz, 14.0f * s, (float)v.W - pad, 14.0f * s + sz };
-        }
-
-        D2D1_RECT_F rectKey() const {
-            const float s = v.dpi;
-            const float pad = 20.0f * s, h = 30.0f * s, w = 168.0f * s;
-            const float y = gridBottom() + (footerH() - h) * 0.5f;
-            return { pad, y, pad + w, y + h };
         }
 
         D2D1_RECT_F rectCancel() const {
@@ -3399,7 +3391,6 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
                 v.rt->DrawRoundedRectangle(D2D1::RoundedRect(r, pr, pr), v.pen, 1.0f);
                 v.testo(label, fBtn, r, v.inchiostro());
             };
-            disegnaPill(rectKey(), testi::t(L"Chiave SteamGridDB…", L"SteamGridDB key…"), hovKey);
             disegnaPill(rectCancel(), testi::t(L"Annulla", L"Cancel"), hovCancel);
 
             v.finisci();
@@ -3460,12 +3451,10 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
                         trackingMouse = TrackMouseEvent(&tme) != FALSE;
                     }
                     const bool hc = dentro(rectClose(), mx, my);
-                    const bool hk = dentro(rectKey(), mx, my);
                     const bool ha = dentro(rectCancel(), mx, my);
                     const int ht = tileAt(mx, my);
-                    if (hc != hovClose || hk != hovKey || ha != hovCancel || ht != hovTile) {
+                    if (hc != hovClose || ha != hovCancel || ht != hovTile) {
                         hovClose = hc;
-                        hovKey = hk;
                         hovCancel = ha;
                         hovTile = ht;
                         InvalidateRect(h, nullptr, FALSE);
@@ -3474,8 +3463,8 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
                 }
                 case WM_MOUSELEAVE:
                     trackingMouse = false;
-                    if (hovClose || hovKey || hovCancel || hovTile != -1) {
-                        hovClose = hovKey = hovCancel = false;
+                    if (hovClose || hovCancel || hovTile != -1) {
+                        hovClose = hovCancel = false;
                         hovTile = -1;
                         InvalidateRect(h, nullptr, FALSE);
                     }
@@ -3485,11 +3474,6 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
                     const float my = (float)(short)HIWORD(l);
                     if (dentro(rectClose(), mx, my)) {
                         pressedKind = 1;
-                        SetCapture(h);
-                        return true;
-                    }
-                    if (dentro(rectKey(), mx, my)) {
-                        pressedKind = 2;
                         SetCapture(h);
                         return true;
                     }
@@ -3528,24 +3512,6 @@ inline auto Motore::scegliIconaOnline(const AppL& a) -> void {
                     if (kind == 3 && dentro(rectCancel(), mx, my)) {
                         fermaWorker();
                         finito = true;
-                        return true;
-                    }
-                    if (kind == 2 && dentro(rectKey(), mx, my)) {
-                        const std::wstring prima = apiKey;
-                        EnableWindow(h, FALSE);
-                        motore->impostaChiaveSteamGridDB();
-                        motore->lDialogoAperto = true;
-                        EnableWindow(motore->launcher, FALSE);
-                        EnableWindow(h, TRUE);
-                        SetForegroundWindow(h);
-                        SetFocus(h);
-                        const std::wstring dopo = motore->leggiChiaveSteamGridDB();
-                        if (dopo != prima) {
-                            apiKey = dopo;
-                            avviaRicerca();
-                        } else {
-                            InvalidateRect(h, nullptr, FALSE);
-                        }
                         return true;
                     }
                     if (kind == 4 && pTile >= 0 && pTile < (int)elementi.size() && tileAt(mx, my) == pTile) {
