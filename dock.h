@@ -52,6 +52,8 @@
 #include <initializer_list>
 #include <unordered_map>
 #include <mutex>
+#include <atomic>
+#include <thread>
 #include <unordered_set>
 #include <deque>
 #include <functional>
@@ -3562,6 +3564,8 @@ private:
     void rinominaGioco(const AppL& a);
 
     auto scaricaIconaGioco(const AppL& a) -> void;
+
+    auto scegliIconaOnline(const AppL& a) -> void;
 
     auto scaricaTutteIconeOnline() -> void;
 
