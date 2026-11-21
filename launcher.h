@@ -1127,7 +1127,7 @@ inline auto Motore::posizionaLauncher() -> void {
     const int L = (int)std::lround(gx + (r.left - gx) * s), T = (int)std::lround(gy + (r.top - gy) * s);
     const int R = (int)std::lround(gx + (r.right - gx) * s), B = (int)std::lround(gy + (r.bottom - gy) * s);
     SetWindowPos(vetroLauncher, launcher, L, T, std::max(1, R - L), std::max(1, B - T), SWP_NOACTIVATE);
-    SetLayeredWindowAttributes(vetroLauncher, 0, (BYTE)std::lround(std::clamp(lAlfa, 0.0, 1.0) * 255), LWA_ALPHA);
+    SetLayeredWindowAttributes(vetroLauncher, 0, alfaVetro((float)lAlfa), LWA_ALPHA);
     dcomp->Commit();
 }
 

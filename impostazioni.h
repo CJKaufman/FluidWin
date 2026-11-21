@@ -44,6 +44,7 @@ struct Valori {
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockGiochi = true;       // pulsante Giochi nel dock accanto a quello delle app
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
+    int stileVetro = 0;           // stile del vetro (vetro::Stile: acrilico, liquido, mica, trasparente)
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -135,6 +136,8 @@ inline void carica() {
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockGiochi = leggiDword(L"DockGiochi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
+    v.stileVetro = std::clamp((int)leggiDword(L"StileVetro", 0), 0, vetro::N_STILI - 1);
+    vetro::stile() = v.stileVetro;
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -156,7 +159,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -236,6 +239,7 @@ public:
         // (lo sfondo puo' essere cambiato da fuori: si rilegge, e la miniatura del tuo si rifa')
         sfondoAttuale = -2; sfondoErrore = false; provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; }
         if (sfondoInCorso != -2 && vetro::ms() - sfondoDa >= 15000) sfondoInCorso = -2;   // (risposta persa: vedi scegliSfondo)
+        scorriSez = 0; massimoSez = 0; rotella = 0;
         if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
         v.alfa(daCentro ? 1 : 0);
         vetro::battito(v.fin, 1);
@@ -524,6 +528,7 @@ private:
     static constexpr DWORD COLORI[] = {0x2C2C2E, 0xF2F2F7, 0x0A84FF, 0x5E5CE6, 0xBF5AF2, 0xFF375F, 0xFF9F0A, 0x30D158};
     static constexpr int N_COLORI = sizeof(COLORI) / sizeof(COLORI[0]);
     static constexpr int Z_COLORE_MIO = Z_COLORE + 1 + N_COLORI;
+    static constexpr int Z_STILE = 620;
     void scegliColore(int id) {
         DWORD& c = valori().dockColore;
         if (id == Z_COLORE) c = 0;
@@ -705,7 +710,7 @@ private:
 
     void vaiASezione(int s) {
         if (s == sezione) return;
-        sezione = s; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
+        sezione = s; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0; rotella = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -718,6 +723,16 @@ private:
             scegliColore(id);
             salva();
             if (cambiato) cambiato();
+            disegna();
+            return;
+        }
+        if (id >= Z_STILE && id < Z_STILE + vetro::N_STILI) {
+            valori().stileVetro = id - Z_STILE;
+            vetro::stile() = valori().stileVetro;
+            v.aggiornaStile();
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
             disegna();
             return;
         }
@@ -1156,7 +1171,7 @@ private:
                 const wchar_t* nomi[4] = {testi::t(L"In basso", L"Bottom"), testi::t(L"In alto", L"Top"), testi::t(L"A sinistra", L"Left"), testi::t(L"A destra", L"Right")};
                 for (int i = 0; i < 4; i++) {
                     const D2D1_RECT_F r = {x0 + larg * i / 4 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 4 - 3 * d, yl + h - 3 * d};
-                    zone.push_back({r, 140 + i});
+                    aggiungiZona(r, 140 + i);
                     if (valori().dockLato == i) {
                         v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
                         v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
@@ -1165,6 +1180,46 @@ private:
                         v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
                     }
                     v.testo(nomi[i], fCentro, r, inkS);
+                }
+                y += 70 * d;
+            }
+            // tema del vetro: Acrilico, Liquido, Mica, Trasparente
+            {
+                const D2D1_RECT_F r = {L, y, R, y + 64 * d};
+                riquadro(r, false);
+                const std::wstring tit = testi::t(L"Tema del vetro", L"Glass theme");
+                const std::wstring sub = testi::t(L"Dock, pannelli e menu", L"Dock, panels and menus");
+                const wchar_t* nomi[vetro::N_STILI] = {
+                    testi::t(L"Acrilico", L"Acrylic"),
+                    testi::t(L"Liquido", L"Liquid"),
+                    L"Mica",
+                    testi::t(L"Trasparente", L"Clear")
+                };
+                float lw[vetro::N_STILI]{}, sumW = 0;
+                for (int k = 0; k < vetro::N_STILI; k++) { lw[k] = v.larghezza(nomi[k], fCentro); sumW += lw[k]; }
+                const float xLeftEnd = std::min(r.right - 16 * d - 240 * d,
+                                                r.left + 16 * d + std::max(v.larghezza(tit, fVoce), v.larghezza(sub, fSotto)) + 12 * d);
+                const float larg = std::min(360 * d, r.right - 16 * d - xLeftEnd);
+                const float x0 = r.right - 16 * d - larg, h = 34 * d, yl = r.top + 15 * d;
+                v.testo(tit, fVoce, {r.left + 16 * d, r.top + 11 * d, x0 - 10 * d, r.top + 33 * d}, inkS);
+                v.testo(sub, fSotto, {r.left + 16 * d, r.top + 32 * d, x0 - 10 * d, r.top + 52 * d}, tenueS);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                const float pad = std::max(4.0f * d, (larg - 6 * d - sumW) / (float)vetro::N_STILI);
+                float cx = x0 + 3 * d;
+                for (int k = 0; k < vetro::N_STILI; k++) {
+                    const float pw = lw[k] + pad;
+                    const D2D1_RECT_F rp = {cx, yl + 3 * d, cx + pw, yl + h - 3 * d};
+                    aggiungiZona(rp, Z_STILE + k);
+                    if (valori().stileVetro == k) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    } else if (sopra == Z_STILE + k) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                    }
+                    v.testo(nomi[k], fCentro, rp, inkS);
+                    cx += pw;
                 }
                 y += 70 * d;
             }

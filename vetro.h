@@ -19,6 +19,68 @@
 
 namespace vetro {
 
+enum Stile {
+    STILE_ACRILICO    = 0,
+    STILE_LIQUIDO     = 1,
+    STILE_MICA        = 2,
+    STILE_TRASPARENTE = 3,
+    N_STILI           = 4
+};
+inline int& stile() { static int s = STILE_ACRILICO; return s; }
+inline int tipoBackdrop(bool acrilico = true) {
+    if (!acrilico) return 1;
+    switch (stile()) {
+        case STILE_MICA:        return 2;
+        case STILE_TRASPARENTE: return 1;
+        default:                return 3;
+    }
+}
+
+inline void disegnaVelo(ID2D1RenderTarget* rt, ID2D1SolidColorBrush* pen, int W, int H, float dpi,
+                        bool scuro, bool usaAcrilico = true, float velo = 1) {
+    if (!rt || !pen || velo <= 0) return;
+    const D2D1_RECT_F tutto = {0, 0, (float)W, (float)H};
+    const float rad = raggio::vetro() * dpi;
+    switch (stile()) {
+        case STILE_LIQUIDO:
+            pen->SetColor(scuro ? D2D1::ColorF(0.08f, 0.10f, 0.14f, 0.22f * velo)
+                                : D2D1::ColorF(1, 1, 1, 0.26f * velo));
+            rt->FillRectangle(tutto, pen);
+            pen->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.07f : 0.22f) * velo));
+            rt->FillRectangle({0, 0, (float)W, (float)H * 0.36f}, pen);
+            if (usaAcrilico && W > 2 && H > 2) {
+                pen->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.42f : 0.78f) * velo));
+                rt->DrawRoundedRectangle({{1.0f, 1.0f, (float)W - 1.0f, (float)H - 1.0f}, rad, rad}, pen, 1.4f);
+                if (W > 8.0f * dpi && H > 8.0f * dpi) {
+                    const float ri = std::max(2.0f, rad - 2.5f * dpi);
+                    pen->SetColor(D2D1::ColorF(1, 1, 1, (scuro ? 0.14f : 0.35f) * velo));
+                    rt->DrawRoundedRectangle({{3.0f * dpi, 3.0f * dpi, (float)W - 3.0f * dpi, (float)H - 3.0f * dpi}, ri, ri}, pen, 1.0f);
+                }
+            }
+            break;
+        case STILE_MICA:
+            pen->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.15f, 0.62f * velo)
+                                : D2D1::ColorF(0.95f, 0.95f, 0.97f, 0.68f * velo));
+            rt->FillRectangle(tutto, pen);
+            break;
+        case STILE_TRASPARENTE:
+            pen->SetColor(scuro ? D2D1::ColorF(0.06f, 0.06f, 0.08f, 0.18f * velo)
+                                : D2D1::ColorF(1, 1, 1, 0.22f * velo));
+            rt->FillRectangle(tutto, pen);
+            if (W > 2 && H > 2) {
+                pen->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.28f * velo)
+                                    : D2D1::ColorF(0, 0, 0, 0.20f * velo));
+                rt->DrawRoundedRectangle({{1.0f, 1.0f, (float)W - 1.0f, (float)H - 1.0f}, rad, rad}, pen, 1.2f);
+            }
+            break;
+        default:
+            pen->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.45f * velo)
+                                : D2D1::ColorF(1, 1, 1, 0.55f * velo));
+            rt->FillRectangle(tutto, pen);
+            break;
+    }
+}
+
 inline bool temaScuro() {
     DWORD v = 1, n = sizeof(v);
     RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
@@ -79,6 +141,7 @@ public:
     int W = 0, H = 0;
     float dpi = 1;
     bool scuro = false;
+    bool usaAcrilico = true;
 
     // angoli: preferenza di DWM (1 = squadrati, 2 = arrotondati, 3 = piccoli); attivabile: prende la tastiera
     // inCima: sempre sopra le altre finestre (indicatori, pannelli); senza, e' una finestra normale (impostazioni)
@@ -93,11 +156,12 @@ public:
         if (!attivabile) ex |= WS_EX_NOACTIVATE;
         fin = CreateWindowExW(ex, classe, L"FluidWin", WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, GetModuleHandleW(nullptr), io);
         if (!fin) return false;
+        usaAcrilico = acrilico;
         SetLayeredWindowAttributes(fin, 0, 0, LWA_ALPHA);
         scuro = temaScuro();
         MARGINS mg{-1, -1, -1, -1}; DwmExtendFrameIntoClientArea(fin, &mg);
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &sc, sizeof(sc));
-        int tipo = acrilico ? 3 : 1; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
+        aggiornaStile();
         if (angoli == 2) raggio::registra(fin);   // angoli normali: quelli dell'impostazione "Angoli" (anche cambiandola dopo)
         else DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
@@ -115,10 +179,17 @@ public:
         return true;
     }
 
+    void aggiornaStile() {
+        if (!fin) return;
+        int tipo = tipoBackdrop(usaAcrilico);
+        DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
+    }
+
     // tema chiaro/scuro riletto a ogni apertura (si puo' cambiare dal centro di controllo)
     void aggiornaTema() {
         scuro = temaScuro();
         BOOL sc = scuro; DwmSetWindowAttribute(fin, 20, &sc, sizeof(sc));
+        aggiornaStile();
     }
 
     void posiziona(int x, int y, int w, int h, HWND dopo = HWND_TOPMOST, UINT extra = 0) {
@@ -175,10 +246,7 @@ public:
         rt->BeginDraw();
         rt->SetTransform(D2D1::Matrix3x2F::Identity());
         rt->Clear(D2D1::ColorF(0, 0, 0, 0));
-        if (velo > 0) {
-            pen->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.45f * velo) : D2D1::ColorF(1, 1, 1, 0.55f * velo));
-            rt->FillRectangle({0, 0, (float)W, (float)H}, pen);
-        }
+        disegnaVelo(rt, pen, W, H, dpi, scuro, usaAcrilico, velo);
         return true;
     }
 
