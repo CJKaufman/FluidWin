@@ -3358,7 +3358,7 @@ private:
 
     // ---- launcher: tutte le app, con la ricerca (tasto Win o icona "App" del dock) ----
     struct AppL {
-        std::wstring nome, avvio, minuscolo, iconaFile, cartella;
+        std::wstring nome, avvio, argomenti, minuscolo, iconaFile, cartella;
         bool manuale = false;
         bool iconaPers = false;
         bool nomePers = false;
@@ -3366,6 +3366,7 @@ private:
         bool provata = false;
     };
     static std::wstring sorgenteIconaL(const AppL& a) { return a.iconaFile.empty() ? a.avvio : a.iconaFile; }
+    static std::wstring chiaveGioco(const AppL& a) { return minuscolo(a.argomenti.empty() ? a.avvio : (a.avvio + L" " + a.argomenti)); }
     HWND launcher = nullptr, vetroLauncher = nullptr;
     IDXGISwapChain1* scL = nullptr; IDCompositionTarget* targetL = nullptr; IDCompositionVisual* visualL = nullptr;
     IDCompositionEffectGroup* effettoL = nullptr; ID2D1Bitmap1* bersaglioL = nullptr;
@@ -3556,7 +3557,7 @@ private:
 
     void rinominaGioco(const AppL& a);
 
-    void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"");
+    void aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona = L"", const std::wstring& argomenti = L"");
 
     void menuEnergia(POINT pt);
 
