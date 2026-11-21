@@ -311,6 +311,94 @@ static inline bool coppiaVdf(const std::wstring& riga, std::wstring& chiave, std
     return leggi(i, chiave) && leggi(i, val);
 }
 
+static inline std::wstring rimuoviVirgolette(std::wstring s) {
+    while (s.size() >= 2 && s.front() == L'"' && s.back() == L'"') s = s.substr(1, s.size() - 2);
+    return s;
+}
+
+static inline std::wstring estraiExeDaComando(const std::wstring& cmd) {
+    size_t i = 0;
+    while (i < cmd.size() && iswspace(cmd[i])) i++;
+    if (i >= cmd.size()) return L"";
+    if (cmd[i] == L'"') {
+        const size_t f = cmd.find(L'"', i + 1);
+        return f == std::wstring::npos ? cmd.substr(i + 1) : cmd.substr(i + 1, f - i - 1);
+    }
+    const size_t f = cmd.find_first_of(L" \t", i);
+    return f == std::wstring::npos ? cmd.substr(i) : cmd.substr(i, f - i);
+}
+
+static inline bool leggiStringaJson(const std::wstring& txt, size_t& i, std::wstring& out) {
+    if (i >= txt.size() || txt[i] != L'"') return false;
+    i++;
+    out.clear();
+    while (i < txt.size() && txt[i] != L'"') {
+        if (txt[i] == L'\\' && i + 1 < txt.size()) {
+            const wchar_t c = txt[i + 1];
+            if (c == L'"' || c == L'\\' || c == L'/') out.push_back(c);
+            else if (c == L'n') out.push_back(L'\n');
+            else if (c == L'r') out.push_back(L'\r');
+            else if (c == L't') out.push_back(L'\t');
+            else out.push_back(c);
+            i += 2;
+        } else {
+            out.push_back(txt[i++]);
+        }
+    }
+    if (i >= txt.size()) return false;
+    i++;
+    return true;
+}
+
+static inline size_t trovaChiaveJson(const std::wstring& txt, const wchar_t* chiave) {
+    const std::wstring ago = std::wstring(L"\"") + chiave + L"\"";
+    size_t pos = 0;
+    while ((pos = txt.find(ago, pos)) != std::wstring::npos) {
+        if (pos > 0 && txt[pos - 1] == L'\\') { pos += ago.size(); continue; }
+        size_t i = pos + ago.size();
+        while (i < txt.size() && iswspace(txt[i])) i++;
+        if (i < txt.size() && txt[i] == L':') {
+            i++;
+            while (i < txt.size() && iswspace(txt[i])) i++;
+            return i;
+        }
+        pos += ago.size();
+    }
+    return std::wstring::npos;
+}
+
+static inline std::wstring valoreJson(const std::wstring& txt, const wchar_t* chiave) {
+    size_t i = trovaChiaveJson(txt, chiave);
+    if (i == std::wstring::npos) return L"";
+    std::wstring out;
+    return leggiStringaJson(txt, i, out) ? out : L"";
+}
+
+static inline bool boolJson(const std::wstring& txt, const wchar_t* chiave) {
+    const size_t i = trovaChiaveJson(txt, chiave);
+    if (i == std::wstring::npos) return false;
+    return txt.compare(i, 4, L"true") == 0;
+}
+
+static inline std::vector<std::wstring> arrayStringheJson(const std::wstring& txt, const wchar_t* chiave) {
+    std::vector<std::wstring> r;
+    size_t i = trovaChiaveJson(txt, chiave);
+    if (i == std::wstring::npos || i >= txt.size() || txt[i] != L'[') return r;
+    i++;
+    while (i < txt.size()) {
+        while (i < txt.size() && (iswspace(txt[i]) || txt[i] == L',')) i++;
+        if (i >= txt.size() || txt[i] == L']') break;
+        if (txt[i] == L'"') {
+            std::wstring s;
+            if (!leggiStringaJson(txt, i, s)) break;
+            r.push_back(std::move(s));
+        } else {
+            i++;
+        }
+    }
+    return r;
+}
+
 static inline void cercaExeRic(const std::wstring& dir, int prof, std::wstring& migliore, ULONGLONG& maxMigliore, std::wstring& ripiego, ULONGLONG& maxRipiego) {
     static const wchar_t* const scarta[] = {
         L"crash", L"unins", L"setup", L"redist", L"dxsetup", L"vcredist",
@@ -497,7 +585,7 @@ inline auto Motore::applicaTuttiGiochi(std::vector<AppL> nuovi) -> void {
     for (auto& a : nuovi) {
         const std::wstring s = sorgenteIconaL(a);
         for (auto& v : tuttiGiochi) {
-            if (v.avvio == a.avvio && sorgenteIconaL(v) == s) {
+            if (v.avvio == a.avvio && v.argomenti == a.argomenti && sorgenteIconaL(v) == s) {
                 a.icona = v.icona; a.provata = v.provata; v.icona = nullptr; break;
             }
         }
@@ -516,8 +604,15 @@ inline auto Motore::applicaTuttiGiochi(std::vector<AppL> nuovi) -> void {
 
 inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
     std::unordered_map<std::wstring, AppL> steam;
+    std::unordered_map<std::wstring, AppL> ubisoft;
+    struct RiotCand {
+        std::wstring nome, product, patchline, cartella, iconaFile, uninstall;
+    };
+    std::unordered_map<std::wstring, RiotCand> riotCand;
+    std::vector<AppL> blizzardCand;
+
     auto pulisciIcona = [](std::wstring s) -> std::wstring {
-        while (s.size() >= 2 && s.front() == L'"' && s.back() == L'"') s = s.substr(1, s.size() - 2);
+        s = rimuoviVirgolette(std::move(s));
         const size_t virg = s.rfind(L',');
         if (virg != std::wstring::npos && virg + 1 < s.size()) {
             bool cifre = true;
@@ -528,11 +623,32 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
             if (cifre) {
                 std::wstring prima = s.substr(0, virg);
                 while (!prima.empty() && prima.back() == L' ') prima.pop_back();
-                while (prima.size() >= 2 && prima.front() == L'"' && prima.back() == L'"') prima = prima.substr(1, prima.size() - 2);
+                prima = rimuoviVirgolette(std::move(prima));
                 if (esisteFile(prima) || finisceCon(prima, L".ico") || finisceCon(prima, L".exe")) s = std::move(prima);
             }
         }
         return s;
+    };
+
+    auto raccogliRiotSub = [&](const wchar_t* nomeSub, HKEY hSub) {
+        const std::wstring suff = nomeSub + 10;
+        const size_t dot = suff.find(L'.');
+        if (dot == std::wstring::npos || dot == 0 || dot + 1 >= suff.size()) return;
+        const std::wstring product = suff.substr(0, dot);
+        const std::wstring patchline = suff.substr(dot + 1);
+        if (_wcsicmp(product.c_str(), L"Riot_Client") == 0) return;
+        const std::wstring key = minuscolo(suff);
+        RiotCand& rc = riotCand[key];
+        if (rc.product.empty()) rc.product = product;
+        if (rc.patchline.empty()) rc.patchline = patchline;
+        const std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
+        const std::wstring dIcon = pulisciIcona(leggiValoreReg(hSub, L"DisplayIcon"));
+        const std::wstring dLoc = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hSub, L"InstallLocation")));
+        const std::wstring uninst = leggiValoreReg(hSub, L"UninstallString");
+        if (rc.nome.empty() && !dName.empty()) rc.nome = dName;
+        if (rc.cartella.empty() && !dLoc.empty()) rc.cartella = dLoc;
+        if (rc.iconaFile.empty() && esisteFile(dIcon)) rc.iconaFile = dIcon;
+        if (rc.uninstall.empty() && !uninst.empty()) rc.uninstall = uninst;
     };
 
     const wchar_t* const radiciReg[] = {
@@ -547,24 +663,73 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
             for (DWORD idx = 0; ; idx++) {
                 DWORD len = 256;
                 if (RegEnumKeyExW(hRad, idx, nomeSub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
-                if (wcsncmp(nomeSub, L"Steam App ", 10) != 0) continue;
-                const std::wstring appid = nomeSub + 10;
-                if (appid.empty() || appid == L"228980") continue;
                 HKEY hSub = nullptr;
                 if (RegOpenKeyExW(hRad, nomeSub, 0, KEY_READ | vista, &hSub) != ERROR_SUCCESS) continue;
-                const std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
-                const std::wstring dIcon = pulisciIcona(leggiValoreReg(hSub, L"DisplayIcon"));
-                std::wstring dLoc = leggiValoreReg(hSub, L"InstallLocation");
-                while (dLoc.size() >= 2 && dLoc.front() == L'"' && dLoc.back() == L'"') dLoc = dLoc.substr(1, dLoc.size() - 2);
-                dLoc = normalizzaPercorso(std::move(dLoc));
+                if (wcsncmp(nomeSub, L"Steam App ", 10) == 0) {
+                    const std::wstring appid = nomeSub + 10;
+                    if (!appid.empty() && appid != L"228980") {
+                        const std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
+                        const std::wstring dIcon = pulisciIcona(leggiValoreReg(hSub, L"DisplayIcon"));
+                        const std::wstring dLoc = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hSub, L"InstallLocation")));
+                        AppL& cur = steam[minuscolo(appid)];
+                        if (cur.avvio.empty()) cur.avvio = L"steam://rungameid/" + appid;
+                        if (cur.nome.empty() && !dName.empty()) cur.nome = dName;
+                        if (cur.cartella.empty() && !dLoc.empty()) cur.cartella = dLoc;
+                        if (cur.iconaFile.empty() && esisteFile(dIcon)) cur.iconaFile = dIcon;
+                    }
+                } else if (wcsncmp(nomeSub, L"Uplay Install ", 14) == 0) {
+                    const std::wstring id = nomeSub + 14;
+                    if (!id.empty()) {
+                        const std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
+                        const std::wstring dIcon = pulisciIcona(leggiValoreReg(hSub, L"DisplayIcon"));
+                        const std::wstring dLoc = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hSub, L"InstallLocation")));
+                        AppL& cur = ubisoft[minuscolo(id)];
+                        if (cur.avvio.empty()) cur.avvio = L"uplay://launch/" + id + L"/0";
+                        if (cur.nome.empty() && !dName.empty()) cur.nome = dName;
+                        if (cur.cartella.empty() && !dLoc.empty()) cur.cartella = dLoc;
+                        if (cur.iconaFile.empty() && esisteFile(dIcon)) cur.iconaFile = dIcon;
+                    }
+                } else if (wcsncmp(nomeSub, L"Riot Game ", 10) == 0) {
+                    raccogliRiotSub(nomeSub, hSub);
+                } else {
+                    const std::wstring pub = minuscolo(leggiValoreReg(hSub, L"Publisher"));
+                    if (pub.find(L"blizzard entertainment") != std::wstring::npos) {
+                        const std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
+                        if (!dName.empty() && _wcsicmp(dName.c_str(), L"Battle.net") != 0 &&
+                            _wcsicmp(dName.c_str(), L"Blizzard Battle.net") != 0 &&
+                            _wcsicmp(dName.c_str(), L"Blizzard Battle.net App") != 0) {
+                            const std::wstring dLoc = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hSub, L"InstallLocation")));
+                            const std::wstring dIcon = pulisciIcona(leggiValoreReg(hSub, L"DisplayIcon"));
+                            if (!dLoc.empty()) {
+                                AppL b;
+                                b.nome = dName;
+                                b.cartella = dLoc;
+                                b.iconaFile = dIcon;
+                                blizzardCand.push_back(std::move(b));
+                            }
+                        }
+                    }
+                }
                 RegCloseKey(hSub);
-                AppL& cur = steam[minuscolo(appid)];
-                if (cur.avvio.empty()) cur.avvio = L"steam://rungameid/" + appid;
-                if (cur.nome.empty() && !dName.empty()) cur.nome = dName;
-                if (cur.cartella.empty() && !dLoc.empty()) cur.cartella = dLoc;
-                if (cur.iconaFile.empty() && esisteFile(dIcon)) cur.iconaFile = dIcon;
             }
             RegCloseKey(hRad);
+        }
+    }
+
+    {
+        HKEY hCu = nullptr;
+        if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall", 0, KEY_READ, &hCu) == ERROR_SUCCESS) {
+            wchar_t nomeSub[256];
+            for (DWORD idx = 0; ; idx++) {
+                DWORD len = 256;
+                if (RegEnumKeyExW(hCu, idx, nomeSub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                if (wcsncmp(nomeSub, L"Riot Game ", 10) != 0) continue;
+                HKEY hSub = nullptr;
+                if (RegOpenKeyExW(hCu, nomeSub, 0, KEY_READ, &hSub) != ERROR_SUCCESS) continue;
+                raccogliRiotSub(nomeSub, hSub);
+                RegCloseKey(hSub);
+            }
+            RegCloseKey(hCu);
         }
     }
 
@@ -655,6 +820,270 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
         nuove.push_back(std::move(a));
     }
 
+    std::wstring progData;
+    {
+        wchar_t pd[MAX_PATH] = L"";
+        if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, pd)) && pd[0])
+            progData = normalizzaPercorso(pd);
+    }
+
+    {
+        std::vector<std::wstring> epicDirs;
+        std::unordered_set<std::wstring> epicDirViste;
+        auto aggiungiEpicDir = [&](std::wstring d) {
+            d = normalizzaPercorso(std::move(d));
+            if (d.empty() || !esisteCartella(d)) return;
+            if (epicDirViste.insert(minuscolo(d)).second) epicDirs.push_back(std::move(d));
+        };
+        const wchar_t* const epicReg[] = {
+            L"SOFTWARE\\WOW6432Node\\Epic Games\\EpicGamesLauncher",
+            L"SOFTWARE\\Epic Games\\EpicGamesLauncher"
+        };
+        for (const wchar_t* r : epicReg) {
+            for (REGSAM vista : {(REGSAM)KEY_WOW64_64KEY, (REGSAM)KEY_WOW64_32KEY}) {
+                HKEY hEp = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, r, 0, KEY_READ | vista, &hEp) != ERROR_SUCCESS) continue;
+                const std::wstring ad = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hEp, L"AppDataPath")));
+                RegCloseKey(hEp);
+                if (!ad.empty()) aggiungiEpicDir(ad + L"\\Manifests");
+            }
+        }
+        if (!progData.empty()) aggiungiEpicDir(progData + L"\\Epic\\EpicGamesLauncher\\Data\\Manifests");
+        else aggiungiEpicDir(L"C:\\ProgramData\\Epic\\EpicGamesLauncher\\Data\\Manifests");
+
+        std::unordered_set<std::wstring> epicVisti;
+        for (const auto& dir : epicDirs) {
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((dir + L"\\*.item").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const std::wstring txt = leggiFileUtf8(dir + L"\\" + fd.cFileName);
+                if (txt.empty() || boolJson(txt, L"bIsIncompleteInstall")) continue;
+                const std::wstring displayName = valoreJson(txt, L"DisplayName");
+                const std::wstring appName = valoreJson(txt, L"AppName");
+                if (displayName.empty() || appName.empty()) continue;
+                const std::wstring mainGame = valoreJson(txt, L"MainGameAppName");
+                if (!mainGame.empty() && _wcsicmp(mainGame.c_str(), appName.c_str()) != 0) continue;
+                const auto cats = arrayStringheJson(txt, L"AppCategories");
+                bool haGiochi = false, haMotore = false;
+                for (const auto& c : cats) {
+                    const std::wstring cm = minuscolo(c);
+                    if (cm == L"games") haGiochi = true;
+                    else if (cm == L"engines" || cm == L"plugins") haMotore = true;
+                }
+                if (haMotore && !haGiochi) continue;
+                const std::wstring installLoc = normalizzaPercorso(valoreJson(txt, L"InstallLocation"));
+                if (!esisteCartella(installLoc)) continue;
+                if (!epicVisti.insert(minuscolo(appName)).second) continue;
+                const std::wstring ns = valoreJson(txt, L"CatalogNamespace");
+                const std::wstring cid = valoreJson(txt, L"CatalogItemId");
+                const std::wstring launchExe = valoreJson(txt, L"LaunchExecutable");
+                AppL a;
+                a.nome = displayName;
+                if (!ns.empty() && !cid.empty())
+                    a.avvio = L"com.epicgames.launcher://apps/" + ns + L"%3A" + cid + L"%3A" + appName + L"?action=launch&silent=true";
+                else
+                    a.avvio = L"com.epicgames.launcher://apps/" + appName + L"?action=launch&silent=true";
+                a.cartella = installLoc;
+                coperte.insert(minuscolo(installLoc));
+                if (!launchExe.empty()) {
+                    const std::wstring cand = normalizzaPercorso(installLoc + L"\\" + launchExe);
+                    if (esisteFile(cand)) a.iconaFile = cand;
+                }
+                if (a.iconaFile.empty()) a.iconaFile = trovaExeGioco(installLoc);
+                a.minuscolo = minuscolo(a.nome);
+                nuove.push_back(std::move(a));
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+
+    {
+        const wchar_t* const ubiReg[] = {
+            L"SOFTWARE\\WOW6432Node\\Ubisoft\\Launcher\\Installs",
+            L"SOFTWARE\\Ubisoft\\Launcher\\Installs"
+        };
+        for (const wchar_t* r : ubiReg) {
+            for (REGSAM vista : {(REGSAM)KEY_WOW64_64KEY, (REGSAM)KEY_WOW64_32KEY}) {
+                HKEY hUbi = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, r, 0, KEY_READ | vista, &hUbi) != ERROR_SUCCESS) continue;
+                wchar_t nomeSub[256];
+                for (DWORD idx = 0; ; idx++) {
+                    DWORD len = 256;
+                    if (RegEnumKeyExW(hUbi, idx, nomeSub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                    const std::wstring id = nomeSub;
+                    if (id.empty()) continue;
+                    HKEY hSub = nullptr;
+                    if (RegOpenKeyExW(hUbi, nomeSub, 0, KEY_READ | vista, &hSub) != ERROR_SUCCESS) continue;
+                    const std::wstring dir = normalizzaPercorso(rimuoviVirgolette(leggiValoreReg(hSub, L"InstallDir")));
+                    RegCloseKey(hSub);
+                    if (!esisteCartella(dir)) continue;
+                    AppL& cur = ubisoft[minuscolo(id)];
+                    if (cur.avvio.empty()) cur.avvio = L"uplay://launch/" + id + L"/0";
+                    if (cur.cartella.empty() || !esisteCartella(cur.cartella)) cur.cartella = dir;
+                    if (cur.nome.empty()) {
+                        const size_t bar = dir.find_last_of(L'\\');
+                        cur.nome = bar == std::wstring::npos ? dir : dir.substr(bar + 1);
+                    }
+                }
+                RegCloseKey(hUbi);
+            }
+        }
+        for (auto& [idMin, a] : ubisoft) {
+            (void)idMin;
+            if (a.nome.empty() || !esisteCartella(a.cartella)) continue;
+            coperte.insert(minuscolo(a.cartella));
+            if (a.iconaFile.empty() || !esisteFile(a.iconaFile)) a.iconaFile = trovaExeGioco(a.cartella);
+            a.minuscolo = minuscolo(a.nome);
+            nuove.push_back(std::move(a));
+        }
+    }
+
+    {
+        const wchar_t* const gogReg[] = {
+            L"SOFTWARE\\WOW6432Node\\GOG.com\\Games",
+            L"SOFTWARE\\GOG.com\\Games"
+        };
+        std::unordered_set<std::wstring> gogVisti;
+        for (const wchar_t* r : gogReg) {
+            for (REGSAM vista : {(REGSAM)KEY_WOW64_64KEY, (REGSAM)KEY_WOW64_32KEY}) {
+                HKEY hGog = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, r, 0, KEY_READ | vista, &hGog) != ERROR_SUCCESS) continue;
+                wchar_t nomeSub[256];
+                for (DWORD idx = 0; ; idx++) {
+                    DWORD len = 256;
+                    if (RegEnumKeyExW(hGog, idx, nomeSub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                    const std::wstring gameId = nomeSub;
+                    if (gameId.empty() || !gogVisti.insert(minuscolo(gameId)).second) continue;
+                    HKEY hSub = nullptr;
+                    if (RegOpenKeyExW(hGog, nomeSub, 0, KEY_READ | vista, &hSub) != ERROR_SUCCESS) continue;
+                    std::wstring dep = leggiValoreReg(hSub, L"dependsOn");
+                    if (dep.empty()) dep = leggiValoreReg(hSub, L"DEPENDSON");
+                    std::wstring gName = leggiValoreReg(hSub, L"gameName");
+                    if (gName.empty()) gName = leggiValoreReg(hSub, L"GAMENAME");
+                    std::wstring gPath = leggiValoreReg(hSub, L"path");
+                    if (gPath.empty()) gPath = leggiValoreReg(hSub, L"PATH");
+                    std::wstring gExe = leggiValoreReg(hSub, L"exe");
+                    if (gExe.empty()) gExe = leggiValoreReg(hSub, L"EXE");
+                    std::wstring gParam = leggiValoreReg(hSub, L"launchParam");
+                    if (gParam.empty()) gParam = leggiValoreReg(hSub, L"LAUNCHPARAM");
+                    RegCloseKey(hSub);
+                    if (!dep.empty() || gName.empty()) continue;
+                    gPath = normalizzaPercorso(rimuoviVirgolette(std::move(gPath)));
+                    if (!esisteCartella(gPath)) continue;
+                    gExe = normalizzaPercorso(rimuoviVirgolette(std::move(gExe)));
+                    AppL a;
+                    a.nome = gName;
+                    a.cartella = gPath;
+                    coperte.insert(minuscolo(gPath));
+                    if (esisteFile(gExe)) {
+                        a.avvio = gExe;
+                        a.argomenti = gParam;
+                        a.iconaFile = gExe;
+                    } else {
+                        a.avvio = L"goggalaxy://openGameView/" + gameId;
+                        a.iconaFile = trovaExeGioco(gPath);
+                    }
+                    a.minuscolo = minuscolo(a.nome);
+                    nuove.push_back(std::move(a));
+                }
+                RegCloseKey(hGog);
+            }
+        }
+    }
+
+    {
+        std::wstring riotClient;
+        if (!progData.empty()) {
+            const std::wstring txt = leggiFileUtf8(progData + L"\\Riot Games\\RiotClientInstalls.json");
+            if (!txt.empty()) {
+                riotClient = normalizzaPercorso(valoreJson(txt, L"rc_live"));
+                if (!esisteFile(riotClient)) riotClient = normalizzaPercorso(valoreJson(txt, L"rc_default"));
+                if (!esisteFile(riotClient)) riotClient.clear();
+            }
+        }
+        for (auto& [k, rc] : riotCand) {
+            (void)k;
+            if (rc.nome.empty() || !esisteCartella(rc.cartella)) continue;
+            std::wstring clientExe = riotClient;
+            if (!esisteFile(clientExe) && !rc.uninstall.empty())
+                clientExe = normalizzaPercorso(estraiExeDaComando(rc.uninstall));
+            if (!esisteFile(clientExe)) continue;
+            AppL a;
+            a.nome = rc.nome;
+            a.avvio = clientExe;
+            a.argomenti = L"--launch-product=" + rc.product + L" --launch-patchline=" + rc.patchline;
+            a.cartella = rc.cartella;
+            a.iconaFile = esisteFile(rc.iconaFile) ? rc.iconaFile : trovaExeGioco(rc.cartella);
+            a.minuscolo = minuscolo(a.nome);
+            coperte.insert(minuscolo(rc.cartella));
+            nuove.push_back(std::move(a));
+        }
+    }
+
+    {
+        const wchar_t* const eaReg[] = {
+            L"SOFTWARE\\WOW6432Node\\EA Games",
+            L"SOFTWARE\\EA Games",
+            L"SOFTWARE\\WOW6432Node\\Electronic Arts",
+            L"SOFTWARE\\Electronic Arts"
+        };
+        static const wchar_t* const eaScarta[] = {
+            L"EA Core", L"EA Desktop", L"EA app", L"Origin", L"EADM", L"EA Link", L"EA Background Service"
+        };
+        for (const wchar_t* r : eaReg) {
+            for (REGSAM vista : {(REGSAM)KEY_WOW64_64KEY, (REGSAM)KEY_WOW64_32KEY}) {
+                HKEY hEa = nullptr;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, r, 0, KEY_READ | vista, &hEa) != ERROR_SUCCESS) continue;
+                wchar_t nomeSub[256];
+                for (DWORD idx = 0; ; idx++) {
+                    DWORD len = 256;
+                    if (RegEnumKeyExW(hEa, idx, nomeSub, &len, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+                    bool salta = false;
+                    for (const wchar_t* s : eaScarta) if (!_wcsicmp(nomeSub, s)) { salta = true; break; }
+                    if (salta) continue;
+                    HKEY hSub = nullptr;
+                    if (RegOpenKeyExW(hEa, nomeSub, 0, KEY_READ | vista, &hSub) != ERROR_SUCCESS) continue;
+                    std::wstring dName = leggiValoreReg(hSub, L"DisplayName");
+                    std::wstring dir = leggiValoreReg(hSub, L"Install Dir");
+                    if (dir.empty()) dir = leggiValoreReg(hSub, L"InstallDir");
+                    RegCloseKey(hSub);
+                    if (dName.empty()) dName = nomeSub;
+                    dir = normalizzaPercorso(rimuoviVirgolette(std::move(dir)));
+                    if (!esisteCartella(dir)) continue;
+                    const std::wstring dirMin = minuscolo(dir);
+                    if (coperte.count(dirMin)) continue;
+                    const std::wstring exe = trovaExeGioco(dir);
+                    if (exe.empty()) continue;
+                    coperte.insert(dirMin);
+                    AppL a;
+                    a.nome = dName;
+                    a.avvio = exe;
+                    a.iconaFile = exe;
+                    a.cartella = dir;
+                    a.minuscolo = minuscolo(a.nome);
+                    nuove.push_back(std::move(a));
+                }
+                RegCloseKey(hEa);
+            }
+        }
+    }
+
+    for (auto& b : blizzardCand) {
+        if (!esisteCartella(b.cartella)) continue;
+        const std::wstring dirMin = minuscolo(b.cartella);
+        if (coperte.count(dirMin)) continue;
+        std::wstring exe = trovaExeGioco(b.cartella);
+        if (exe.empty() && finisceCon(b.iconaFile, L".exe") && esisteFile(b.iconaFile)) exe = b.iconaFile;
+        if (exe.empty()) continue;
+        coperte.insert(dirMin);
+        b.avvio = exe;
+        b.iconaFile = esisteFile(b.iconaFile) ? b.iconaFile : exe;
+        b.minuscolo = minuscolo(b.nome);
+        nuove.push_back(std::move(b));
+    }
+
     auto scansionaCartelle = [&](const std::wstring& radice, bool filtraSteam) {
         WIN32_FIND_DATAW fd{};
         HANDLE h = FindFirstFileW((radice + L"\\*").c_str(), &fd);
@@ -707,20 +1136,20 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
 
     const auto nascosti = leggiGiochiNascosti();
     nuove.erase(std::remove_if(nuove.begin(), nuove.end(), [&](const AppL& a) {
-        return !a.manuale && nascosti.count(minuscolo(a.avvio)) != 0;
+        return !a.manuale && nascosti.count(chiaveGioco(a)) != 0;
     }), nuove.end());
 
     const auto iconePers = leggiIconeGiochi();
     const auto nomiPers = leggiNomiGiochi();
     for (AppL& a : nuove) {
-        const std::wstring avvioMin = minuscolo(a.avvio);
-        auto it = iconePers.find(avvioMin);
+        const std::wstring chiave = chiaveGioco(a);
+        auto it = iconePers.find(chiave);
         if (it == iconePers.end()) it = iconePers.find(a.minuscolo);
         if (it != iconePers.end() && esisteFile(it->second)) {
             a.iconaFile = it->second;
             a.iconaPers = true;
         }
-        auto itN = nomiPers.find(avvioMin);
+        auto itN = nomiPers.find(chiave);
         if (itN != nomiPers.end() && !itN->second.empty()) {
             a.nome = itN->second;
             a.minuscolo = minuscolo(a.nome);
@@ -735,7 +1164,8 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
         if (a.iconaPers != b.iconaPers) return a.iconaPers > b.iconaPers;
         const bool ia = !a.iconaFile.empty(), ib = !b.iconaFile.empty();
         if (ia != ib) return ia > ib;
-        return a.avvio < b.avvio;
+        if (a.avvio != b.avvio) return a.avvio < b.avvio;
+        return a.argomenti < b.argomenti;
     });
     nuove.erase(std::unique(nuove.begin(), nuove.end(), [](const AppL& a, const AppL& b) {
         return a.minuscolo == b.minuscolo;
@@ -1136,7 +1566,7 @@ inline auto Motore::avviaApp(int i) -> void {
     const AppL a = elencoAttivo()[filtrate[i]];
     primaDelLauncher = nullptr;   // il primo piano va all'app che si apre
     chiudiLauncher();
-    ShellExecuteW(nullptr, L"open", a.avvio.c_str(), nullptr, a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
+    ShellExecuteW(nullptr, L"open", a.avvio.c_str(), a.argomenti.empty() ? nullptr : a.argomenti.c_str(), a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
 }
 
 inline auto Motore::rettEnergia() const -> D2D1_RECT_F { return {LW - 64 * dpi, 22 * dpi, LW - 24 * dpi, 62 * dpi}; }
@@ -1215,7 +1645,7 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
 }
 
 // Collegamento nella cartella delle app fisse della barra (quella che legge il dock)
-inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona) -> void {
+inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring& exe, const std::wstring& id, const std::wstring& avvio, const std::wstring& icona, const std::wstring& argomenti) -> void {
     wchar_t cart[MAX_PATH];
     if (FAILED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, cart))) return;
     std::wstring n = nome;
@@ -1230,6 +1660,7 @@ inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring&
         PIDLIST_ABSOLUTE pidl = nullptr;
         if (SUCCEEDED(SHParseDisplayName(avvio.c_str(), nullptr, &pidl, 0, nullptr))) { ok = SUCCEEDED(sl->SetIDList(pidl)); CoTaskMemFree(pidl); }
     }
+    if (ok && !argomenti.empty()) sl->SetArguments(argomenti.c_str());
     if (ok && !icona.empty() && (finisceCon(icona, L".ico") || finisceCon(icona, L".exe")) && esisteFile(icona))
         sl->SetIconLocation(icona.c_str(), 0);
     if (ok && !id.empty()) {   // cosi' il dock riconosce le finestre dell'app
@@ -1292,7 +1723,7 @@ inline auto Motore::aggiungiGiocoDialogo() -> void {
 inline auto Motore::cambiaIconaGioco(const AppL& a) -> void {
     if (lDialogoAperto) return;
     lDialogoAperto = true;
-    const std::wstring avvio = a.avvio;
+    const std::wstring chiave = chiaveGioco(a);
     wchar_t p[MAX_PATH * 4] = L"";
     OPENFILENAMEW of{};
     of.lStructSize = sizeof(of);
@@ -1306,11 +1737,11 @@ inline auto Motore::cambiaIconaGioco(const AppL& a) -> void {
     if (lAperto && !lChiusura) prendiFuoco(launcher);
     if (scelto && p[0]) {
         auto ic = leggiIconeGiochi();
-        ic[minuscolo(avvio)] = p;
+        ic[chiave] = p;
         salvaIconeGiochi(ic);
         iconeChieste.erase(chiaveIcona(p, 96));
         for (auto& g : tuttiGiochi) {
-            if (g.avvio == avvio) {
+            if (chiaveGioco(g) == chiave) {
                 if (g.icona) { g.icona->Release(); g.icona = nullptr; }
                 g.provata = false;
             }
@@ -1861,7 +2292,7 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
 
     if (dlg.confermato && !nuovoNome.empty()) {
         auto nm = leggiNomiGiochi();
-        nm[minuscolo(a.avvio)] = nuovoNome;
+        nm[chiaveGioco(a)] = nuovoNome;
         salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
         lDirty = true;
@@ -1873,7 +2304,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     const AppL a = tuttiGiochi[filtrate[i]];
     const bool isExe = finisceCon(a.avvio, L".exe");
     const bool isLnk = finisceCon(a.avvio, L".lnk");
-    const bool isSteam = a.avvio.rfind(L"steam://", 0) == 0;
+    const bool isUri = a.avvio.find(L"://") != std::wstring::npos;
     const bool hasFile = esisteFile(a.avvio);
     const bool hasCartella = !a.cartella.empty() && esisteCartella(a.cartella);
 
@@ -1881,7 +2312,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         menu::titolo(a.nome),
         menu::voce(testi::t(L"Gioca", L"Play"), 1)
     };
-    if (isExe || isLnk || isSteam)
+    if (isExe || isLnk || isUri)
         vv.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 2));
     if (hasCartella || hasFile)
         vv.push_back(menu::voce(testi::t(L"Apri percorso", L"Open folder"), 3));
@@ -1901,10 +2332,10 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (cmd == 1) {
         primaDelLauncher = nullptr;
         chiudiLauncher();
-        ShellExecuteW(nullptr, L"open", a.avvio.c_str(), nullptr, a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
+        ShellExecuteW(nullptr, L"open", a.avvio.c_str(), a.argomenti.empty() ? nullptr : a.argomenti.c_str(), a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
     } else if (cmd == 2) {
         if (isExe) {
-            aggiungiAlDock(a.nome, a.avvio, L"", a.avvio, a.iconaFile);
+            aggiungiAlDock(a.nome, a.avvio, L"", a.avvio, a.iconaFile, a.argomenti);
         } else if (isLnk) {
             std::wstring exe, id;
             IShellLinkW* sl = nullptr;
@@ -1927,45 +2358,46 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
                 if (pf) pf->Release();
                 sl->Release();
             }
-            aggiungiAlDock(a.nome, exe, id, a.avvio, a.iconaFile);
-        } else if (isSteam) {
+            aggiungiAlDock(a.nome, exe, id, a.avvio, a.iconaFile, a.argomenti);
+        } else if (isUri) {
             std::wstring icona = (finisceCon(a.iconaFile, L".ico") || finisceCon(a.iconaFile, L".exe")) ? a.iconaFile : L"";
             if (icona.empty() && !a.cartella.empty()) icona = trovaExeGioco(a.cartella);
-            aggiungiAlDock(a.nome, L"", L"", a.avvio, icona);
+            aggiungiAlDock(a.nome, L"", L"", a.avvio, icona, a.argomenti);
         }
     } else if (cmd == 3) {
         if (hasFile) ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + a.avvio + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         else if (hasCartella) ShellExecuteW(nullptr, L"open", a.cartella.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     } else if (cmd == 4) {
         auto el = leggiGiochiAggiunti();
-        const std::wstring avvioMin = minuscolo(a.avvio);
+        const std::wstring chiave = chiaveGioco(a);
         el.erase(std::remove_if(el.begin(), el.end(), [&](const auto& kv) {
-            if (minuscolo(kv.second) == avvioMin) return true;
+            if (minuscolo(kv.second) == chiave) return true;
             if (finisceCon(kv.second, L".url") && minuscolo(kv.first) == a.minuscolo) {
                 wchar_t u[2048] = L"";
                 GetPrivateProfileStringW(L"InternetShortcut", L"URL", L"", u, 2048, kv.second.c_str());
-                return minuscolo(u[0] ? std::wstring(u) : kv.second) == avvioMin;
+                return minuscolo(u[0] ? std::wstring(u) : kv.second) == chiave;
             }
             return false;
         }), el.end());
         salvaGiochiAggiunti(el);
         auto nm = leggiNomiGiochi();
-        if (nm.erase(avvioMin) > 0) salvaNomiGiochi(nm);
+        if (nm.erase(chiave) > 0) salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
     } else if (cmd == 5) {
         auto n = leggiGiochiNascosti();
-        n.insert(minuscolo(a.avvio));
+        n.insert(chiaveGioco(a));
         salvaGiochiNascosti(n);
         leggiTuttiGiochi(true);
     } else if (cmd == 6) {
         cambiaIconaGioco(a);
     } else if (cmd == 7) {
+        const std::wstring chiave = chiaveGioco(a);
         auto ic = leggiIconeGiochi();
-        ic.erase(minuscolo(a.avvio));
+        ic.erase(chiave);
         ic.erase(a.minuscolo);
         salvaIconeGiochi(ic);
         for (auto& g : tuttiGiochi) {
-            if (g.avvio == a.avvio) {
+            if (chiaveGioco(g) == chiave) {
                 if (g.icona) { g.icona->Release(); g.icona = nullptr; }
                 g.provata = false;
             }
@@ -1975,7 +2407,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         rinominaGioco(a);
     } else if (cmd == 9) {
         auto nm = leggiNomiGiochi();
-        nm.erase(minuscolo(a.avvio));
+        nm.erase(chiaveGioco(a));
         salvaNomiGiochi(nm);
         leggiTuttiGiochi(true);
     }
