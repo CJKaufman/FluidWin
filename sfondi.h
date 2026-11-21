@@ -107,6 +107,14 @@ inline int indiceDi(const std::wstring& file) {
     return -1;
 }
 
+// la copia che Windows tiene dello sfondo mostrato (il file di partenza puo' non esserci piu')
+inline std::wstring copiaDiWindows() {
+    wchar_t* p = nullptr; std::wstring c;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p)) && p) c = std::wstring(p) + L"\\Microsoft\\Windows\\Themes\\TranscodedWallpaper";
+    CoTaskMemFree(p);
+    return esiste(c) ? c : std::wstring();
+}
+
 // Lo stato dello sfondo di Windows, abbastanza per rimetterlo com'era (R20261120-210024-S1/S2/S3): un'immagine per
 // schermo (anche diverse fra loro), la tinta unita col suo colore, oppure la presentazione con le sue immagini
 enum { NESSUNO = 0, IMMAGINI = 1, TINTA = 2, PRESENTAZIONE = 3 };
@@ -117,9 +125,29 @@ struct Stato {
     int posizione = DWPOS_FILL;
     DWORD colore = 0;
     // l'immagine da mostrare nella miniatura (vuota: nessuna)
+    // (solo file: una presentazione fatta scegliendo una cartella ha la cartella, che WIC non sa leggere. Allora la copia
+    // che Windows tiene dello sfondo mostrato, R20261121-002419-S17)
     std::wstring immagine() const {
-        for (const auto& s : schermi) if (esiste(s.second)) return s.second;
-        for (const auto& f : presentazione) if (esiste(f)) return f;
+        auto file = [](const std::wstring& f) { const DWORD a = f.empty() ? INVALID_FILE_ATTRIBUTES : GetFileAttributesW(f.c_str()); return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY); };
+        for (const auto& s : schermi) if (file(s.second)) return s.second;
+        for (const auto& f : presentazione) if (file(f)) return f;
+        // Cartella: una sua immagine (fra le prime 1000 voci; prima 64, e un JPG oltre lasciava vuota la miniatura,
+        // R20261121-123628-S1). Non piu' la copia di Windows dello sfondo mostrato: dopo il
+        // passaggio a uno sfondo di FluidWin quella e' il JPG nostro, e la scheda "Il tuo sfondo" lo mostrava
+        // (R20261121-120551-S5)
+        for (const auto& d : presentazione) {
+            WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((d + L"\\*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            std::wstring trovata;
+            int voci = 0;
+            do {
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                const wchar_t* e = wcsrchr(fd.cFileName, L'.');
+                if (e && (!_wcsicmp(e, L".jpg") || !_wcsicmp(e, L".jpeg") || !_wcsicmp(e, L".png") || !_wcsicmp(e, L".bmp"))) { trovata = d + L"\\" + fd.cFileName; break; }
+            } while (++voci < 1000 && FindNextFileW(h, &fd));
+            FindClose(h);
+            if (!trovata.empty()) return trovata;
+        }
         return {};
     }
     // e' uno sfondo di FluidWin? (tutti gli schermi con lo stesso sfondo nostro): allora non si ricorda
@@ -137,21 +165,17 @@ inline IDesktopWallpaper* shell() {
     return dw;
 }
 
-// la copia che Windows tiene dello sfondo mostrato (il file di partenza puo' non esserci piu')
-inline std::wstring copiaDiWindows() {
-    wchar_t* p = nullptr; std::wstring c;
-    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &p)) && p) c = std::wstring(p) + L"\\Microsoft\\Windows\\Themes\\TranscodedWallpaper";
-    CoTaskMemFree(p);
-    return esiste(c) ? c : std::wstring();
-}
 
-// lo stato di adesso (nel thread di chi chiama, con COM); false se non si legge
+// lo stato di adesso (nel thread di chi chiama, con COM); false se non si legge per intero. Un errore di lettura non
+// vale "tinta unita" o "meno schermi": prima, durante un cambio di schermi, un conteggio fallito restava 0 e lo sfondo
+// di prima veniva ricordato come tinta unita (R20261121-002419-S7)
 inline bool leggi(Stato& s) {
     s = Stato{};
     IDesktopWallpaper* dw = shell();
     if (!dw) return false;
     DESKTOP_WALLPAPER_POSITION pos{};
-    if (SUCCEEDED(dw->GetPosition(&pos))) s.posizione = (int)pos;
+    if (FAILED(dw->GetPosition(&pos))) { dw->Release(); return false; }
+    s.posizione = (int)pos;
     COLORREF c = 0; if (SUCCEEDED(dw->GetBackgroundColor(&c))) s.colore = c;
     DESKTOP_SLIDESHOW_STATE st{};
     IShellItemArray* arr = nullptr;
@@ -166,17 +190,18 @@ inline bool leggi(Stato& s) {
         if (!s.presentazione.empty()) { s.tipo = PRESENTAZIONE; dw->Release(); return true; }
     }
     // (GetWallpaper(nullptr) da' S_FALSE e una stringa vuota se gli schermi hanno sfondi diversi: si leggono uno per uno)
-    UINT n = 0; dw->GetMonitorDevicePathCount(&n);
-    bool qualcuna = false;
-    for (UINT k = 0; k < n; k++) {
+    UINT n = 0;
+    if (FAILED(dw->GetMonitorDevicePathCount(&n)) || n == 0) { dw->Release(); return false; }
+    bool qualcuna = false, tutto = true;
+    for (UINT k = 0; k < n && tutto; k++) {
         LPWSTR id = nullptr, p = nullptr;
-        if (SUCCEEDED(dw->GetMonitorDevicePathAt(k, &id)) && id) {
-            if (SUCCEEDED(dw->GetWallpaper(id, &p)) && p) { s.schermi.push_back({id, p}); if (*p) qualcuna = true; }
-            CoTaskMemFree(p);
-        }
+        if (SUCCEEDED(dw->GetMonitorDevicePathAt(k, &id)) && id && SUCCEEDED(dw->GetWallpaper(id, &p)) && p) { s.schermi.push_back({id, p}); if (*p) qualcuna = true; }
+        else tutto = false;
+        CoTaskMemFree(p);
         CoTaskMemFree(id);
     }
     dw->Release();
+    if (!tutto) { s = Stato{}; return false; }
     s.tipo = qualcuna ? IMMAGINI : TINTA;   // (nessuna immagine: tinta unita)
     return true;
 }
@@ -239,20 +264,31 @@ inline bool ricordaTuo(Stato s) {
     if (s.tipo == IMMAGINI) for (const auto& sc : s.schermi) { multi += sc.first; multi += L'\0'; multi += sc.second; multi += L'\0'; }
     else for (const auto& f : s.presentazione) { multi += f; multi += L'\0'; }
     multi += L'\0';
-    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SfondoTuo", REG_MULTI_SZ, multi.data(), (DWORD)(multi.size() * sizeof(wchar_t)));
-    scriviDword(L"SfondoTuoPosizione", (DWORD)s.posizione);
-    scriviDword(L"SfondoTuoColore", s.colore);
-    scriviDword(L"SfondoTuoTipo", (DWORD)s.tipo);   // (per ultimo: un salvataggio a meta' resta "nessuno")
-    return true;
+    // Ogni scrittura controllata, e lo stesso limite della lettura (tuo): se qualcosa non si salva lo sfondo non si
+    // cambia. Prima l'esito non si guardava, e un elenco da 256 KB o piu' si salvava ma non si rileggeva
+    // (R20261121-002419-S6). Il tipo resta per ultimo: un salvataggio a meta' lascia il record di prima
+    const DWORD byte = (DWORD)(multi.size() * sizeof(wchar_t));
+    if (byte >= 256 * 1024) return false;
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SfondoTuo", REG_MULTI_SZ, multi.data(), byte) != ERROR_SUCCESS) return false;
+    const DWORD pos = (DWORD)s.posizione, col = s.colore, tipo = (DWORD)s.tipo;
+    return RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SfondoTuoPosizione", REG_DWORD, &pos, sizeof(pos)) == ERROR_SUCCESS &&
+           RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SfondoTuoColore", REG_DWORD, &col, sizeof(col)) == ERROR_SUCCESS &&
+           RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SfondoTuoTipo", REG_DWORD, &tipo, sizeof(tipo)) == ERROR_SUCCESS;
 }
 
-// mette il file come sfondo di tutti gli schermi, "Riempi" (nel thread di chi chiama, con COM)
-inline bool metti(const std::wstring& file) {
+// mette il file come sfondo di tutti gli schermi, "Riempi" (nel thread di chi chiama, con COM). Non riuscito: posizione
+// e tinta unita tornano com'erano in 'prima' (lo stato letto subito prima). Prima restava "Riempi" su uno sfondo che
+// era centrato, e un nuovo tentativo l'avrebbe ricordato cosi' (R20261121-002419-S9)
+inline bool metti(const std::wstring& file, const Stato& prima) {
     IDesktopWallpaper* dw = shell();
     if (!dw) return false;
-    dw->Enable(TRUE);
-    dw->SetPosition(DWPOS_FILL);
-    const bool ok = SUCCEEDED(dw->SetWallpaper(nullptr, file.c_str()));
+    // (niente Enable(TRUE) prima: fallisce se manca l'immagine che Windows riattiverebbe, e SetWallpaper abilita gia'
+    // lo sfondo da sola; con il prerequisito il JPG nuovo non arrivava mai a Windows, R20261121-120551-S3)
+    bool ok = SUCCEEDED(dw->SetPosition(DWPOS_FILL)) && SUCCEEDED(dw->SetWallpaper(nullptr, file.c_str()));
+    if (!ok) {
+        dw->SetPosition((DESKTOP_WALLPAPER_POSITION)prima.posizione);
+        if (prima.tipo == TINTA) dw->Enable(FALSE);
+    }
     dw->Release();
     return ok;
 }
@@ -279,17 +315,22 @@ inline bool rimetti(const Stato& s) {
         dw->Enable(TRUE);
         dw->SetPosition((DESKTOP_WALLPAPER_POSITION)s.posizione);
         // schermo per schermo; uno che non c'e' piu' (schermi cambiati) prende l'immagine del primo
+        // riuscito solo se tutti gli schermi l'hanno preso: uno rimasto con lo sfondo di FluidWin non e' "rimesso"
+        // (prima bastava il primo, e la scheda "Il tuo sfondo" risultava scelta, R20261121-002419-S8)
         std::wstring prima;
         for (const auto& sc : s.schermi) if (esiste(sc.second)) { prima = sc.second; break; }
-        UINT n = 0; dw->GetMonitorDevicePathCount(&n);
+        UINT n = 0;
+        // (un errore su uno schermo non ferma gli altri: si prova su tutti e l'esito e' l'insieme, R20261121-120551-S4)
+        bool tutti = SUCCEEDED(dw->GetMonitorDevicePathCount(&n)) && n > 0;
         for (UINT k = 0; k < n; k++) {
             LPWSTR id = nullptr;
-            if (FAILED(dw->GetMonitorDevicePathAt(k, &id)) || !id) { CoTaskMemFree(id); continue; }
+            if (FAILED(dw->GetMonitorDevicePathAt(k, &id)) || !id) { CoTaskMemFree(id); tutti = false; continue; }
             std::wstring f = prima;
             for (const auto& sc : s.schermi) if (sc.first == id && esiste(sc.second)) f = sc.second;
-            if (!f.empty() && SUCCEEDED(dw->SetWallpaper(id, f.c_str()))) ok = true;
+            if (f.empty() || FAILED(dw->SetWallpaper(id, f.c_str()))) tutti = false;
             CoTaskMemFree(id);
         }
+        ok = tutti;
     }
     dw->Release();
     return ok;
@@ -322,13 +363,13 @@ inline bool scegli(int i, HWND dest, UINT msg, std::function<void(bool)> fatto) 
             // se non si legge o non si potrebbe rimettere, lo sfondo non si cambia
             const bool letto = leggi(prima);
             const bool salvo = letto && (prima.nostro() >= 0 || ricordaTuo(prima));
-            if (salvo && estrai(l->i, f)) ok = metti(f);
+            if (salvo && estrai(l->i, f)) ok = metti(f, prima);
         } else {
             const Stato t = tuo();
             ok = t.tipo != NESSUNO && rimetti(t);
         }
         if (SUCCEEDED(co)) CoUninitialize();
-        if (!PostMessageW(l->dest, l->msg, ok, (LPARAM)l->cb)) delete l->cb;
+        if (!consegna::posta(l->dest, l->msg, ok, l->cb)) delete l->cb;
         delete l;
         return 0;
     }, l, THREAD_PRIORITY_NORMAL, true);

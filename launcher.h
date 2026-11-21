@@ -35,7 +35,15 @@ inline DWORD WINAPI Motore::threadSottofondo(LPVOID p) {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     l->fai();
     CoUninitialize();
-    if (!PostMessageW(l->dest, WM_LAVORO_FATTO, 0, (LPARAM)l)) delete l;   // FluidWin si sta chiudendo
+    // Consegna non riuscita con la finestra ancora viva (memoria finita per un momento, coda piena): si riprova per
+    // qualche secondo, perche' il completamento azzera lo stato "in corso" del launcher e perso bloccava le ricerche
+    // successive (R20261121-122837-S3, R20261121-123050-S1). Finestra sparita: FluidWin si sta chiudendo.
+    // Senza limite finche' la finestra vive: dopo 5 s si buttava il completamento, e la ricerca restava "in corso"
+    // fino al riavvio (R20261121-140048-S5); dopo il primo secondo un tentativo ogni mezzo secondo
+    for (int i = 0; !consegna::posta(l->dest, WM_LAVORO_FATTO, 0, l); i++) {
+        if (!IsWindow(l->dest)) { delete l; break; }
+        Sleep(i < 10 ? 100 : 500);
+    }
     return 0;
 }
 
@@ -277,15 +285,27 @@ inline auto Motore::lFileIn(float x, float y) const -> int {
 }
 
 // la ricerca nel thread; il risultato si usa solo se e' ancora del testo scritto (generazione e testo uguali)
+// Una ricerca alla volta: con Windows Search lento le ricerche vecchie si accumulavano nel pool. Arrivata la risposta,
+// se il testo e' cambiato intanto ne parte una sola col testo di adesso (R20261121-002818-S10)
 inline auto Motore::cercaFileLauncher() -> void {
     if (query.empty() || !lAperto) return;
+    if (lFileInCorso) { lFileAttesa = true; return; }
     const std::wstring q = query;
     const unsigned g = ++lFileGen;
     auto ris = std::make_shared<std::vector<indice::File>>();
+    lFileInCorso = true; lFileAttesa = false;
     inSottofondo([q, ris] { *ris = indice::cerca(q, LF_MAX, true); },
                  [this, q, g, ris] {
+                     lFileInCorso = false;
+                     // (anche a testo uguale se la generazione e' cambiata: svuotato e riscritto lo stesso testo, la
+                     // risposta vecchia si scarta e senza nuova ricerca l'elenco restava vuoto, R20261121-115814-S1)
+                     if (lFileAttesa) { lFileAttesa = false; if (lAperto && !lChiusura && !query.empty() && (q != query || g != lFileGen)) { cercaFileLauncher(); return; } }
                      if (g != lFileGen || !lAperto || lChiusura || q != query) return;
+                     // "Cerca in Esplora file" scelto con le frecce resta lui anche se arrivano file (stava all'indice
+                     // delle righe, e il primo file prendeva il suo posto: Invio apriva il file, R20261121-002818-S8)
+                     const bool esplora = lSelFile >= 0 && lSelFile == lFileRighe();
                      lFile = std::move(*ris); lFileTesto = q;
+                     if (esplora) lSelFile = lFileRighe();
                      // (le icone di file gia' viste restano; oltre 200 la cache si svuota)
                      if (iconeFile.size() > 200) { for (auto& [p, b] : iconeFile) if (b) b->Release(); iconeFile.clear(); }
                      for (const auto& f : lFile) if (!iconeFile.count(f.percorso)) chiediIcona(f.percorso, 48);
@@ -378,7 +398,7 @@ inline auto Motore::disegnaFileLauncher(bool scuro, D2D1_COLOR_F ink) -> bool {
         pennello->SetColor(blu);
         dc->DrawEllipse({{lx - 2 * dpi, cy - 2 * dpi}, 6 * dpi, 6 * dpi}, pennello, 1.8f * dpi);
         linea(2.5f, 2.5f, 7, 7, lx, cy);
-        const std::wstring t = testi::t(L"Cerca “", L"Search “") + query + testi::t(L"” in Esplora file", L"” in File Explorer");
+        const std::wstring t = testi::t(L"Cerca “", L"Search “") + testi::isola(query) + testi::t(L"” in Esplora file", L"” in File Explorer");
         scrivi(t, fmtVoce, {lx + 24 * dpi, y, LW - 32 * dpi, y + LF_ESPLORA * dpi});
     }
     dc->PopAxisAlignedClip();

@@ -269,7 +269,9 @@ public:
             // "sotto il punto", ma sullo schermo si vede la foto o lo sfondo, non lei: R20261114-022427-S8)
             COLORREF k = 0; BYTE alfa = 255; DWORD fl = 0;
             const bool opaca = !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) || (GetLayeredWindowAttributes(h, &k, &alfa, &fl) && (!(fl & LWA_ALPHA) || alfa == 255));
-            if (opaca && sopra && GetAncestor(sopra, GA_ROOT) == h && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
+            // (e scoperta per intero, non solo al centro: con un'altra app sopra un angolo, i suoi pixel finivano nella
+            // foto e ricomparivano durante l'animazione, R20261121-003154-S4)
+            if (opaca && sopra && GetAncestor(sopra, GA_ROOT) == h && (!scoperta || scoperta(h, visibile)) && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
         }
         const bool fatto = ok && carica(h, visibile, wr, (const UINT*)bits, out);
         SelectObject(mem, vecchio); DeleteDC(mem); DeleteObject(dib); ReleaseDC(nullptr, scr);
@@ -315,7 +317,8 @@ public:
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         if (FAILED(dev->CreateTexture2D(&td, nullptr, &out.tex))) return false;
         ctx->UpdateSubresource(out.tex, 0, nullptr, px.data(), vw * 4, 0);
-        dev->CreateShaderResourceView(out.tex, nullptr, &out.srv);
+        // (senza vista la foto non c'e': prima una vista nulla andava a GenerateMips e la foto risultava pronta, S5)
+        if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv)) || !out.srv) { out.libera(); return false; }
         ctx->GenerateMips(out.srv);   // rimpicciolita resta morbida, senza sfarfallio
         out.w = vw; out.h = vh;
         return true;
@@ -360,8 +363,12 @@ public:
             if (rtv) { rtv->Release(); rtv = nullptr; }
             ctx->Flush();
             if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)hh, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = hh; }
+        }
+        // la vista si rifa' anche a misura invariata se manca (prima, fallita una volta, il genio restava senza
+        // superficie per sempre a quella risoluzione, R20261121-003154-S6)
+        if (!rtv && sc) {
             ID3D11Texture2D* bb = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb))) { dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release(); }
+            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) && bb) { if (FAILED(dev->CreateRenderTargetView(bb, nullptr, &rtv))) rtv = nullptr; bb->Release(); }
         }
         if (visibile) SetWindowPos(finestra, sotto ? sotto : HWND_TOPMOST, origine.x, origine.y, W, H, SWP_NOACTIVATE);
     }

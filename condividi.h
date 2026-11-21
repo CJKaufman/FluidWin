@@ -174,8 +174,9 @@ inline void leggiFile(Lavoro& lavoro) {
         if (interrotto || lavoro.annulla.load() || GetTickCount64() >= scadenza) { interrotto = true; break; }
     }
     sf->Release();
-    // Un timeout non deve aprire una condivisione della sola prima parte della selezione.
-    lavoro.esito = interrotto ? E_ABORT : lavoro.elementi.empty() ? E_FAIL : S_OK;
+    // Un timeout non deve aprire una condivisione della sola prima parte della selezione. Lo stesso per un file che non
+    // si prepara (sparito intanto): tutti o niente, prima si condivideva il resto senza dirlo (R20261121-002818-S12)
+    lavoro.esito = interrotto ? E_ABORT : lavoro.elementi.size() != lavoro.percorsi.size() ? E_FAIL : S_OK;
 }
 
 inline DWORD WINAPI preparaFile(LPVOID arg) {

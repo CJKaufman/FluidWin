@@ -55,6 +55,12 @@ inline bool finisceCon(const std::wstring& s, const wchar_t* e) { const size_t n
 
 // cancella una cartella e il suo contenuto (i collegamenti si tolgono, non si seguono)
 inline void cancellaCartella(const std::wstring& d) {
+    // anche la radice: se e' una giunzione (o un altro collegamento) si toglie solo il collegamento. Prima si
+    // controllavano solo i figli, e una cartella-pacchetto diventata giunzione faceva cancellare i file della
+    // destinazione (R20261121-002419-S1)
+    const DWORD a = GetFileAttributesW(d.c_str());
+    if (a == INVALID_FILE_ATTRIBUTES) return;
+    if (a & FILE_ATTRIBUTE_REPARSE_POINT) { if (a & FILE_ATTRIBUTE_DIRECTORY) RemoveDirectoryW(d.c_str()); else DeleteFileW(d.c_str()); return; }
     WIN32_FIND_DATAW f; HANDLE h = FindFirstFileW((d + L"\\*").c_str(), &f);
     if (h != INVALID_HANDLE_VALUE) {
         do {
@@ -71,18 +77,30 @@ inline void cancellaCartella(const std::wstring& d) {
 }
 
 // tutti i file sotto d (senza seguire i collegamenti)
-inline void fileSotto(const std::wstring& d, std::vector<std::pair<std::wstring, ULONGLONG>>& out, int prof = 0) {
-    if (prof > 8) return;
+// false = oltre MAX_VOCI voci (file e cartelle): chi chiama rifiuta tutto. Prima la visita si fermava in silenzio e
+// un pacchetto letto a meta' poteva sostituire quello completo (R20261121-120551-S1); e contava solo i file, quindi
+// un albero di cartelle vuote si visitava per intero (R20261121-120551 su S14)
+inline bool fileSotto(const std::wstring& d, std::vector<std::pair<std::wstring, ULONGLONG>>& out, int prof = 0, size_t* contate = nullptr) {
+    size_t mie = 0;
+    size_t& voci = contate ? *contate : mie;
+    if (prof > 8) return true;
     WIN32_FIND_DATAW f; HANDLE h = FindFirstFileW((d + L"\\*").c_str(), &f);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) return true;
+    bool ok = true;
     do {
+        // (tetto durante la visita, non dopo: una cartella trascinata per sbaglio con moltissimi file veniva letta tutta
+        // in memoria prima di scartare quelli inutili, R20261121-002419-S14)
         const std::wstring n = f.cFileName;
-        if (n == L"." || n == L".." || (f.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) continue;
+        if (n == L"." || n == L"..") continue;
+        // (contano anche i collegamenti, che non si seguono: migliaia di giunzioni si visitavano tutte, R20261121-123628 su S14)
+        if (++voci > (size_t)MAX_VOCI) { ok = false; break; }
+        if (f.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue;
         const std::wstring p = percorso(d, n);
-        if (f.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) fileSotto(p, out, prof + 1);
+        if (f.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) { if (!fileSotto(p, out, prof + 1, &voci)) { ok = false; break; } }
         else out.push_back({p, ((ULONGLONG)f.nFileSizeHigh << 32) | f.nFileSizeLow});
     } while (FindNextFileW(h, &f));
     FindClose(h);
+    return ok;
 }
 
 // tar.exe di Windows con un limite di tempo e un tetto all'uscita: oltre maxUscita byte tar si ferma e la risposta e'
@@ -315,16 +333,22 @@ inline void pulisciAvanzi() {
     FindClose(h);
     for (const auto& n : nuovi) cancellaCartella(percorso(base, n));
     auto manca = [&](const std::wstring& n) { return !n.empty() && GetFileAttributesW(percorso(base, n).c_str()) == INVALID_FILE_ATTRIBUTES; };
+    // Una copia si cancella solo se il pacchetto finale c'e': se manca e la rinomina non riesce (file bloccato un
+    // momento), la copia e' l'unica rimasta e resta per il prossimo avvio. Prima si cancellava lo stesso
+    // (R20261121-002419-S11)
     for (const auto& n : pronti) {
         const std::wstring p = percorso(base, L"_pronto-" + n);
-        if (manca(n) && esiste(L"_pronto-" + n) && MoveFileW(p.c_str(), percorso(base, n).c_str())) {
-            if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: installazione interrotta di \"%ls\" completata", n.c_str()); registro(b); }
-        } else cancellaCartella(p);
+        const bool valido = esiste(L"_pronto-" + n);
+        if (manca(n) && valido) {
+            if (MoveFileW(p.c_str(), percorso(base, n).c_str())) { if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: installazione interrotta di \"%ls\" completata", n.c_str()); registro(b); } }
+            else if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: \"%ls\" non completato (errore %lu), riprova al prossimo avvio", n.c_str(), GetLastError()); registro(b); }
+        } else cancellaCartella(p);   // (finale gia' presente, o copia non valida)
     }
     for (const auto& n : vecchi) {
         const std::wstring p = percorso(base, L"_vecchio-" + n);
-        if (manca(n) && MoveFileW(p.c_str(), percorso(base, n).c_str())) {
-            if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: \"%ls\" rimesso com'era (sostituzione interrotta)", n.c_str()); registro(b); }
+        if (manca(n)) {
+            if (MoveFileW(p.c_str(), percorso(base, n).c_str())) { if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: \"%ls\" rimesso com'era (sostituzione interrotta)", n.c_str()); registro(b); } }
+            else if (registro) { char b[200]; snprintf(b, sizeof(b), "cursori: \"%ls\" non rimesso (errore %lu), riprova al prossimo avvio", n.c_str(), GetLastError()); registro(b); }
         } else cancellaCartella(p);
     }
 }
@@ -385,13 +409,27 @@ inline Esito installa(const std::wstring& sorgente) {
             std::wstring arg = L"-xOf \""; arg += sorgente; arg += L"\" -- \""; arg += n; arg += L'"';
             if (!tar(arg, dati, 10000, tetto) || dati.empty()) continue;   // (troppo grande o illeggibile: si salta)
             // stesso percorso relativo dentro la cartella temporanea (le cartelle servono a tenere insieme le varianti)
-            std::wstring dest = tmp, parte;
-            for (wchar_t c : n) {
-                if (c == L'/' || c == L'\\') { if (!parte.empty()) { dest = percorso(dest, parte); CreateDirectoryW(dest.c_str(), nullptr); } parte.clear(); }
-                else if (c >= 32 && !wcschr(L"<>|", c)) parte += c;
+            // Ogni parte del percorso controllata cosi' com'e', senza trasformarla: una non valida (caratteri vietati da
+            // Windows, "." o "..", spazio o punto finale) scarta il file. Prima i caratteri vietati si toglievano dopo il
+            // controllo, e ".<." diventava ".." (R20261121-002419-S4)
+            std::vector<std::wstring> parti; std::wstring parte; bool valido = true;
+            for (size_t k = 0; k <= n.size() && valido; k++) {
+                const wchar_t c = k < n.size() ? n[k] : L'/';
+                if (c == L'/' || c == L'\\') {
+                    // ("." da solo e' la cartella stessa: "./Arrow.cur" e' un nome normale negli archivi, si salta;
+                    // prima scartava il file, R20261121-120551-S2)
+                    if (parte.empty() || parte == L".") { parte.clear(); continue; }
+                    if (parte == L".." || parte.back() == L' ' || parte.back() == L'.') valido = false;
+                    else parti.push_back(parte);
+                    parte.clear();
+                } else if (c < 32 || wcschr(L"<>|:\"*?", c)) valido = false;
+                else parte += c;
             }
-            if (parte.empty()) continue;
-            dest = percorso(dest, parte);
+            if (!valido || parti.empty()) continue;
+            std::wstring dest = tmp;
+            for (size_t k = 0; k + 1 < parti.size(); k++) { dest = percorso(dest, parti[k]); CreateDirectoryW(dest.c_str(), nullptr); }
+            dest = percorso(dest, parti.back());
+            if (dest.compare(0, tmp.size() + 1, tmp + L"\\") != 0) continue;   // (sempre dentro la cartella temporanea)
             HANDLE f = CreateFileW(dest.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (f == INVALID_HANDLE_VALUE) continue;
             DWORD scritti = 0; WriteFile(f, dati.data(), (DWORD)dati.size(), &scritti, nullptr); CloseHandle(f);
@@ -399,7 +437,8 @@ inline Esito installa(const std::wstring& sorgente) {
         dove = tmp;
     }
     // file trovati: cursori e .inf
-    std::vector<std::pair<std::wstring, ULONGLONG>> tutti; fileSotto(dove, tutti);
+    std::vector<std::pair<std::wstring, ULONGLONG>> tutti;
+    if (!fileSotto(dove, tutti)) { if (dove == tmp) cancellaCartella(tmp); return no(L"troppi file nel pacchetto|too many files in the package"); }
     std::vector<std::wstring> cur, inf;
     for (const auto& [p, dim] : tutti) {
         if ((finisceCon(p, L".cur") || finisceCon(p, L".ani")) && dim <= MAX_CURSORE) cur.push_back(p);
@@ -537,9 +576,10 @@ inline unsigned long long firma(HCURSOR c) {
     return h;
 }
 
-inline void segno(bool si) {
-    if (si) { const DWORD uno = 1; RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", SEGNO, REG_DWORD, &uno, sizeof(uno)); }
-    else RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", SEGNO);
+inline bool segno(bool si) {
+    if (si) { const DWORD uno = 1; return RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", SEGNO, REG_DWORD, &uno, sizeof(uno)) == ERROR_SUCCESS; }
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", SEGNO);
+    return true;
 }
 
 // osserva le impostazioni dei cursori di Windows: se l'utente le cambia, Windows ricarica i suoi e i nostri vanno
@@ -580,7 +620,13 @@ inline int applica(const std::wstring& nome) {
         if (registro) { char b[160]; snprintf(b, sizeof(b), "cursori: cambio rimandato, Windows non ha ricaricato i suoi (errore %lu)", GetLastError()); registro(b); }
         return -1;
     }
-    segno(true);   // prima di cambiarli: se FluidWin cade, il guardiano sa che deve rimetterli
+    // prima di cambiarli: se FluidWin cade, il guardiano sa che deve rimetterli. Senza il segno non si cambiano: dopo
+    // un crash nessuno li rimetterebbe (R20261121-002419-S10)
+    if (!segno(true)) {
+        if (registro) registro("cursori: segno di ripristino non scritto, cursori di Windows lasciati");
+        if (gAttivi) { gAttivi = false; }   // (quelli di prima sono gia' stati ricaricati da Windows qui sopra)
+        return 0;
+    }
     gAttivi = true;
     int n = 0;
     for (int k = 0; k < N_POSTI; k++) {

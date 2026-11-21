@@ -132,7 +132,8 @@ public:
     }
 
     void cerca() { chiedi(C_CERCA, ""); }
-    void collega(const std::string& ssid) { chiedi(C_COLLEGA, ssid); }
+    // salvata: come la mostrava il pannello al clic (rete con profilo); il lavoro collega solo se e' ancora cosi'
+    void collega(const std::string& ssid, bool salvata) { chiedi(salvata ? C_COLLEGA : C_COLLEGA_APERTA, ssid); }
     void scollega() { chiedi(C_SCOLLEGA, ""); }
 
     // ultima copia: reti, stato, esito dell'ultimo collegamento e la sua rete, ricerca in corso
@@ -144,13 +145,14 @@ public:
     }
 
 private:
-    enum Comando { C_NIENTE, C_CERCA, C_COLLEGA, C_SCOLLEGA };
+    enum Comando { C_NIENTE, C_CERCA, C_COLLEGA, C_SCOLLEGA, C_COLLEGA_APERTA };
     HANDLE thread = nullptr, fermo = nullptr, comando = nullptr;
     CRITICAL_SECTION cs{};
     // protetti da cs
     std::vector<Rete> elenco;
     int statoP = S_AVVIO, esitoP = E_NIENTE;
     std::string esitoSsid;
+    GUID esitoScheda{}; bool esitoSchedaOk = false;   // scheda del collegamento chiesto (R20261121-001738-S8)
     bool cercandoP = false;
     int cmd = C_NIENTE;
     std::string cmdSsid;
@@ -160,9 +162,10 @@ private:
 
     void chiedi(int c, const std::string& s) {
         EnterCriticalSection(&cs);
-        // (un comando in attesa si sostituisce: conta l'ultimo clic; cerca non cancella un collegamento in attesa)
-        if (!(c == C_CERCA && cmd == C_COLLEGA)) { cmd = c; cmdSsid = s; }
-        if (c == C_COLLEGA) { esitoP = E_IN_CORSO; esitoSsid = s; }
+        // (un comando in attesa si sostituisce: conta l'ultimo clic; una scansione non cancella un collegamento o uno
+        // scollegamento in attesa: prima "Scollega" si perdeva se scadeva la scansione automatica, R20261121-001738-S9)
+        if (!(c == C_CERCA && cmd != C_NIENTE && cmd != C_CERCA)) { cmd = c; cmdSsid = s; }
+        if (c == C_COLLEGA || c == C_COLLEGA_APERTA) { esitoP = E_IN_CORSO; esitoSsid = s; }
         LeaveCriticalSection(&cs);
         if (comando) SetEvent(comando);
         pronto = true;
@@ -193,9 +196,13 @@ private:
             dll = LoadLibraryExW(L"wlanapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
             if (!dll) return false;
             auto f = [&](auto& p, const char* n) { p = reinterpret_cast<std::remove_reference_t<decltype(p)>>(GetProcAddress(dll, n)); return p != nullptr; };
-            return f(apri, "WlanOpenHandle") && f(chiudi, "WlanCloseHandle") && f(interfacce, "WlanEnumInterfaces") &&
+            const bool ok = f(apri, "WlanOpenHandle") && f(chiudi, "WlanCloseHandle") && f(interfacce, "WlanEnumInterfaces") &&
                    f(scansione, "WlanScan") && f(elenco, "WlanGetAvailableNetworkList") && f(collega, "WlanConnect") &&
                    f(scollega, "WlanDisconnect") && f(notifiche, "WlanRegisterNotification") && f(libera, "WlanFreeMemory");
+            // tabella incompleta: via tutto, cosi' il giro dopo non la scambia per caricata (dll valorizzata) e non
+            // chiama un puntatore nullo (R20261121-001738-S10)
+            if (!ok) { FreeLibrary(dll); *this = Api{}; }
+            return ok;
         }
     };
 
@@ -212,7 +219,8 @@ private:
             const auto* c = (const WLAN_CONNECTION_NOTIFICATION_DATA*)d->pData;
             const std::string s((const char*)c->dot11Ssid.ucSSID, std::min<ULONG>(c->dot11Ssid.uSSIDLength, DOT11_SSID_MAX_LENGTH));
             EnterCriticalSection(&me->cs);
-            if (me->esitoP == E_IN_CORSO && s == me->esitoSsid)
+            // (e della SUA scheda: con due schede Wi-Fi sulla stessa rete l'altra poteva chiudere l'attesa, S8)
+            if (me->esitoP == E_IN_CORSO && s == me->esitoSsid && (!me->esitoSchedaOk || IsEqualGUID(d->InterfaceGuid, me->esitoScheda)))
                 me->esitoP = d->NotificationCode == wlan_notification_acm_connection_complete && c->wlanReasonCode == WLAN_REASON_CODE_SUCCESS ? E_FATTO : E_FALLITO;
             LeaveCriticalSection(&me->cs);
         }
@@ -308,10 +316,14 @@ private:
                     else if (sessioneRotta(es)) chiudiSessione();
                 }
                 else if (c == C_SCOLLEGA) { if (sessioneRotta(a.scollega(h, &g, nullptr))) chiudiSessione(); }
-                else if (c == C_COLLEGA) {
-                    auto it = std::find_if(ultime.begin(), ultime.end(), [&](const Rete& r) { return r.ssid == s; });
+                else if (c == C_COLLEGA || c == C_COLLEGA_APERTA) {
+                    // la rete com'era nel pannello al clic: salvata col suo profilo, o aperta. Se intanto e' cambiata
+                    // (la scansione vede ormai solo una rete aperta con lo stesso nome) non si collega: prima una riga
+                    // "Salvata" poteva collegarsi a una rete aperta omonima (R20261121-001738-S1)
+                    const bool salvata = c == C_COLLEGA;
+                    auto it = std::find_if(ultime.begin(), ultime.end(), [&](const Rete& r) { return r.ssid == s && (salvata ? r.profilo : (r.aperta && !r.profilo)); });
                     DWORD e = ERROR_NOT_FOUND;
-                    if (it != ultime.end() && (it->profilo || it->aperta)) {
+                    if (it != ultime.end()) {
                         WLAN_CONNECTION_PARAMETERS cp{};
                         DOT11_SSID ss{}; ss.uSSIDLength = (ULONG)std::min<size_t>(s.size(), DOT11_SSID_MAX_LENGTH); memcpy(ss.ucSSID, s.data(), ss.uSSIDLength);
                         const std::wstring xmlProfilo = it->profilo ? L"" : profiloAperto(s);
@@ -319,6 +331,7 @@ private:
                         cp.strProfile = it->profilo ? it->nomeProfilo.c_str() : xmlProfilo.c_str();
                         cp.pDot11Ssid = &ss;
                         cp.dot11BssType = dot11_BSS_type_infrastructure;
+                        EnterCriticalSection(&me->cs); me->esitoScheda = g; me->esitoSchedaOk = true; LeaveCriticalSection(&me->cs);
                         e = a.collega(h, &g, &cp, nullptr);
                     }
                     // (l'esito vero arriva con la notifica; un errore subito chiude qui)
@@ -326,7 +339,7 @@ private:
                     else collegaT = GetTickCount64();
                     if (sessioneRotta(e)) chiudiSessione();
                 }
-            } else if (c == C_COLLEGA) me->pubblica(S_NESSUNA, nullptr, E_FALLITO);
+            } else if (c == C_COLLEGA || c == C_COLLEGA_APERTA) me->pubblica(S_NESSUNA, nullptr, E_FALLITO);
             // elenco: subito dopo un comando, alla fine di una scansione (notifica o 4 s), a ogni notifica
             if (h && interfaccia) {
                 const int n = me->ultimaNotifica.exchange(0);

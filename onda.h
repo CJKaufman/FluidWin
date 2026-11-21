@@ -154,7 +154,7 @@ public:
     // solo se 'battito' e' acceso, e mai piu' di uno in attesa: le animazioni della finestra vanno al ritmo dello
     // schermo invece che dei timer di Windows (~64 al secondo)
     UINT messaggio = RegisterWindowMessageW(L"FluidWin.Onda");
-    HWND avvisa = nullptr;
+    std::atomic<HWND> avvisa{nullptr};   // (atomica: la scrive l'interfaccia a ogni apertura, la legge il thread, S11)
     std::atomic<bool> battito{false};   // (flag letti dal thread dell'onda: atomici, FW-AUDIT-006)
     void battitoRicevuto() { InterlockedExchange(&battitoInViaggio, 0); }
     bool attiva() const { return fin && !rotta && aperta; }

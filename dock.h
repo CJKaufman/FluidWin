@@ -208,8 +208,15 @@ static std::wstring exeProcesso(HWND h) {
     DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
     HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
     if (!p) return L"";
-    wchar_t buf[MAX_PATH]; DWORD n = MAX_PATH;
-    std::wstring r = QueryFullProcessImageNameW(p, 0, buf, &n) ? buf : L"";
+    // (percorsi lunghi: si riprova con un buffer piu' grande fino a 32K caratteri; prima oltre MAX_PATH la finestra
+    // restava senza exe e spariva dal dock, R20261121-001416-S13)
+    std::wstring r;
+    // (260, 1040, 4160, 16640, poi 32768 esatti: prima il passo per quattro saltava l'ultimo, R20261121-115814 su S13)
+    for (DWORD cap = MAX_PATH;; cap = std::min<DWORD>(cap * 4, 32768)) {
+        std::wstring buf(cap, L'\0'); DWORD n = cap;
+        if (QueryFullProcessImageNameW(p, 0, buf.data(), &n)) { buf.resize(n); r = std::move(buf); break; }
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || cap >= 32768) break;
+    }
     CloseHandle(p);
     return minuscolo(r);
 }
@@ -329,6 +336,7 @@ public:
         if (!seconda) return false;
         if (!creaLauncher(inst)) return false;
         notch.clic = [this] { apriCentro(P_NOTIFICHE); };   // un clic sul notch: le notifiche
+        notch.apriMusica = [this](const std::wstring& a) { apriAppMusica(a); };   // un clic sulla musica: la sua app
         notch.crea(inst);
         bersaglioDrop.d = this;
         { const HRESULT hr = RegisterDragDrop(icone, &bersaglioDrop);   // file trascinati sul cestino (serve OleInitialize)
@@ -339,10 +347,10 @@ public:
         posizionaFinestra();
 
         // la barra di Windows si nasconde da sola (impostazione ufficiale), si rimette com'era all'uscita
+        // (solo se FluidWin ha salvato com'era: senza, dopo un crash il guardiano non potrebbe rimetterla)
         APPBARDATA tb{}; tb.cbSize = sizeof(tb);
         statoBarraPrima = (UINT)SHAppBarMessage(ABM_GETSTATE, &tb);
-        tb.lParam = statoBarraPrima | ABS_AUTOHIDE;
-        SHAppBarMessage(ABM_SETSTATE, &tb);
+        if (barraSalvata) { tb.lParam = statoBarraPrima | ABS_AUTOHIDE; SHAppBarMessage(ABM_SETSTATE, &tb); }
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
@@ -380,8 +388,8 @@ public:
         if (!attivo) return;
         attivo = false;
         aggiornaAppbar();   // lo spazio riservato si libera (le finestre ingrandite tornano fino in fondo)
-        APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
-        SHAppBarMessage(ABM_SETSTATE, &tb);
+        // (solo se il dock l'aveva cambiata: senza, si annullerebbe una scelta fatta intanto dall'utente, R20261121-115814-S2)
+        if (barraSalvata) { APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima; SHAppBarMessage(ABM_SETSTATE, &tb); }
         ShowWindow(icone, SW_HIDE); ShowWindow(vetro, SW_HIDE); ShowWindow(vetroStato, SW_HIDE); ShowWindow(vetroOra, SW_HIDE); notch.mostra(false);
         nascondiSchede(); nascondiLauncher();
     }
@@ -847,6 +855,9 @@ private:
     RECT schermo{};
     int W = 0, H = 0;
     UINT statoBarraPrima = 0;
+public:
+    bool barraSalvata = true;   // StatoBarra scritto nel registro (fluidwin.cpp): senza, la barra non va a scomparsa
+private:
 
     // ---- stato ----
     std::vector<Voce> voci;
@@ -941,6 +952,20 @@ private:
 
     // registra (o toglie) il dock come appbar sul bordo in basso del suo schermo: altezza del dock con un margine sopra
     // uguale a quello sotto. Si richiama quando cambia lo schermo e quando Windows sposta le appbar (ABN_POSCHANGED)
+    // Explorer riavviato: la sua registrazione dell'appbar non c'e' piu'. Si rifa' da capo (prima appbarOk restava vero
+    // e le finestre ingrandite tornavano sopra il dock, R20261121-001416-S8)
+public:
+    void explorerRiavviato() {
+        if (!appbarOk) return;
+        // TaskbarCreated arriva anche senza un vero riavvio di Explorer, con la registrazione ancora valida: ABM_NEW
+        // fallirebbe e appbarOk resterebbe falso con lo spazio riservato. Si toglie prima (innocuo se non c'e' piu')
+        // e si rifa' da capo (R20261121-115814-S4)
+        APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = icone;
+        SHAppBarMessage(ABM_REMOVE, &ab);
+        appbarOk = false;
+        aggiornaAppbar();
+    }
+private:
     void aggiornaAppbar() {
         APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = icone;
         if (!spazioRiservato || !attivo || !icone) {
@@ -1095,7 +1120,7 @@ private:
                 // ripiego su Segoe UI (c'e' sempre): solo se manca anche quello il dock non parte
                 if (FAILED(fdw->CreateTextFormat(L"Segoe UI", nullptr, peso, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * dpi, L"it-it", out)) || !*out) { fontOk = false; return; }
             }
-            (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            testi::allinea(*out, DWRITE_TEXT_ALIGNMENT_CENTER);   // (in arabo da destra a sinistra, vedi testi.h)
             (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         };
@@ -1115,7 +1140,7 @@ private:
         formato(fTesto, DWRITE_FONT_WEIGHT_NORMAL, 11.5f, &fmtData);
         // testi dei pannelli: allineati a sinistra, con "..." se non entrano
         auto sinistra = [&](const wchar_t* font, DWRITE_FONT_WEIGHT peso, float px, IDWriteTextFormat** out) {
-            formato(font, peso, px, out); if (*out) (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            formato(font, peso, px, out); testi::allinea(*out, DWRITE_TEXT_ALIGNMENT_LEADING);
         };
         sinistra(fTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0f, &fmtTitolo);
         sinistra(fTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 34.0f, &fmtGrande);
@@ -1233,7 +1258,9 @@ private:
             const ULONGLONG tCart = letta ? ((ULONGLONG)ad.ftLastWriteTime.dwHighDateTime << 32) | ad.ftLastWriteTime.dwLowDateTime : 0;
             const bool valida = fissateOk && letta && tCart == fissateT && adesso() - fissateLette < 60;
             if (valida) for (const Voce& f : fissateCache) nuove.push_back(f);
-            fissateT = tCart; fissateLette = adesso();
+            // (l'ora dell'ultima lettura cambia solo quando si rileggono davvero i collegamenti: prima ogni consultazione
+            // la rinnovava, e un .lnk cambiato senza toccare la cartella restava vecchio per sempre, R20261121-001416-S14)
+            fissateT = tCart; if (!valida) fissateLette = adesso();
             WIN32_FIND_DATAW fd; HANDLE fh = valida ? INVALID_HANDLE_VALUE : FindFirstFileW((dir + L"*.lnk").c_str(), &fd);
             std::vector<std::pair<ULONGLONG, std::wstring>> lnk;
             if (fh != INVALID_HANDLE_VALUE) {
@@ -1251,8 +1278,13 @@ private:
                     if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&pf))) && SUCCEEDED(pf->Load(p.c_str(), STGM_READ))) {
                         wchar_t dest[MAX_PATH] = L"";
                         if (SUCCEEDED(sl->GetPath(dest, MAX_PATH, nullptr, SLGP_RAWPATH))) {
-                            wchar_t esp[MAX_PATH]; ExpandEnvironmentStringsW(dest, esp, MAX_PATH);
-                            v.exe = minuscolo(esp);
+                            // (espanso per intero: con un risultato piu' lungo del buffer, o un errore, il buffer non
+                            // e' una stringa valida, R20261121-001416-S4)
+                            const DWORD serve = ExpandEnvironmentStringsW(dest, nullptr, 0);
+                            std::wstring esp(serve ? serve : 1, L'\0');
+                            const DWORD fatti = serve ? ExpandEnvironmentStringsW(dest, esp.data(), serve) : 0;
+                            esp.resize(fatti && fatti <= serve ? fatti - 1 : 0);
+                            v.exe = minuscolo(esp.empty() ? std::wstring(dest) : esp);
                             wchar_t arg[1024] = L"";
                             if (SUCCEEDED(sl->GetArguments(arg, 1024))) exeSquirrel(v.exe, arg, v.sqPrima, v.sqDopo);
                         }
@@ -1307,10 +1339,19 @@ private:
             // filtro veniva dopo la ricerca, e una nascosta che condivide l'exe con un'altra aperta ci finiva dentro,
             // a seconda dell'ordine delle finestre (R20261120-022133-S1). Le sue finestre restano per "Mostra il desktop"
             const bool nascosta = eNascosta(exe, id);
-            for (auto& v : nuove) {
-                if (nascosta && !v.fissata) continue;
-                if ((!id.empty() && !v.aumid.empty() && id == v.aumid) || stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
-            }
+            // prima l'AUMID in tutto l'elenco, poi l'exe: due app web dello stesso browser (AUMID diversi) finivano
+            // nella prima icona con quell'exe, e "Chiudi tutte le finestre" prendeva anche l'altra (R20261121-001416-S6).
+            // Il ripiego sull'exe resta com'era quando l'AUMID non trova niente (niente icone doppie, issue #2)
+            if (!id.empty())
+                for (auto& v : nuove) {
+                    if (nascosta && !v.fissata) continue;
+                    if (!v.aumid.empty() && id == v.aumid) { trovata = &v; break; }
+                }
+            if (!trovata)
+                for (auto& v : nuove) {
+                    if (nascosta && !v.fissata) continue;
+                    if (stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
+                }
             if (!trovata && nascosta) { finestreNascoste.push_back(h); continue; }
             if (!trovata) {
                 Voce v; v.exe = exe; v.aumid = id;
@@ -2511,7 +2552,8 @@ private:
     void arco(float cx, float cy, float r, float a0, float a1, float sp = 1.8f) {
         ID2D1PathGeometry* g = nullptr;
         if (FAILED(f2d->CreatePathGeometry(&g))) return;
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        ID2D1GeometrySink* s = nullptr;
+        if (FAILED(g->Open(&s))) { g->Release(); return; }   // (R20261121-001416-S5)
         const float rr = r * dpi;
         s->BeginFigure({cx + rr * std::cos(a0), cy + rr * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
         s->AddArc(D2D1::ArcSegment({cx + rr * std::cos(a1), cy + rr * std::sin(a1)}, {rr, rr}, 0,
@@ -2562,9 +2604,8 @@ private:
 
     void simboloVolume(float cx, float cy) {
         const float x0 = cx - 4 * dpi;   // l'altoparlante sta a sinistra, le onde a destra
-        ID2D1PathGeometry* g = nullptr;
-        if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
             auto P = [&](float x, float y) { return D2D1::Point2F(x0 + x * dpi, cy + y * dpi); };
             s->BeginFigure(P(-6, -2.8f), D2D1_FIGURE_BEGIN_FILLED);
             D2D1_POINT_2F pt[] = {P(-3, -2.8f), P(1.5f, -6.5f), P(1.5f, 6.5f), P(-3, 2.8f), P(-6, 2.8f)};
@@ -2572,8 +2613,8 @@ private:
             s->EndFigure(D2D1_FIGURE_END_CLOSED); s->Close(); s->Release();
             dc->FillGeometry(g, pennello);
             dc->DrawGeometry(g, pennello, 1.0f * dpi, tratto);   // angoli ammorbiditi
-            g->Release();
         }
+        if (g) g->Release();
         if (!audioOk || muto) {
             linea(6, -3, 11, 2, x0, cy); linea(11, -3, 6, 2, x0, cy);
             return;
@@ -2987,9 +3028,18 @@ private:
             std::wstring lista;   // percorsi separati da \0, con \0\0 in fondo (come vuole SHFileOperation)
             // DragQueryFile vuole l'handle del blocco, non il puntatore di GlobalLock: con memoria mobile i due sono
             // diversi e non si trovava nessun file (audit FW-AUDIT-016)
+            // Ogni percorso intero, di qualsiasi lunghezza: uno non letto per intero annulla tutto. Prima un buffer fisso
+            // poteva troncare un nome lungo o saltarlo, e il Cestino riceveva una lista diversa da quella trascinata
+            // (R20261121-001416-S2)
             if (const HDROP hd = (HDROP)m.hGlobal) {
                 const UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
-                for (UINT i = 0; i < n; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) { lista += p; lista.push_back(L'\0'); } }
+                for (UINT i = 0; i < n; i++) {
+                    const UINT len = DragQueryFileW(hd, i, nullptr, 0);
+                    std::wstring p(len + 1, L'\0');
+                    if (!len || DragQueryFileW(hd, i, p.data(), len + 1) != len) { lista.clear(); break; }
+                    p.resize(len);
+                    lista += p; lista.push_back(L'\0');
+                }
             }
             ReleaseStgMedium(&m);
             if (lista.empty()) { *e = DROPEFFECT_NONE; return S_OK; }
@@ -3171,6 +3221,7 @@ private:
     std::vector<indice::File> lFile;
     std::wstring lFileTesto;
     unsigned lFileGen = 0;
+    bool lFileInCorso = false, lFileAttesa = false;   // una ricerca nell'indice alla volta (vedi cercaFileLauncher)
     double lFileH = 0;
     int lSelFile = -1, lSopraFile = -1;
     std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeFile;
@@ -3325,14 +3376,14 @@ private:
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.9f * alfa) : D2D1::ColorF(0.25f, 0.25f, 0.3f, alfa);
         const float bw = d * 0.20f, top = cy - d * 0.12f, bot = cy + d * 0.27f, sp = std::max(1.2f, d * 0.035f);
         pennello->SetColor(ink);
-        ID2D1PathGeometry* g = nullptr;
-        if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {   // secchio un poco piu' stretto in basso
-            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {   // secchio un poco piu' stretto in basso
             s->BeginFigure({cx - bw, top}, D2D1_FIGURE_BEGIN_HOLLOW);
             const D2D1_POINT_2F p[] = {{cx - bw * 0.8f, bot}, {cx + bw * 0.8f, bot}, {cx + bw, top}};
             s->AddLines(p, 3); s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
-            dc->DrawGeometry(g, pennello, sp * 1.4f, tratto); g->Release();
+            dc->DrawGeometry(g, pennello, sp * 1.4f, tratto);
         }
+        if (g) g->Release();
         for (int k = -1; k <= 1; k++) dc->DrawLine({cx + k * bw * 0.42f, top + d * 0.07f}, {cx + k * bw * 0.34f, bot - d * 0.06f}, pennello, sp, tratto);
         const float alza = sopraDrop ? d * 0.07f : 0;
         D2D1_MATRIX_3X2_F prima{}; dc->GetTransform(&prima);   // (quella dell'icona dritta: il coperchio si gira dentro di lei)
@@ -3461,6 +3512,94 @@ private:
         } else if (!SetForegroundWindow(h)) SwitchToThisWindow(h, TRUE);
     }
 
+    // Clic sulla musica (notch o testa del dock): l'app che sta riproducendo in primo piano. Windows la indica con un
+    // AppUserModelID: quello vero per le app di pacchetto e per chi lo dichiara (Firefox), altrimenti il nome dell'exe
+    // ("Spotify.exe") o un nome breve ("Chrome", "MSEdge"). Si cerca in ordine: le icone del dock, poi le finestre
+    // aperte; senza finestre (app chiusa nell'area di notifica) la si riapre come farebbe Windows. Dei browser si porta
+    // davanti la finestra, non la scheda che suona: Windows non dice quale sia
+public:
+    void apriAppMusica(const std::wstring& aumidMusica) {
+        if (aumidMusica.empty()) return;
+        const std::wstring a = minuscolo(aumidMusica);
+        std::wstring aSenzaExe = a;
+        if (aSenzaExe.size() > 4 && aSenzaExe.compare(aSenzaExe.size() - 4, 4, L".exe") == 0) aSenzaExe.resize(aSenzaExe.size() - 4);
+        auto nomeFile = [](const std::wstring& exe) { const size_t s = exe.find_last_of(L"\\/"); return s == std::wstring::npos ? exe : exe.substr(s + 1); };
+        auto corrisponde = [&](const std::wstring& aumidFin, const std::wstring& exe) {
+            if (!aumidFin.empty() && minuscolo(aumidFin) == a) return true;
+            if (exe.empty()) return false;
+            std::wstring n = nomeFile(exe);   // (exe gia' minuscolo)
+            if (n == a) return true;
+            if (n.size() > 4) n.resize(n.size() - 4);
+            return n == aSenzaExe;
+        };
+        // 1) le icone del dock con finestre
+        for (Voce& v : voci) {
+            if (v.uscente || v.finestre.empty() || !corrisponde(v.aumid, v.exe)) continue;
+            HWND scelta = nullptr;
+            for (HWND h = GetTopWindow(nullptr); h && !scelta; h = GetWindow(h, GW_HWNDNEXT))
+                if (std::find(v.finestre.begin(), v.finestre.end(), h) != v.finestre.end()) scelta = h;
+            // nessuna delle sue finestre esiste ancora (chiusa appena prima del clic, l'evento non e' ancora arrivato):
+            // si passa alle altre strade invece di chiamare un HWND scaduto (R20261121-140048-S8)
+            if (!scelta) continue;
+            if (registro) scrivi("musica: clic, app nel dock in primo piano");
+            portaDavanti(scelta);
+            return;
+        }
+        // 2) le finestre aperte (anche di app nascoste dal dock), dalla piu' in alto
+        for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT)) {
+            if (!IsWindowVisible(h) || GetWindow(h, GW_OWNER) || GetWindowTextLengthW(h) == 0) continue;
+            BOOL nascosta = FALSE; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &nascosta, sizeof(nascosta));
+            if (nascosta && !IsIconic(h)) continue;
+            if (!corrisponde(aumidFinestra(h), exeProcesso(h))) continue;
+            if (registro) scrivi("musica: clic, finestra aperta in primo piano");
+            portaDavanti(h);
+            return;
+        }
+        // 3) nessuna finestra: icona fissata, app di pacchetto, o l'exe del processo che suona (le app che vivono
+        // nell'area di notifica, come Spotify, al secondo avvio mostrano la finestra di quello gia' aperto)
+        for (int i = 0; i < (int)voci.size(); i++)
+            if (!voci[i].uscente && voci[i].finestre.empty() && corrisponde(voci[i].aumid, voci[i].exe)) { if (registro) scrivi("musica: clic, app fissata riaperta"); clic(i); return; }
+        if (a.find(L'!') != std::wstring::npos) {
+            if (registro) scrivi("musica: clic, app di pacchetto riaperta");
+            ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + aumidMusica).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+        }
+        const std::wstring exe = exeInEsecuzione(a.size() > 4 && a.compare(a.size() - 4, 4, L".exe") == 0 ? a : a + L".exe");
+        if (!exe.empty()) {
+            if (registro) scrivi("musica: clic, app senza finestre riaperta dal suo exe");
+            ShellExecuteW(nullptr, L"open", exe.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        } else if (registro) scrivi("musica: clic, app che suona non trovata");
+    }
+private:
+    // percorso completo di un processo in esecuzione con questo nome di file (minuscolo), vuoto se non c'e'. Se ci sono
+    // processi con lo stesso nome in cartelle diverse non si sa quale suoni: vuoto anche allora, per non avviare un
+    // programma diverso dal lettore (R20261121-140048-S2)
+    static std::wstring exeInEsecuzione(const std::wstring& nome) {
+        std::wstring r;
+        const HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (s == INVALID_HANDLE_VALUE) return r;
+        PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+        bool ambiguo = false;
+        for (BOOL ok = Process32FirstW(s, &pe); ok && !ambiguo; ok = Process32NextW(s, &pe)) {
+            if (minuscolo(pe.szExeFile) != nome) continue;
+            // (un omonimo di cui non si legge il percorso, per esempio di un amministratore, potrebbe essere proprio il
+            // lettore: anche quello rende la scelta incerta, R20261121-141020 conferma di S2)
+            bool letto = false;
+            if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID)) {
+                std::wstring buf(32768, L'\0'); DWORD n = (DWORD)buf.size();
+                if (QueryFullProcessImageNameW(p, 0, buf.data(), &n)) {
+                    buf.resize(n); letto = true;
+                    if (r.empty()) r = std::move(buf);
+                    else if (minuscolo(buf) != minuscolo(r)) ambiguo = true;
+                }
+                CloseHandle(p);
+            }
+            if (!letto) ambiguo = true;
+        }
+        CloseHandle(s);
+        return ambiguo ? std::wstring() : r;
+    }
+
     // ---- anteprime delle finestre sopra le icone (anteprime.h; issue #24) ----
     // Mouse fermo 0,5 s su un'icona con finestre aperte: le anteprime si aprono; spostandosi su un'altra icona con
     // finestre passano a quella (0,15 s); uscendo da icona e anteprime si chiudono dopo 0,3 s. Niente anteprime con un
@@ -3551,9 +3690,15 @@ private:
         return false;
     }
     void mostraDesktop() {
-        desktopRidotte = finestreDelDock();
-        if (desktopRidotte.empty()) return;
-        desktopCoda = desktopRidotte; desktopRiduce = true;
+        // le ridotte da un "Mostra il desktop" di prima e ancora ridotte restano nell'elenco da ripristinare (prima un
+        // secondo comando le perdeva, R20261121-001416-S9)
+        std::vector<HWND> nuove = finestreDelDock();
+        if (nuove.empty()) return;
+        std::vector<HWND> tenute;
+        for (HWND h : desktopRidotte) if (IsWindow(h) && IsIconic(h) && std::find(nuove.begin(), nuove.end(), h) == nuove.end()) tenute.push_back(h);
+        desktopRidotte = std::move(tenute);
+        desktopRidotte.insert(desktopRidotte.end(), nuove.begin(), nuove.end());
+        desktopCoda = std::move(nuove); desktopRiduce = true;
         SetTimer(icone, TIMER_DESKTOP, 45, nullptr);
         passoDesktop();   // (la prima subito)
         if (registro) { char b[64]; snprintf(b, 64, "dock: mostra il desktop, %zu finestre", desktopRidotte.size()); scrivi(b); }
@@ -3594,9 +3739,11 @@ private:
             // "Mostra il desktop" con finestre da ridurre; "Ripristina le finestre" se quelle ridotte cosi' sono ancora
             // ridotte e non ce ne sono altre aperte (issue #24)
             std::vector<menu::Voce> vv = {menu::titolo(L"FluidWin")};
+            // (tutte e due quando servono: una finestra rimasta aperta, per esempio elevata, toglieva il ripristino delle
+            // altre, R20261121-001416-S9)
             const bool aperte = !finestreDelDock().empty();
-            if (desktopRipristinabile() && !aperte) vv.push_back(menu::voce(testi::t(L"Ripristina le finestre", L"Restore windows"), 3));
-            else if (aperte) vv.push_back(menu::voce(testi::t(L"Mostra il desktop", L"Show desktop"), 2));
+            if (desktopRipristinabile()) vv.push_back(menu::voce(testi::t(L"Ripristina le finestre", L"Restore windows"), 3));
+            if (aperte) vv.push_back(menu::voce(testi::t(L"Mostra il desktop", L"Show desktop"), 2));
             // app nascoste dal dock (PR #20): un sottomenu per rimetterle, una per una o tutte
             HMENU sub = nullptr;
             if (!appNascoste.empty()) {
@@ -3721,6 +3868,11 @@ private:
             voci.push_back(menu::voce(v.finestre.size() > 1 ? testi::t(L"Chiudi tutte le finestre", L"Close all windows") : testi::t(L"Chiudi", L"Close"), 2));
         }
         SetForegroundWindow(icone);   // cosi' la tastiera (Esc, frecce) arriva al menu
+        // processo di ogni finestra prima del menu: mentre il menu e' aperto una finestra puo' chiudersi e il suo HWND
+        // passare a un'altra app, che "Chiudi" non deve toccare (R20261121-001416-S7)
+        std::vector<DWORD> pidPrima;
+        for (HWND h : v.finestre) { DWORD p = 0; GetWindowThreadProcessId(h, &p); pidPrima.push_back(p); }
+        auto stessa = [&](size_t k) { DWORD p = 0; return IsWindow(v.finestre[k]) && GetWindowThreadProcessId(v.finestre[k], &p) && p == pidPrima[k]; };
         // sopra il dock, centrato sull'icona (il punto e' quello del clic)
         const int s = (int)menu::mostra(voci, puntoMenu(pt), icone, lato == 0);
         if (s >= 1000 && s - 1000 < (int)comandi.size()) {
@@ -3731,15 +3883,17 @@ private:
             return;
         }
         if (s == 1) {
-            segnaLancio(v); ShellExecuteW(nullptr, L"open", v.avvio.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            // (stessa scelta del clic normale: collegamento Store vecchio -> il pacchetto, R20261121-001416-S15)
+            segnaLancio(v); ShellExecuteW(nullptr, L"open", (v.pacchetto.empty() ? v.avvio : v.pacchetto).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             for (auto& x : this->voci) if (!x.uscente && chiave(x) == chiave(v)) x.rimbalzoT0 = ultimoT;   // la voce di adesso
             dirty = true;
         }
         else if (s == 2) {
             // come "Chiudi finestra" della barra di Windows: il comando di sistema (lo stesso del menu della finestra e di
             // Alt+F4), non WM_CLOSE diretto, che alcune app trattano diversamente
-            for (HWND h : v.finestre) {
-                if (!IsWindow(h)) continue;
+            for (size_t k = 0; k < v.finestre.size(); k++) {
+                const HWND h = v.finestre[k];
+                if (!stessa(k)) continue;
                 wchar_t c[64] = L""; GetClassNameW(h, c, 64);
                 if (registro) { char b[200]; snprintf(b, sizeof(b), "chiudi dal dock: %p (%ls)%s", (void*)h, c, IsIconic(h) ? " ridotta" : ""); registro(b); }
                 if (preparaChiusura) preparaChiusura(h);   // la foto per l'animazione di chiusura (come Alt+F4)
@@ -3751,7 +3905,10 @@ private:
         else if (s == 5) { DeleteFileW(v.avvio.c_str()); appDaAggiornare = true; dirty = true; }   // come "Rimuovi dalla barra"
         else if (s == 6) aggiungiAlDock(v.nome, exeVero ? v.exe : L"", v.aumid, v.avvio);
         else if (s == 7) nascondiApp(v.exe, v.aumid, v.nome);
-        else if (s >= 100 && s - 100 < (int)elenco.size() && IsWindow(elenco[s - 100])) portaDavanti(elenco[s - 100]);
+        else if (s >= 100 && s - 100 < (int)elenco.size() && IsWindow(elenco[s - 100])) {
+            const auto it = std::find(v.finestre.begin(), v.finestre.end(), elenco[s - 100]);
+            if (it == v.finestre.end() || stessa((size_t)(it - v.finestre.begin()))) portaDavanti(elenco[s - 100]);
+        }
     }
 
     static LRESULT CALLBACK procVetro(HWND h, UINT m, WPARAM w, LPARAM l) {
@@ -3818,6 +3975,8 @@ private:
                     const int b = d->tastoPremuto;
                     d->tastoPremuto = -1;
                     if (b >= 0 && d->tastoTestaIn(x, y) == b) d->premiTastoTesta(b);
+                    // sulla musica ma fuori dai tasti (copertina, titolo): l'app che sta riproducendo
+                    else if (b == -2 && d->testaMusica && dentro(d->rettMus, x, y) && d->tastoTestaIn(x, y) < 0) d->apriAppMusica(d->notch.musicaOra().aumid);
                     d->premuta = -1; d->statoPremuto = -1; d->dirty = true;
                     return 0;
                 }
@@ -3868,7 +4027,7 @@ private:
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
-            case WM_LAVORO_FATTO: { Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
+            case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
         }
         return DefWindowProcW(h, m, w, l);

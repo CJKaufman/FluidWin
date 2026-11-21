@@ -50,6 +50,7 @@ class Notch {
 public:
     inline static void (*registroScaffale)(const char*, unsigned long) = nullptr;
     std::function<void()> clic;             // clic sull'ora: le notifiche
+    std::function<void(const std::wstring&)> apriMusica;   // clic sulla musica: l'app che suona (AUMID dato da Windows)
     std::function<void()> clicNotifica;     // clic sulla notifica mostrata: apre l'app
     std::function<void()> chiudiNotifica;   // la x sulla notifica: la toglie
     std::function<void()> notificaFinita;   // la notifica non c'e' piu' (chi la manda puo' passare alla prossima)
@@ -141,6 +142,9 @@ public:
         if (b < 0 || b > 2) return;
         lettore.comando(b == 0 ? musica::Lettore::INDIETRO : b == 1 ? musica::Lettore::PLAY_PAUSA : musica::Lettore::AVANTI);
         if (b == 1) brano.suona = !brano.suona;   // subito, senza aspettare la prossima lettura
+        // fra poco si rilegge lo stato vero anche se il lettore non ha cambiato versione: un comando rifiutato
+        // lasciava il simbolo al contrario per sempre (R20261121-002056-S11)
+        risincronizzaAlle = adesso() + 1.5;
         if (visibile && !animando && salita() < 0.5) ridisegna();
     }
 
@@ -159,7 +163,11 @@ public:
     bool notifica(const std::wstring& app, const std::wstring& titolo, const std::wstring& testo, const std::vector<UINT>& px, int w, int h) {
         if (!visibile || modoAtt != NORMALE) return false;
         nApp = app; nTitolo = titolo; nTesto = testo; nPx = px; nW = w; nH = h; iconaNuova = true;
-        notificaAttiva = true; fineNotifica = adesso() + 5.5;
+        // la pausa conta dall'arrivo: stesso istante per la scadenza e per il primo controllo. Prima il primo controllo
+        // aggiungeva anche il tempo di prima (R20261121-120306-S3); con 0 invece perdeva quello fra arrivo e primo
+        // controllo (R20261121-123420-S3)
+        const double ora = adesso();
+        notificaAttiva = true; fineNotifica = ora + 5.5; tControllo = ora;
         tOnda = adesso();
         bersagli(); anima();
         return true;
@@ -249,9 +257,10 @@ private:
     double tSegnoSilenzio = -10, tSegnoSveglio = -10;   // quando sono comparse o sparite (dissolvenza)
     // (in uscita piu' in fretta: il notch intanto si stringe e il segno non deve arrivare sopra l'ora)
     float alfaSegno(bool acceso, double t0) const { const float k = (float)std::clamp((adesso() - t0) / (acceso ? 0.3 : 0.14), 0.0, 1.0); const float e = k * k * (3 - 2 * k); return acceso ? e : 1 - e; }
-    bool notificaAttiva = false; double fineNotifica = 0;
+    bool notificaAttiva = false; double fineNotifica = 0, tControllo = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
     musica::Lettore lettore; musica::Brano brano; UINT versioneBrano = 0xFFFFFFFF; bool copertinaNuova = false;
+    double risincronizzaAlle = 0;   // dopo play/pausa: quando rileggere lo stato vero (vedi comandoMusica)
 
     // mouse
     bool sopra = false, cliccabileOra = false;
@@ -445,6 +454,11 @@ private:
         bool ridisegnare = false;
         // musica
         const UINT v = lettore.versione();
+        if (risincronizzaAlle > 0 && t >= risincronizzaAlle) {
+            risincronizzaAlle = 0;
+            const bool vero = lettore.stato().suona;
+            if (vero != brano.suona) { brano.suona = vero; ridisegnare = true; }
+        }
         if (v != versioneBrano) {
             versioneBrano = v;
             musica::Brano b = lettore.stato();
@@ -484,6 +498,10 @@ private:
         const bool sx = scena == NOTIFICA && dentro && sullaX(pc.x, pc.y);
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
         // scadenze: volume e notifica (ferma finche' c'e' sopra il mouse)
+        // (i 5,5 s contano solo mentre la notifica si vede: coperta da una scena piu' importante, per esempio la sveglia
+        // del timer, il tempo si ferma. Prima poteva scadere senza essere mai comparsa, R20261121-002056-S5)
+        if (notificaAttiva && scena != NOTIFICA && tControllo > 0) fineNotifica += t - tControllo;
+        tControllo = t;
         if (notificaAttiva && t >= fineNotifica) { if (dentro) fineNotifica = t + 1.5; else finisciNotifica(); }
         // con il tasto premuto e il mouse sul notch (un file trascinato da Esplora file) il notch si fa trovare dal
         // trascinamento: trasparente al mouse, Windows non glielo darebbe mai
@@ -565,11 +583,15 @@ private:
             const int b = pulsante(x, y);
             if (b >= 0) {
                 lettore.comando(b == 0 ? musica::Lettore::INDIETRO : b == 1 ? musica::Lettore::PLAY_PAUSA : musica::Lettore::AVANTI);
-                if (b == 1) brano.suona = !brano.suona;   // subito, senza aspettare la prossima lettura
+                // subito, senza aspettare la prossima lettura; poi si rilegge lo stato vero, se l'app rifiuta la pausa
+                // (come dalla capsula: R20261121-120306 su S11)
+                if (b == 1) { brano.suona = !brano.suona; risincronizzaAlle = adesso() + 1.5; }
                 ridisegna();
                 return;
             }
         }
+        // musica (piccola o aperta, fuori dai tasti): l'app che sta riproducendo in primo piano
+        if ((scena == MUSICA || scena == APERTO) && !brano.aumid.empty() && apriMusica) { apriMusica(brano.aumid); return; }
         if (clic) clic();
     }
 
@@ -617,7 +639,7 @@ private:
         const float d = dpi;
         auto crea = [&](const wchar_t* fam, DWRITE_FONT_WEIGHT p, float px, IDWriteTextFormat** f, bool taglia, DWRITE_TEXT_ALIGNMENT al = DWRITE_TEXT_ALIGNMENT_LEADING) {
             if (FAILED(fdw->CreateTextFormat(fam, nullptr, p, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * d, L"it-it", f)) || !*f) return;
-            (*f)->SetTextAlignment(al); (*f)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); (*f)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            testi::allinea(*f, al); (*f)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); (*f)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             if (taglia) {   // testo troppo lungo: finisce con "…"
                 IDWriteInlineObject* e = nullptr; fdw->CreateEllipsisTrimmingSign(*f, &e);
                 DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0}; (*f)->SetTrimming(&tr, e);
@@ -787,7 +809,9 @@ private:
     bool zonaBarrette(D2D1_RECT_F& r, D2D1_POINT_2F& o) const {
         float w, h, R; misura(scena, w, h, R);
         const float L = sinistra(scena), d = dpi;
-        if (scena == MUSICA) o = {L + w - puntiW() - 25 * d, h / 2};   // (vedi contenutoScena: lo spazio dei pallini)
+        // (vedi contenutoScena: lo spazio dei pallini e quello di luna e tazzina. Senza segniW il ridisegno parziale
+        // metteva un secondo gruppo di barrette 22 px piu' a destra, sopra la luna: R20261121-002056-S12)
+        if (scena == MUSICA) o = {L + w - puntiW() - segniW() - 25 * d, h / 2};
         else if (scena == APERTO) o = {L + w - 35 * d, 24 * d};
         else return false;
         o.y += scesa(scena);   // (notch in basso: contro il bordo in basso)
@@ -957,8 +981,8 @@ private:
         ID2D1EllipseGeometry *e1 = nullptr, *e2 = nullptr; ID2D1PathGeometry* g = nullptr;
         f->CreateEllipseGeometry({{cx, cy}, r, r}, &e1);
         f->CreateEllipseGeometry({{cx + 2.8f * dpi, cy - 2.2f * dpi}, r * 0.85f, r * 0.85f}, &e2);
-        if (e1 && e2 && SUCCEEDED(f->CreatePathGeometry(&g))) {
-            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        ID2D1GeometrySink* s = nullptr;   // (Open puo' fallire: R20261121-002056-S17)
+        if (e1 && e2 && SUCCEEDED(f->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
             e1->CombineWithGeometry(e2, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
             s->Close(); s->Release();
             colore(0.62f, 0.55f, 1.0f, a);   // viola, come la luna di Non disturbare su iPhone
@@ -991,7 +1015,7 @@ private:
     // ---- scaffale ----
     // File appoggiati sul notch (riferimenti: i file restano dove sono). Si trascinano sopra da qualsiasi app, si
     // riprendono trascinandoli fuori (uno o "Tutti"); dopo un trascinamento riuscito escono dallo scaffale.
-    struct Oggetto { std::wstring percorso, nome; std::vector<UINT> px; int w = 0, h = 0; ID2D1Bitmap* b = nullptr; };
+    struct Oggetto { std::wstring percorso, nome; std::vector<UINT> px; int w = 0, h = 0; ID2D1Bitmap* b = nullptr; bool provata = false; };
     std::vector<Oggetto> scaffale;
     bool trascinoSopra = false, trascinoMio = false;
     double fineScaffale = 0;
@@ -1026,12 +1050,26 @@ private:
                 FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
                 if (SUCCEEDED(o->GetData(&f, &m))) {
                     // l'handle del blocco, non il puntatore di GlobalLock (audit FW-AUDIT-016, come nel dock)
+                    // Tutti i file o nessuno: prima oltre il cinquantesimo si scartavano in silenzio e la sorgente riceveva
+                    // comunque COPY (S20). Fino a 200 in tutto; le miniature solo per i primi 12 (le altre si
+                    // vedrebbero solo scorrendo), perche' la shell le legge qui, sul thread dell'interfaccia (S8)
+                    bool preso = false;
                     if (const HDROP hd = (HDROP)m.hGlobal) {
                         const UINT k = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
-                        for (UINT i = 0; i < k && i < 50; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) n->appoggia(p); }
+                        std::vector<std::wstring> percorsi;
+                        for (UINT i = 0; i < k && k + n->scaffale.size() <= 200; i++) {
+                            const UINT len = DragQueryFileW(hd, i, nullptr, 0);
+                            std::wstring p(len + 1, L'\0');
+                            if (!len || DragQueryFileW(hd, i, p.data(), len + 1) != len) { percorsi.clear(); break; }
+                            p.resize(len); percorsi.push_back(std::move(p));
+                        }
+                        if (k && percorsi.size() == k) {
+                            for (const auto& p : percorsi) n->appoggia(p, n->scaffale.size() < 12);
+                            preso = true;
+                        }
                     }
                     ReleaseStgMedium(&m);
-                    *e = DROPEFFECT_COPY;   // copia: il file resta dov'era
+                    *e = preso ? DROPEFFECT_COPY : DROPEFFECT_NONE;   // copia: il file resta dov'era
                     n->fineScaffale = adesso() + 1.8;   // si vede un attimo cosa e' entrato
                 }
             }
@@ -1045,11 +1083,18 @@ private:
         if (registroScaffale) registroScaffale(fase, esito);
     }
 
-    void appoggia(const std::wstring& p) {
+    void appoggia(const std::wstring& p, bool conMiniatura = true) {
         for (auto& o : scaffale) if (!_wcsicmp(o.percorso.c_str(), p.c_str())) return;
         Oggetto o; o.percorso = p;
         const size_t s = p.find_last_of(L"\\/"); o.nome = s == std::wstring::npos ? p : p.substr(s + 1);
-        IShellItemImageFactory* fab = nullptr;   // icona o anteprima (poche e piccole: subito)
+        if (conMiniatura) miniatura(o);
+        scaffale.push_back(std::move(o));
+    }
+    // icona o anteprima (poche e piccole: subito), una volta per oggetto
+    void miniatura(Oggetto& o) {
+        o.provata = true;
+        const std::wstring& p = o.percorso;
+        IShellItemImageFactory* fab = nullptr;
         if (SUCCEEDED(SHCreateItemFromParsingName(p.c_str(), nullptr, IID_PPV_ARGS(&fab)))) {
             tracciaScaffale("deposito: lettura miniatura");
             HBITMAP hb = nullptr;
@@ -1070,7 +1115,6 @@ private:
             }
             fab->Release();
         }
-        scaffale.push_back(std::move(o));
     }
 
     void svuotaScaffale() { for (auto& o : scaffale) if (o.b) o.b->Release(); scaffale.clear(); }
@@ -1124,6 +1168,9 @@ private:
             trascinoMio = false;
             if (r == DRAGDROP_S_DROP && effetto != DROPEFFECT_NONE) {   // arrivato: esce dallo scaffale (nel dubbio resta)
                 for (auto it = quali.rbegin(); it != quali.rend(); ++it) { if (scaffale[*it].b) scaffale[*it].b->Release(); scaffale.erase(scaffale.begin() + *it); }
+                // le voci che ora entrano fra le visibili prendono la miniatura qui, fuori dal disegno (fra BeginDraw ed
+                // EndDraw un provider lento fermava il notch, R20261121-123420-S4)
+                for (size_t i = 0; i < scaffale.size() && i < (size_t)MAX_VISTI; i++) if (!scaffale[i].provata) miniatura(scaffale[i]);
             }
             dati->Release();
         }
@@ -1192,6 +1239,8 @@ private:
         const int vis = (int)std::min<size_t>(scaffale.size(), MAX_VISTI);
         for (int i = 0; i < vis; i++) {
             Oggetto& o = scaffale[i];
+            // (miniatura di un file entrato oltre il dodicesimo: si legge quando diventa visibile, all'uscita delle
+            // voci davanti, R20261121-120306-S4)
             if (!o.b) bitmap(rt, o.b, o.px, o.w, o.h);
             const D2D1_RECT_F r = rettOggetto(i);
             const float cx = (r.left + r.right) / 2, l = 17 * d;

@@ -28,24 +28,31 @@ inline void scrivi(const char* s) { if (registro()) registro()(s); }
 inline const wchar_t* CHIAVE = L"Software\\FluidWin";
 inline bool& spentoDaNoi() { static bool b = false; return b; }
 
-inline bool snapAcceso() { BOOL b = TRUE; if (!SystemParametersInfoW(SPI_GETWINARRANGING, 0, &b, 0)) return true; return b != FALSE; }
 // lettura che distingue "non si sa" da "spento" (R20261116-011042-S1): false se la lettura non riesce
 inline bool leggiSnap(bool& acceso) { BOOL b = TRUE; if (!SystemParametersInfoW(SPI_GETWINARRANGING, 0, &b, 0)) return false; acceso = b != FALSE; return true; }
 
-// spegne lo Snap di Windows (solo per la sessione) ricordandosi di rimetterlo
-inline void spegniSnap() {
-    if (spentoDaNoi() || !snapAcceso()) return;
+// spegne lo Snap di Windows (solo per la sessione) ricordandosi di rimetterlo. true: lo Snap e' spento (anche se lo
+// era gia'), quindi l'affiancamento di FluidWin puo' prendere il suo posto; false: resta acceso, FluidWin no
+// (R20261121-001054-S15). Stato iniziale non leggibile: non si tocca niente. Prima "non si sa" contava come acceso, e
+// uno Snap spento dall'utente veniva poi riacceso all'uscita (R20261121-003154-S1)
+inline bool spegniSnap() {
+    // (niente scorciatoia su spentoDaNoi: un rimettiSnap riuscito ma non riletto lo lascia vero con lo Snap acceso, e
+    // FluidWin affiancava insieme a Windows; si rilegge sempre, R20261121-115445 conferma di S15)
+    bool prima = true;
+    if (!leggiSnap(prima)) { scrivi("affianca: stato dello Snap di Windows non leggibile, resta com'e'"); return false; }
+    if (!prima) return true;
     const DWORD uno = 1;
     // prima il segno: se FluidWin cade subito dopo, il guardiano sa cosa rimettere
-    if (RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SnapDaRimettere", REG_DWORD, &uno, sizeof(uno)) != ERROR_SUCCESS) { scrivi("affianca: segno non scritto, lo Snap di Windows resta acceso"); return; }
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SnapDaRimettere", REG_DWORD, &uno, sizeof(uno)) != ERROR_SUCCESS) { scrivi("affianca: segno non scritto, lo Snap di Windows resta acceso"); return false; }
     // (il valore va in pvParam, come dice la documentazione di SPI_SETWINARRANGING; si mette anche in uiParam, che
     // misurato Windows legge pure: R20261116-010212-S1)
     bool acceso = true;
     const bool fatto = SystemParametersInfoW(SPI_SETWINARRANGING, FALSE, (PVOID)(UINT_PTR)FALSE, SPIF_SENDCHANGE) != FALSE;
     const bool letto = fatto && leggiSnap(acceso);
     // spento, o spento senza poterlo rileggere: si tiene il segno (meglio rimettere una volta di troppo che mai)
-    if (fatto && (!letto || !acceso)) { spentoDaNoi() = true; scrivi(letto ? "affianca: Snap di Windows spento (solo per la sessione)" : "affianca: Snap di Windows spento (stato non riletto, segno tenuto)"); }
-    else { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SnapDaRimettere"); scrivi("affianca: Snap di Windows non spento"); }
+    if (fatto && (!letto || !acceso)) { spentoDaNoi() = true; scrivi(letto ? "affianca: Snap di Windows spento (solo per la sessione)" : "affianca: Snap di Windows spento (stato non riletto, segno tenuto)"); return true; }
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"SnapDaRimettere"); scrivi("affianca: Snap di Windows non spento");
+    return false;
 }
 // lo rimette se l'aveva spento FluidWin (anche un FluidWin di prima caduto: c'e' il segno)
 inline void rimettiSnap() {
@@ -237,9 +244,12 @@ public:
         int quante = 0; disposizioni(quante);
         w = (int)std::lround((2 * MARGINE + quante * CARTA_L + (quante - 1) * SPAZIO) * d);
         hh = (int)std::lround((2 * MARGINE + CARTA_A) * d);
-        MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST), &mi);
-        x0 = std::clamp((int)ancora.x - w / 2, (int)mi.rcWork.left + 4, (int)mi.rcWork.right - w - 4);
-        y0 = std::clamp((int)ancora.y + (int)std::lround(6 * d), (int)mi.rcWork.top + 4, (int)mi.rcWork.bottom - hh - 4);
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoW(MonitorFromPoint(ancora, MONITOR_DEFAULTTONEAREST), &mi)) return;
+        // (riquadro piu' largo dello schermo, verticale ad alta scala: il limite alto mai sotto quello basso, perche'
+        // std::clamp con i limiti invertiti non e' definito, R20261121-003154-S10)
+        x0 = std::clamp((int)ancora.x - w / 2, (int)mi.rcWork.left + 4, std::max((int)mi.rcWork.left + 4, (int)mi.rcWork.right - w - 4));
+        y0 = std::clamp((int)ancora.y + (int)std::lround(6 * d), (int)mi.rcWork.top + 4, std::max((int)mi.rcWork.top + 4, (int)mi.rcWork.bottom - hh - 4));
         sopraD = sopraC = -1; for (auto& l : luce) l = 0;
         k = 0; uscendo = false; aperto = true; tFuori = 0; t0 = tPrec = vetro::secondi();
         posa();

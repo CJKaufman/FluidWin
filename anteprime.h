@@ -68,7 +68,7 @@ public:
             const float sc = std::min((LARGO - 2 * RIENTRO) * dpi / fw, (ALTO - 2 * RIENTRO) * dpi / fh);
             s.mw = fw * sc; s.mh = fh * sc;
             s.dentro = false; s.sopraX = false; s.su = 0;
-            s.x = -1;   // (posizione da prendere subito, senza scivolare)
+            s.xPronta = false;   // (posizione da prendere subito, senza scivolare)
             n++;
         }
         if (n == 0) return;
@@ -112,11 +112,22 @@ public:
     // ne va davvero, non il clic, cosi' se l'app chiede "Salvare?" e si annulla la scheda resta (R20261119-205727-S1, S2)
     void riconcilia() {
         if (!mostrata || chiudendo) return;
+        bool cambiate = false;
         for (int i = n - 1; i >= 0; i--) {
             const HWND h = schede[i]->h;
             if (!IsWindow(h) || !IsWindowVisible(h)) togli(h);
+            else if ((IsIconic(h) != FALSE) != schede[i]->ridotta) {
+                // ridotta o ripristinata con la scheda aperta: miniatura al posto della scritta (o il contrario), invece
+                // dello stato preso all'apertura (R20261121-001416-S16)
+                Scheda& s = *schede[i];
+                s.ridotta = !s.ridotta;
+                if (s.ridotta) s.togliMiniatura();
+                else if (FAILED(DwmRegisterThumbnail(s.v.fin, h, &s.th))) s.th = nullptr;
+                cambiate = true;
+            }
             if (!mostrata || chiudendo) return;   // (togli ha chiuso l'ultima)
         }
+        if (cambiate) aggiorna();
     }
 
 private:
@@ -181,7 +192,8 @@ private:
         bool piena = false;   // alla sua misura finale (la x si clicca solo cosi')
         float mw = 0, mh = 0;
         double su = 0;    // 0..1: quanto e' alzata (mouse sopra), inseguito con una molla morbida
-        double x = -1;    // posizione orizzontale che si vede (insegue quella giusta quando una scheda se ne va)
+        double x = 0;     // posizione orizzontale che si vede (insegue quella giusta quando una scheda se ne va)
+        bool xPronta = false;   // x non ancora presa: prima era x < 0, ma sugli schermi a sinistra le x sono negative (R20261121-001416-S17)
         // contenuto disegnato alla misura finale e rimpicciolito nella finestra di adesso (sc, tx, ty), con opacita' op
         float sc = 1, tx = 0, ty = 0, op = 1;
         void togliMiniatura() { if (th) DwmUnregisterThumbnail(th); th = nullptr; }
@@ -234,7 +246,7 @@ private:
             s.su = suObj + (s.su - suObj) * std::exp(-dt / 0.06);
             if (std::abs(s.su - suObj) < 0.004) s.su = suObj; else muove = true;
             const double xObj = xGiusta(i);
-            if (s.x < 0 || std::abs(s.x - xObj) < 0.5) s.x = xObj; else { s.x = xObj + (s.x - xObj) * std::exp(-dt / 0.05); muove = true; }
+            if (!s.xPronta || std::abs(s.x - xObj) < 0.5) { s.x = xObj; s.xPronta = true; } else { s.x = xObj + (s.x - xObj) * std::exp(-dt / 0.05); muove = true; }
         }
         aggiorna();
         if (chiudendo && g <= 0) {
@@ -258,7 +270,9 @@ private:
         const double icx = (iconaR.left + iconaR.right) / 2.0, icy = (iconaR.top + iconaR.bottom) / 2.0;
         for (int i = 0; i < n; i++) {
             Scheda& s = *schede[i];
-            if (s.x < 0) s.x = xGiusta(i);
+            // (xPronta, non il segno di x: sugli schermi a sinistra x e' negativa, e una scheda riusata all'apertura
+            // per un'altra app teneva la x positiva di prima per un fotogramma, R20261121-115814-S3 e S17)
+            if (!s.xPronta) { s.x = xGiusta(i); s.xPronta = true; }
             // avanzamento di questa scheda (le altre partono un poco dopo; all'indietro rientra prima l'ultima)
             const double r = std::clamp((g * durata() - i * SFALSA) / CORSA, 0.0, 1.0);
             const double sale = vetro::uscita(r);                               // dal centro dell'icona al suo posto

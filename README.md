@@ -20,7 +20,12 @@ The dock takes the place of the taskbar. It shows your apps, with a small number
 notifications. At the end you find a **Downloads** stack (click it to see your latest files) and the **Recycle Bin**,
 where you can drag files to delete them.
 
-If you use more than one screen, bring the mouse to the bottom edge of the other screen and the dock moves there.
+Rest the mouse on an app to see **live previews** of its windows, rising from behind the icon. Right-click an app for
+its **commands** (new window, recent files and so on, the same ones Windows shows), drag icons to **reorder** them,
+and hide the apps you don't want to see. The dock can sit at the **bottom, top, left or right** of the screen, and it
+has buttons to show the desktop and bring your windows back.
+
+If you use more than one screen, bring the mouse to the edge of the other screen and the dock moves there.
 
 ### The notch
 
@@ -40,13 +45,16 @@ the volume when you change it, notifications as they arrive, the song that is pl
 
 It also has a **shelf**: drag files onto the notch to park them there, then drag them out wherever you need them.
 A small dot lights up when an app is using the microphone or the camera, and a short notice appears when you connect
-headphones or the battery is running low.
+headphones or the battery is running low. Click the song that is playing to jump to the app playing it. If you prefer a
+clean screen, the notch can stay hidden until it has something to show.
 
 ### The control center
 
 The last icon of the dock opens the control center. Everything opens inside the same glass panel: Wi-Fi, Bluetooth,
 dark theme, keep awake, silent mode (also for a set time), timer, microphone, notifications, calendar, weather and
-news. On laptops it also shows the battery, with the time left.
+news (you choose the city, the news source and °C or °F). You can pick a **Wi-Fi network** right there, and the
+calendar follows your Windows calendar, also when it is not the Gregorian one. On laptops it also shows the battery,
+with the time left.
 
 <p align="center">
   <img src="docs/gif/centro.gif" width="320" alt="The control center opening from the dock">
@@ -78,7 +86,7 @@ bottom that shows the rest of the entries when you move the mouse over it.
 
 ### Search and overview
 
-**Win+Tab** opens the search: apps, files, settings and quick math, while a wave of color lights up the edges of
+**Win+Tab** opens the search: apps, files and folders (from the Windows search index), settings and quick math, while a wave of color lights up the edges of
 the screen. **Alt+Tab** opens an overview of all your open windows, and you use it just like the Windows one: hold
 Alt, press Tab to move, let go to switch.
 
@@ -104,13 +112,34 @@ Windows cursors come back. It also works on Windows builds where the Windows set
 
 ### Settings
 
-Every feature can be turned on or off from the settings, divided into simple sections.
+Every feature can be turned on or off from the settings, divided into simple sections. You also choose the
+language (seven of them), the shape of the corners, where the dock sits, and one of FluidWin's own wallpapers.
 
 <p align="center">
   <img src="docs/gif/impostazioni.gif" width="560" alt="The settings window">
 </p>
 
 ...and a lot more.
+
+## What's new in 1.3.0
+
+The biggest FluidWin update so far: new features, a lot of what you asked for in the Issues, and the most thorough
+review the code has ever had.
+
+- **Seven languages:** Italian, English, Spanish, French, German, Portuguese and Arabic (read from right to left).
+- **Dock:** live window previews, app commands (jump lists) in the right-click menu, drag to reorder icons, hide apps,
+  show the desktop, and a choice of position (bottom, top, left or right).
+- **Launcher and search:** files and folders from the Windows search index.
+- **Control center:** choose a Wi-Fi network, non-Gregorian calendars, weather city, news source and °C/°F.
+- **Notch:** can stay hidden until it has something to show; click the music to jump to the app that is playing;
+  animated edges; microphone and camera dots right after the date.
+- **New animations:** a smoother maximize and a new "drop into the dock" minimize.
+- **Look:** rounded, slightly rounded or square corners; FluidWin's own wallpapers; a new logo.
+- **Quick exit and emergency exit** (Ctrl+Alt+Shift+F12).
+- **Option to leave the Win key to Windows** (for those who use another launcher), and support for more cursor packs.
+- **A full code review:** every file was read again by an independent reviewer. More than 150 problems were found and
+  fixed, most of them rare: crashes, hangs, cases where Windows could be left in the wrong state, and many small
+  glitches. Restoring Windows after a crash or a forced close is now safer than ever.
 
 ## What's new in 1.2.3
 
@@ -250,10 +279,12 @@ The source code is public, so anyone can inspect how FluidWin works and judge th
 - This is still an **early version**. I tested it carefully on my PC, but not on every PC in the world. If something
   doesn't work, tell me in the [Issues](../../issues). In the settings, **General**, **Diagnostics**, **Copy** gives
   you a short report (with no personal data) to paste there.
-- The interface is in **English** and **Italian** (you can switch in the settings).
+- The interface is in **Italian, English, Spanish, French, German, Portuguese and Arabic** (you can switch in the
+  settings). Translations other than Italian and English are new: if something reads oddly, tell me.
 - It doesn't ask for administrator rights, doesn't touch Windows files and doesn't inject code into other apps.
-- It only goes online for the weather ([Open-Meteo](https://open-meteo.com)), the news
-  ([ANSA](https://www.ansa.it)) and, at startup, to ask GitHub if there is a new version (no personal data is sent).
+- It only goes online for the weather and the city search ([Open-Meteo](https://open-meteo.com)), the news (the public
+  feeds of ANSA, BBC News, The Guardian or Al Jazeera) and, at startup, to ask GitHub if there is a new version (no
+  personal data is sent).
 
 ## For those who want to look at the code
 

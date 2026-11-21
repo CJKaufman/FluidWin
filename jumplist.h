@@ -253,7 +253,9 @@ inline bool avvia(const Comando& c) {
     // (anche i comandi di Chrome e Brave possono portare l'AppUserModelID, per raggruppare le finestre: per loro conta il
     // file da aprire. ActivateApplication solo se il bersaglio non e' un file, come per le app dello Store, il cui
     // "percorso" e' il nome dell'app nel pacchetto)
-    const bool file = !c.percorso.empty() && GetFileAttributesW(c.percorso.c_str()) != INVALID_FILE_ATTRIBUTES;
+    // (il controllo del file solo se serve, cioe' con un AUMID: senza, su una cartella di rete scollegata fermava il
+    // dock per niente, R20261121-001416-S12)
+    const bool file = !c.aumid.empty() && !c.percorso.empty() && GetFileAttributesW(c.percorso.c_str()) != INVALID_FILE_ATTRIBUTES;
     if (!c.aumid.empty() && !file) {
         IApplicationActivationManager* am = nullptr;
         bool ok = false;

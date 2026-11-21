@@ -45,7 +45,7 @@ struct Valori {
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
-    int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
+    int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
     std::wstring cursore;         // pacchetto di cursori di FluidWin in uso ("" = quelli di Windows; vedi cursori.h)
 };
 constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
@@ -135,7 +135,7 @@ inline void carica() {
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
-    v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
+    { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
     testi::lingua() = v.lingua;
     v.cursore = leggiTesto(L"Cursore");
     if (!cursori::esiste(v.cursore)) v.cursore.clear();   // (pacchetto cancellato a mano dalla cartella)
@@ -214,13 +214,17 @@ public:
         v.posiziona(rDa.left, rDa.top, rDa.right - rDa.left, rDa.bottom - rDa.top, HWND_TOP, SWP_SHOWWINDOW);
         if (daCentro && dockSu) dockSu(true);
         if (registro) { char b[140]; snprintf(b, 140, "impostazioni: crescono da%s (%ld,%ld-%ld,%ld -> %d,%d %dx%d)", daCentro ? "l centro di controllo" : dalMouse ? "l mouse" : "l centro dello schermo", rDa.left, rDa.top, rDa.right, rDa.bottom, x, y, w, h); registro(b); }
+        // (rifatti se lo schermo ha un'altra scala: prima restavano quelli della prima apertura, S15)
+        if (fTitolo && fDpi != d) for (IDWriteTextFormat** f : {&fTitolo, &fVoce, &fSotto, &fSezione, &fCentro, &fMarchio, &fPiccolo}) if (*f) { (*f)->Release(); *f = nullptr; }
         if (!fTitolo) {
+            fDpi = d;
             fTitolo = v.formato(22 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fVoce = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
             fSotto = v.formato(11.5f * d);
             fSezione = v.formato(13 * d, DWRITE_FONT_WEIGHT_MEDIUM);
             fCentro = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
             fMarchio = v.formato(16 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            fPiccolo = v.formato(10.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);   // ("Coming soon" della lingua)
         }
         valori().avvio = avvioAttivo();   // (puo' essere cambiato da Gestione attivita' mentre FluidWin era aperto)
         DragAcceptFiles(v.fin, TRUE);
@@ -276,7 +280,7 @@ public:
         chiudi();
     }
 
-    bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+    bool messaggio(HWND hw, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
         r = 0;
         switch (m) {
             case WM_TIMER:
@@ -379,11 +383,13 @@ public:
                 return true;
             }
             case WM_SFONDO_FATTO: {   // lo sfondo scelto e' stato messo (o no): vedi scegliSfondo
+                if (!consegna::riprendi(hw, m, (const void*)l)) return true;   // (non consegnato da sfondi.h: ignorato)
                 auto* cb = (std::function<void(bool)>*)l;
                 (*cb)(w != 0); delete cb;
                 return true;
             }
             case WM_CURSORI_INSTALLATI: {
+                if (!consegna::riprendi(hw, m, (const void*)l)) return true;   // (non consegnato dal lavoro di installazione)
                 cursori::Esito* e = (cursori::Esito*)l;
                 installando = false;
                 if (e->ok) {
@@ -466,7 +472,8 @@ private:
          L"On the desktop and in File Explorer. Off or with Shift: the Windows one", &Valori::menuDestro, S_TASTIERA},
     };
     vetro::Finestra v;
-    IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr;
+    IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr, *fPiccolo = nullptr;
+    float fDpi = 0;   // scala con cui sono stati fatti i formati qui sopra
     bool aperta = false, dentro = false;
     // crescita dal centro di controllo e rientro (vedi apri): morph 1 cresce, -1 rientra, 0 fermo; mx 0..1 avanzamento
     // (0 = rettangolo del centro rDa, 1 = impostazioni rA); rientra: curva del rientro (vedi forma)
@@ -599,7 +606,19 @@ private:
     std::wstring statoCursori;
 
     void liberaAnteprime() { for (auto* b : anteprime) if (b) b->Release(); anteprime.clear(); }
-    void rileggiPacchetti() { pacchetti = cursori::elenco(); if ((int)pacchetti.size() > MAX_PACCHETTI) pacchetti.resize(MAX_PACCHETTI); liberaAnteprime(); }
+    // (oltre il limite resta comunque quello in uso: prima un pacchetto installato per ultimo in ordine alfabetico era
+    // attivo ma non compariva, e non si poteva togliere, R20261121-002419-S16)
+    void rileggiPacchetti() {
+        pacchetti = cursori::elenco();
+        if ((int)pacchetti.size() > MAX_PACCHETTI) {
+            const auto it = std::find_if(pacchetti.begin(), pacchetti.end(), [](const cursori::Pacchetto& p) { return p.nome == valori().cursore; });
+            const bool fuori = it != pacchetti.end() && it - pacchetti.begin() >= MAX_PACCHETTI;
+            cursori::Pacchetto attivo; if (fuori) attivo = *it;
+            pacchetti.resize(MAX_PACCHETTI);
+            if (fuori) pacchetti.back() = std::move(attivo);
+        }
+        liberaAnteprime();
+    }
 
     // la freccia del pacchetto come bitmap (pixel premoltiplicati); nullptr se non si legge
     ID2D1Bitmap* anteprima(const std::wstring& file, int lato) {
@@ -647,7 +666,7 @@ private:
         if (!pool::lancia([](LPVOID p) -> DWORD {
                 Lavoro* l = (Lavoro*)p;
                 cursori::Esito* e = new cursori::Esito(cursori::installa(l->file));
-                if (!PostMessageW(l->fin, WM_CURSORI_INSTALLATI, 0, (LPARAM)e)) delete e;
+                if (!consegna::posta(l->fin, WM_CURSORI_INSTALLATI, 0, e)) delete e;
                 delete l;
                 return 0;
             }, l, THREAD_PRIORITY_BELOW_NORMAL, true)) {
@@ -743,7 +762,7 @@ private:
         if (id == 120 || id == 121) valori().riduzione = id - 120;   // stile della riduzione a icona (1.3.0)
         else if (id >= 130 && id <= 132) valori().angoli = id - 130;   // angoli (1.3.0, Fase 3)
         else if (id >= 140 && id <= 143) valori().dockLato = id - 140;   // posizione del dock (1.3.0, Fase 3)
-        else if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
+        else if (id >= 100 && id < 100 + testi::N_LINGUE) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
             if (voci[id].campo == &Valori::avvio) impostaAvvio(b);   // (sta nel registro di Windows, non in salva)
@@ -773,7 +792,7 @@ private:
     static const wchar_t* nomeSezione(int s) {
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
-            case S_DOCK: return L"Dock";
+            case S_DOCK: return testi::t(L"Dock", L"Dock");
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -962,16 +981,21 @@ private:
             y += 70 * d;
         }
         if (sezione == S_GENERALE) {
-            // lingua: due scelte (i nomi restano ciascuno nella sua lingua)
-            const D2D1_RECT_F rl = {L, y, R, y + 64 * d};
+            // lingua: sette scelte in un'unica tendina di due file da quattro (i nomi restano ciascuno nella sua lingua);
+            // l'ottavo posto dice che altre lingue arriveranno
+            const D2D1_RECT_F rl = {L, y, R, y + 98 * d};
             riquadro(rl, false);
             v.testo(testi::t(L"Lingua", L"Language"), fVoce, {rl.left + 16 * d, rl.top, rl.left + 160 * d, rl.bottom}, inkS);
-            const float x0 = rl.left + 170 * d, larg = rl.right - 16 * d - x0, h = 34 * d, yl = rl.top + 15 * d;
+            const float x0 = rl.left + 170 * d, larg = rl.right - 16 * d - x0, h = 34 * d, y0 = rl.top + 15 * d;
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
-            v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
-            const wchar_t* nomi[2] = {L"Italiano", L"English"};
-            for (int i = 0; i < 2; i++) {
-                const D2D1_RECT_F r = {x0 + larg * i / 2 + 3 * d, yl + 3 * d, x0 + larg * (i + 1) / 2 - 3 * d, yl + h - 3 * d};
+            v.rt->FillRoundedRectangle({{x0, y0, x0 + larg, y0 + 2 * h}, h / 2, h / 2}, v.pen);
+            v.testo(L"Coming soon", fPiccolo, {x0 + larg * 3 / 4 + 3 * d, y0 + h + 3 * d, x0 + larg - 3 * d, y0 + 2 * h - 3 * d}, tenueS);
+            for (int i = 0; i < testi::N_LINGUE; i++) {
+                const int col = i % 4;
+                const int fila = i / 4;
+                const float yl = y0 + (float)fila * h;
+                const D2D1_RECT_F r = {x0 + larg * col / 4 + 3 * d, yl + 3 * d, x0 + larg * (col + 1) / 4 - 3 * d, yl + h - 3 * d};
+                const wchar_t* const nomeL = testi::nome(i);
                 zone.push_back({r, 100 + i});
                 if (valori().lingua == i) {
                     v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
@@ -980,9 +1004,9 @@ private:
                     v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
                     v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
                 }
-                v.testo(nomi[i], fCentro, r, inkS);
+                v.testo(nomeL, fCentro, r, inkS);
             }
-            y += 70 * d;
+            y += 104 * d;
             {   // angoli (1.3.0, Fase 3): dock, notch, pannelli, menu e finestre di FluidWin; tre scelte
                 const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
                 riquadro(ra, false);
@@ -1114,7 +1138,7 @@ private:
             v.rt->FillEllipse({{xm, cy + 0.8f * d}, rk + 0.6f * d, rk + 0.6f * d}, v.pen);
             v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
             v.rt->FillEllipse({{xm, cy}, rk, rk}, v.pen);
-            v.testo(std::to_wstring(val) + c.unita, fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
+            v.testo(testi::isola(std::to_wstring(val) + c.unita), fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
             y += 60 * d;
         }
         if (sezione == S_DOCK) {
@@ -1285,7 +1309,8 @@ private:
         const int posto = std::max(1, (int)((H - 14 * d - y) / passo)), tutte = 1 + (int)pacchetti.size();
         scorriCursori = std::clamp(scorriCursori, 0, std::max(0, tutte - posto));
         if (tutte > posto) {
-            const std::wstring quali = std::to_wstring(scorriCursori + 1) + L"–" + std::to_wstring(std::min(tutte, scorriCursori + posto)) +
+            // (l'intervallo isolato: in arabo "1–6" fra due numeri si leggerebbe "6–1")
+            const std::wstring quali = testi::isola(std::to_wstring(scorriCursori + 1) + L"–" + std::to_wstring(std::min(tutte, scorriCursori + posto))) +
                                        testi::t(L" di ", L" of ") + std::to_wstring(tutte) + testi::t(L" · scorri", L" · scroll");
             v.testo(quali, fSotto, {R - 220 * d, 26 * d, R - 60 * d, 50 * d}, tenueS);
         }

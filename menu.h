@@ -14,6 +14,7 @@
 #include <dwmapi.h>
 #include "raggio.h"
 #include "fabbriche.h"
+#include "testi.h"   // direzione del testo (arabo)
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
@@ -254,6 +255,7 @@ private:
         // nulli e torna 0, come un menu annullato. Prima si usavano subito, nulli
         if (!fmt || !fmtTitolo) return;
         for (IDWriteTextFormat* f : {fmt, fmtTitolo}) {
+            testi::allinea(f, DWRITE_TEXT_ALIGNMENT_LEADING);   // (in arabo da destra a sinistra, vedi testi.h)
             f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
@@ -359,21 +361,25 @@ private:
     bool fasciaSu() const { return scorri > 0.5f; }
     bool fasciaGiu() const { return scorri < maxScorri() - 0.5f; }
     // porta lo scorrimento a y; la voce sotto il mouse cambia con le voci
-    void scorriA(float y) {
+    // dalMouse: la voce sotto il mouse diventa quella scelta. Scorrendo con la tastiera no: la scelta resta quella delle
+    // frecce (prima saltava alla voce sotto il mouse fermo, e Invio eseguiva un altro comando, R20261121-002818-S14)
+    void scorriA(float y, bool dalMouse = true) {
         const float n = std::clamp(y, 0.0f, maxScorri());
         if (std::fabs(n - scorri) < 0.01f) return;
         scorri = n;
-        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
-        RECT cr; GetClientRect(fin, &cr);
-        sopra = PtInRect(&cr, c) ? voceIn(c.x, c.y) : sopra;
+        if (dalMouse) {
+            POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+            RECT cr; GetClientRect(fin, &cr);
+            sopra = PtInRect(&cr, c) ? voceIn(c.x, c.y) : sopra;
+        }
         disegna();
     }
     // la voce i tutta dentro la finestra (spostandosi con la tastiera)
     void mostraVoce(int i) {
         if (i < 0 || i >= (int)rett.size() || maxScorri() <= 0) return;
         const float m = FASCIA * dpi;
-        if (rett[i].top - scorri < m) scorriA(rett[i].top - m);
-        else if (rett[i].bottom - scorri > H - m) scorriA(rett[i].bottom - H + m);
+        if (rett[i].top - scorri < m) scorriA(rett[i].top - m, false);
+        else if (rett[i].bottom - scorri > H - m) scorriA(rett[i].bottom - H + m, false);
     }
     // mouse fermo su una delle due fasce: scorre da solo (la rotella puo' finire a un'altra finestra se FluidWin non e'
     // in primo piano). true se sta scorrendo
@@ -480,7 +486,9 @@ private:
             rt->DrawLine({cx - 5 * dpi, cy - 2 * s * dpi}, {cx, cy + 3 * s * dpi}, pen, 1.6f * dpi);
             rt->DrawLine({cx, cy + 3 * s * dpi}, {cx + 5 * dpi, cy - 2 * s * dpi}, pen, 1.6f * dpi);
         }
-        rt->EndDraw();
+        // superficie persa (GPU, driver): il menu si chiude senza scelta, con i suoi sottomenu; alla prossima apertura
+        // le risorse si rifanno. Prima restava aperto e cliccabile, vuoto o fermo all'ultimo disegno (S16)
+        if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { fine = true; scelta = 0; for (Menu* p = padre; p; p = p->padre) p->fine = true; }
         ValidateRect(fin, nullptr);
     }
 

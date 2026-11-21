@@ -309,8 +309,26 @@ inline bool installa(const Versione& v, std::wstring& perche, const std::functio
     const std::wstring fileZip = cartella + L"\\FluidWin.zip";
     if (!la[0] || !scriviFile(fileZip, zip)) { perche = testi::t(L"Impossibile salvare il file scaricato", L"Couldn't save the download"); return false; }
     if (fermato()) { DeleteFileW(fileZip.c_str()); return false; }
+    // Lo zip sul disco riaperto senza permettere ad altri di scriverlo, riletto e confrontato con i byte verificati
+    // (SHA-256), e tenuto aperto cosi' finche' tar lo estrae: prima tar riapriva un percorso fisso, e un altro
+    // processo poteva cambiarlo fra la verifica e l'estrazione (R20261121-002419-S3)
+    const HANDLE blocco = CreateFileW(fileZip.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool uguale = false;
+    if (blocco != INVALID_HANDLE_VALUE) {
+        std::string letto(zip.size(), '\0'); DWORD n = 0; size_t fatto = 0;
+        while (fatto < letto.size() && ReadFile(blocco, letto.data() + fatto, (DWORD)std::min<size_t>(letto.size() - fatto, 1u << 20), &n, nullptr) && n) fatto += n;
+        LARGE_INTEGER dim{}; GetFileSizeEx(blocco, &dim);
+        uguale = fatto == zip.size() && (ULONGLONG)dim.QuadPart == zip.size() && letto == zip;
+    }
+    if (!uguale) {
+        if (blocco != INVALID_HANDLE_VALUE) CloseHandle(blocco);
+        DeleteFileW(fileZip.c_str());
+        perche = testi::t(L"Il file scaricato e' cambiato sul disco", L"The downloaded file changed on disk");
+        scrivi("aggiornamenti: zip sul disco diverso da quello verificato, niente installazione"); return false;
+    }
     std::string exe;
     const bool estratto = cursori::tar(L"-xOf \"" + fileZip + L"\" FluidWin.exe", exe, 30000, 64u << 20);
+    CloseHandle(blocco);
     DeleteFileW(fileZip.c_str());
     if (!estratto || exe.size() < 4096 || exe[0] != 'M' || exe[1] != 'Z') { perche = testi::t(L"Nel pacchetto manca FluidWin.exe", L"FluidWin.exe is missing from the package"); return false; }
     const std::wstring inUso = exeInUso(), nuovo = inUso + L".nuovo", vecchio = inUso + L".vecchio";

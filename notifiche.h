@@ -49,7 +49,10 @@ public:
     // distruttore: due Lettore sono globali e si distruggerebbero all'uscita, forse dopo la chiusura di COM
     void chiudi() { if (ascolta) { rilascia(ascolta); ascolta = nullptr; } provato = false; }
 
-    bool leggi(std::vector<Notifica>& out) {
+    // false = accesso non concesso o lettura non riuscita. *tutte (se dato): false se qualche elemento non si e' letto
+    // (la lista ha solo quelli leggibili)
+    bool leggi(std::vector<Notifica>& out, bool* tutte = nullptr) {
+        if (tutte) *tutte = false;
         out.clear();
         if (!prepara()) return false;
         void* op = nullptr;
@@ -68,12 +71,20 @@ public:
         if (stato == 1) metodo<FnPtr>(op, 8)(op, &vista);   // GetResults
         rilascia(op);
         if (!vista) return false;
-        UINT32 n = 0; metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32*)>(vista, 7)(vista, &n);
-        for (UINT32 i = 0; i < n && i < 50; i++) {
+        // Lettura incompleta (misura o un elemento o il suo ID illeggibili): la lista porta quelli leggibili e *tutte
+        // resta falso. Chi riceve toglie dalla coda le notifiche assenti solo da una lista completa: una parziale ne
+        // faceva sparire di valide (R20261121-120306-S2). Scartarla del tutto invece perdeva i banner nuovi e il centro
+        // notifiche la prendeva per un permesso negato (R20261121-123420-S1 e S2)
+        UINT32 n = 0;
+        bool completa = SUCCEEDED(metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32*)>(vista, 7)(vista, &n));
+        if (!completa) n = 0;
+        // tutte (fino a 500): il limite di 50 serviva al disegno, ma troncava anche i numeri sulle icone e "Cancella
+        // tutto" (R20261121-002056-S10). Chi disegna mostra le prime (le piu' recenti, dopo l'ordinamento qui sotto)
+        for (UINT32 i = 0; i < n && i < 500; i++) {
             void* un = nullptr;
-            if (FAILED(metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32, void**)>(vista, 6)(vista, i, &un)) || !un) continue;
+            if (FAILED(metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32, void**)>(vista, 6)(vista, i, &un)) || !un) { completa = false; continue; }
             Notifica x;
-            metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32*)>(un, 8)(un, &x.id);
+            if (FAILED(metodo<HRESULT (STDMETHODCALLTYPE*)(void*, UINT32*)>(un, 8)(un, &x.id))) { rilascia(un); completa = false; continue; }
             metodo<HRESULT (STDMETHODCALLTYPE*)(void*, INT64*)>(un, 9)(un, &x.quando);
             void* app = nullptr;
             if (SUCCEEDED(metodo<FnPtr>(un, 7)(un, &app)) && app) {
@@ -123,6 +134,7 @@ public:
             out.push_back(std::move(x));
         }
         rilascia(vista);
+        if (tutte) *tutte = completa && n <= 500;   // (oltre 500 la lista e' tagliata: non e' completa)
         std::sort(out.begin(), out.end(), [](const Notifica& a, const Notifica& b) { return a.quando > b.quando; });
         return true;
     }
@@ -151,21 +163,21 @@ private:
         const HRESULT hr = RoGetActivationFactory(cl, __uuidof(IInspectable), (void**)&fab);
         WindowsDeleteString(cl);
         if (FAILED(hr) || !fab) return false;
-        // l'interfaccia "statics" e' quella diversa da IActivationFactory; il suo primo metodo e' get_Current
-        static const IID IID_Fabbrica = {0x00000035, 0, 0, {0xC0, 0, 0, 0, 0, 0, 0, 0x46}};
-        ULONG n = 0; IID* ids = nullptr; fab->GetIids(&n, &ids);
+        // Le interfacce esatte dell'SDK (windows.ui.notifications.management.h, 10.0.26100): prima si prendeva la prima
+        // interfaccia diversa da IActivationFactory, e su un'implementazione con un altro ordine lo slot 6 o 7 poteva
+        // essere il metodo di un'altra interfaccia (R20261121-002056-S3). Primo metodo di Statics: get_Current
+        static const IID IID_Statics = {0xff6123cf, 0x4386, 0x4aa3, {0xb7, 0x3d, 0xb8, 0x04, 0xe5, 0xb6, 0x3b, 0x23}};
+        static const IID IID_Ascolta = {0x62553e41, 0x8a06, 0x4cef, {0x82, 0x15, 0x60, 0x33, 0xa5, 0xbe, 0x4b, 0x03}};
         void* stat = nullptr;
-        for (ULONG i = 0; i < n && !stat; i++) if (!IsEqualIID(ids[i], IID_Fabbrica)) fab->QueryInterface(ids[i], &stat);
-        CoTaskMemFree(ids); fab->Release();
+        fab->QueryInterface(IID_Statics, &stat);
+        fab->Release();
         if (!stat) return false;
         IInspectable* corrente = nullptr;
         metodo<FnPtr>(stat, 6)(stat, (void**)&corrente);
         rilascia(stat);
         if (!corrente) return false;
-        // l'interfaccia predefinita dell'oggetto (la prima che dichiara) e' IUserNotificationListener
-        ULONG m = 0; IID* lid = nullptr; corrente->GetIids(&m, &lid);
-        if (m > 0) corrente->QueryInterface(lid[0], &ascolta);
-        CoTaskMemFree(lid); corrente->Release();
+        corrente->QueryInterface(IID_Ascolta, &ascolta);
+        corrente->Release();
         if (!ascolta) return false;
         int accesso = 0;
         metodo<HRESULT (STDMETHODCALLTYPE*)(void*, int*)>(ascolta, 7)(ascolta, &accesso);   // GetAccessStatus

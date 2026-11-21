@@ -53,7 +53,8 @@ public:
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromRect(&icona, MONITOR_DEFAULTTONEAREST), &mi);
         // dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto), a destra o a sinistra (ai lati)
         const int st = (int)std::lround(14 * d);
-        x = std::clamp((int)((icona.left + icona.right) / 2 - w / 2), (int)mi.rcWork.left + 8, (int)mi.rcWork.right - w - 8);
+        // (schermo piu' stretto della pila: limite alto mai sotto quello basso, std::clamp altrimenti non e' definito, S7)
+        x = std::clamp((int)((icona.left + icona.right) / 2 - w / 2), (int)mi.rcWork.left + 8, std::max((int)mi.rcWork.left + 8, (int)mi.rcWork.right - w - 8));
         y = icona.top - st - h; sx = 0; sy = 1;
         if (latoDock == 1) { y = icona.bottom + st; sy = -1; }
         else if (latoDock >= 2) {
@@ -63,7 +64,9 @@ public:
         if (y < mi.rcMonitor.top + 8) y = mi.rcMonitor.top + 8;
         if (y + h > mi.rcMonitor.bottom - 8) y = std::max((int)mi.rcMonitor.top + 8, (int)mi.rcMonitor.bottom - 8 - h);
         v.posiziona(x + sx * st, y + sy * st, w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
-        if (!fTitolo) { fTitolo = v.formato(15 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD); fNome = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER); fLink = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM); }
+        // (rifatti se cambia lo schermo e la sua scala: prima restavano della prima apertura, S18)
+        if (fTitolo && fDpi != d) { for (IDWriteTextFormat** f : {&fTitolo, &fNome, &fLink}) if (*f) { (*f)->Release(); *f = nullptr; } }
+        if (!fTitolo) { fTitolo = v.formato(15 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD); fNome = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER); fLink = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM); fDpi = d; }
         caricaAnteprime();
         sopra = premuto = -1;
         stato = 1; t0 = vetro::ms(); k = 0;
@@ -119,6 +122,7 @@ private:
     std::vector<File> file;
     std::wstring dir, titolo;
     IDWriteTextFormat *fTitolo = nullptr, *fNome = nullptr, *fLink = nullptr;
+    float fDpi = 0;   // scala con cui sono stati fatti i tre formati
     int stato = 0;   // 0 chiusa, 1 entra, 2 aperta, 3 esce
     ULONGLONG t0 = 0; double k = 0;
     int x = 0, y = 0, sopra = -1, premuto = -1, px0 = 0, py0 = 0;

@@ -25,7 +25,9 @@ public:
             const int w = (int)std::lround(300 * v.dpi), h = (int)std::lround(52 * v.dpi);
             x = (a.left + a.right - w) / 2; y = a.top + (int)std::lround(14 * v.dpi);
             v.posiziona(x, y - (int)std::lround(12 * v.dpi), w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
-            if (!fmt) fmt = v.formato(13.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_TRAILING);
+            // (rifatto se la scala e' cambiata, per esempio il principale ora al 150%: R20261121-120306 su S18)
+            if (fmt && fDpi != v.dpi) { fmt->Release(); fmt = nullptr; }
+            if (!fmt) { fmt = v.formato(13.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_TRAILING); fDpi = v.dpi; }
             livelloVis = livello;
             t0 = ora; stato = 1;
             vetro::battito(v.fin, 1);
@@ -46,6 +48,7 @@ public:
 private:
     vetro::Finestra v;
     IDWriteTextFormat* fmt = nullptr;
+    float fDpi = 0;   // scala a cui e' fatto fmt
     int stato = 0;   // 0 nascosto, 1 entra, 2 fermo, 3 esce
     ULONGLONG t0 = 0, tFine = 0;
     double k = 0;
@@ -75,14 +78,15 @@ private:
         // altoparlante
         const float sx = 22 * d;
         v.pen->SetColor(ink);
-        ID2D1PathGeometry* g = nullptr;
-        if (SUCCEEDED(v.f2d->CreatePathGeometry(&g))) {
-            ID2D1GeometrySink* s = nullptr; g->Open(&s);
-            s->BeginFigure({sx - 6 * d, cy - 3.5f * d}, D2D1_FIGURE_BEGIN_FILLED);
+        // (Open puo' fallire anche con la geometria creata: R20261121-002056-S17)
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* sg = nullptr;
+        if (SUCCEEDED(v.f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&sg))) {
+            sg->BeginFigure({sx - 6 * d, cy - 3.5f * d}, D2D1_FIGURE_BEGIN_FILLED);
             const D2D1_POINT_2F p[] = {{sx - 2 * d, cy - 3.5f * d}, {sx + 3 * d, cy - 8 * d}, {sx + 3 * d, cy + 8 * d}, {sx - 2 * d, cy + 3.5f * d}, {sx - 6 * d, cy + 3.5f * d}};
-            s->AddLines(p, 5); s->EndFigure(D2D1_FIGURE_END_CLOSED); s->Close(); s->Release();
-            v.rt->FillGeometry(g, v.pen); g->Release();
+            sg->AddLines(p, 5); sg->EndFigure(D2D1_FIGURE_END_CLOSED); sg->Close(); sg->Release();
+            v.rt->FillGeometry(g, v.pen);
         }
+        if (g) g->Release();
         const float liv = muto ? 0.0f : livelloVis;
         if (muto) {
             v.rt->DrawLine({sx + 7 * d, cy - 4 * d}, {sx + 15 * d, cy + 4 * d}, v.pen, 1.8f * d);
@@ -93,7 +97,8 @@ private:
                 const float r = (i == 0 ? 6.5f : 11.0f) * d;
                 ID2D1PathGeometry* a = nullptr;
                 if (FAILED(v.f2d->CreatePathGeometry(&a))) break;
-                ID2D1GeometrySink* s = nullptr; a->Open(&s);
+                ID2D1GeometrySink* s = nullptr;
+                if (FAILED(a->Open(&s))) { a->Release(); break; }
                 s->BeginFigure({sx + 3 * d + r * 0.6f, cy - r * 0.8f}, D2D1_FIGURE_BEGIN_HOLLOW);
                 s->AddArc(D2D1::ArcSegment({sx + 3 * d + r * 0.6f, cy + r * 0.8f}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
                 s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();

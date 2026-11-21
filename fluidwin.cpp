@@ -320,6 +320,7 @@ static HWND gDoppioH = nullptr;   // (thread principale) finestra del primo clic
 // Maiusc o Ctrl insieme) resta di Windows
 static std::atomic<HWND> gFgZoom{nullptr};
 static std::atomic<int> gFgStato{0};
+static std::atomic<HWND> gFgNonRaggiungibile{nullptr};   // finestra in primo piano di un livello piu' alto (vedi aggiornaFgZoom)
 // comando "vai in questo rettangolo" (affiancamento): non e' un SC_ di Windows
 static const UINT COMANDO_POSIZIONA = 0xF00F;
 // Il comando a una finestra di un'altra app senza aspettarla: WM_SYSCOMMAND postato, oppure (affiancamento)
@@ -370,6 +371,28 @@ static bool gDockOk = false;
 // Windhawk "Custom Window Corner Radius": FluidWin non li simula piu' (due metodi insieme si sovrapponevano)
 static const int RAGGIO_ANGOLI = 8;
 static const wchar_t* CHIAVE_FLUIDWIN = L"Software\\FluidWin";   // stato originale della barra di Windows, per il recupero
+static const wchar_t* NOME_ISTANZA = L"Local\\FluidWin.Istanza";   // mutex dell'istanza unica (anche il guardiano)
+// evento che un FluidWin crea finito il ripristino iniziale e tiene aperto finche' vive (il guardiano non lo apre mai
+// per tenerlo: con il FluidWin morto sparisce da solo)
+static const wchar_t* NOME_PRONTO = L"Local\\FluidWin.Pronto";
+static bool prontoAltrui() {
+    const HANDLE e = OpenEventW(SYNCHRONIZE, FALSE, NOME_PRONTO);
+    if (!e) return false;
+    CloseHandle(e);
+    return true;
+}
+
+// cartella temporanea con la barra finale, di qualsiasi lunghezza. Prima un buffer MAX_PATH con wcscat: una TEMP lunga
+// 250 caratteri piu' il nome del file sforava l'array sullo stack (R20261121-001054-S3)
+static std::wstring cartellaTemp() {
+    std::wstring s(MAX_PATH + 1, L'\0');
+    DWORD n = GetTempPathW((DWORD)s.size(), s.data());
+    if (n > s.size()) { s.assign(n + 1, L'\0'); n = GetTempPathW((DWORD)s.size(), s.data()); }
+    if (!n || n > s.size()) return {};   // (non la cartella corrente: chi chiama non scrive, R20261121-115445-S6)
+    s.resize(n);
+    if (s.back() != L'\\') s.push_back(L'\\');
+    return s;
+}
 
 static double gRaggioBase = RAGGIO_ANGOLI;   // px a 96 dpi: angoli delle finestre (quelli di Windhawk, se c'e')
 
@@ -512,19 +535,29 @@ static bool rendiLayered(HWND h, BYTE alfa) {
     // l'animazione), e la finestra non va scambiata per una layered di suo
     if (GetPropW(h, PROP_STILE)) { logf("stile layered ancora da togliere %p: niente trasparenza", h); return false; }
     if (!GetPropW(h, PROP_NASCOSTA)) {
-        const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-        if (ex & WS_EX_LAYERED) {
+        // un'alfa rimasta da sola (FluidWin caduto fra le due rimozioni di rendiVisibileFinestra) e' vecchia: l'app
+        // intanto puo' aver cambiato stile, e riusarla lascerebbe la finestra semitrasparente (R20261121-115445-S3)
+        RemovePropW(h, PROP_ALFA);
+        // cambiare lo stile aspetta l'app senza limite (vedi altrui.h): bloccata, niente animazione. L'attesa viene
+        // prima di leggere lo stile: un'app che diventa layered intanto non va trattata da opaca (R20261121-001054-S9)
+        // Si sonda anche se la finestra smette di essere layered fra le due letture: altrimenti il cambio di stile
+        // sincrono poteva arrivare a un'app mai sondata (R20261121-122837-S2)
+        const bool primaLayered = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        if (!primaLayered && !risponde(h, 300)) { logf("finestra che non risponde %p: niente trasparenza", h); return false; }
+        const bool layered = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) != 0;
+        if (primaLayered && !layered && !risponde(h, 300)) { logf("finestra che non risponde %p: niente trasparenza", h); return false; }
+        if (layered) {
             // gia' layered dall'app: si ricorda la sua trasparenza (1..255) e lo stile resta suo
             COLORREF k; BYTE a = 0; DWORD fl = 0;
             if (!GetLayeredWindowAttributes(h, &k, &a, &fl) || !(fl & LWA_ALPHA) || (fl & LWA_COLORKEY) || a == 0) return false;
-            SetPropW(h, PROP_ALFA, (HANDLE)(INT_PTR)a);
-            SetPropW(h, PROP_NASCOSTA, (HANDLE)1);
+            // i segni servono al ripristino (anche al guardiano): senza, la finestra non si tocca (R20261121-001054-S5)
+            if (!SetPropW(h, PROP_ALFA, (HANDLE)(INT_PTR)a)) return false;
+            if (!SetPropW(h, PROP_NASCOSTA, (HANDLE)1)) { RemovePropW(h, PROP_ALFA); return false; }
             gNascoste.insert(h);
         } else {
-            // cambiare lo stile aspetta l'app senza limite (vedi altrui.h): bloccata, niente animazione
-            if (!risponde(h, 300)) { logf("finestra che non risponde %p: niente trasparenza", h); return false; }
-            SetPropW(h, PROP_NASCOSTA, (HANDLE)1);
-            SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+            if (!SetPropW(h, PROP_NASCOSTA, (HANDLE)1)) return false;
+            // (riletto dopo l'attesa: l'app puo' aver cambiato i suoi stili intanto, R20261121-001054-S9)
+            SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) | WS_EX_LAYERED);
             segnaCambioStile(h);
             gNascoste.insert(h);
         }
@@ -600,6 +633,9 @@ static void rendiVisibileFinestra(HWND h) {
     if (!GetPropW(h, PROP_NASCOSTA)) { gNascoste.erase(h); return; }
     if (const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA)) {
         SetLayeredWindowAttributes(h, 0, (BYTE)orig, LWA_ALPHA);   // layered per conto suo: resta layered
+        // prima via il segno della trasparenza, poi l'alfa sua: cadendo fra le due il guardiano non la scambia per una
+        // finestra opaca a cui togliere lo stile (R20261121-001054-S4)
+        RemovePropW(h, PROP_NASCOSTA);
         RemovePropW(h, PROP_ALFA);
     } else {
         // Ordine: segno dello stile, via il segno della trasparenza, POI alfa 255. Il thread nascondiNata puo' stare
@@ -630,10 +666,12 @@ static void ripristinaBarra() {
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_FLUIDWIN, L"StatoBarra");
 }
 
-static void salvaStatoBarra() {
+// false: non salvato. Allora il dock non mette la barra a scomparsa: dopo un crash il guardiano non saprebbe com'era
+// (R20261121-001054-S7, R20261121-001416-S3)
+static bool salvaStatoBarra() {
     APPBARDATA tb{}; tb.cbSize = sizeof(tb);
     const DWORD stato = (DWORD)SHAppBarMessage(ABM_GETSTATE, &tb);
-    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_FLUIDWIN, L"StatoBarra", REG_DWORD, &stato, sizeof(stato));
+    return RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_FLUIDWIN, L"StatoBarra", REG_DWORD, &stato, sizeof(stato)) == ERROR_SUCCESS;
 }
 
 // Con il dock la barra di Windows sparisce del tutto (non risale neanche col mouse in fondo allo schermo):
@@ -662,6 +700,7 @@ static void ripristinaFinestra(HWND h) {
         if (GetPropW(h, PROP_NASCOSTA)) {
             if (const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA)) {
                 SetLayeredWindowAttributes(h, 0, (BYTE)orig, LWA_ALPHA);
+                RemovePropW(h, PROP_NASCOSTA);   // (prima di PROP_ALFA: vedi rendiVisibileFinestra)
                 RemovePropW(h, PROP_ALFA);
             } else {   // (stesso ordine di rendiVisibileFinestra: alfa 255 per ultima, R20261113-014029-S2)
                 SetPropW(h, PROP_STILE, (HANDLE)1);   // lo stile si toglie qui sotto, o al prossimo giro se non risponde
@@ -730,20 +769,50 @@ static void ripristinaTutte(bool conLimite = false) {
     }
     std::vector<HWND> segnate;   // (GetPropW non aspetta le finestre: l'elenco si fa senza rischi)
     EnumWindows([](HWND h, LPARAM l) -> BOOL { if (haSegni(h)) ((std::vector<HWND>*)l)->push_back(h); return TRUE; }, (LPARAM)&segnate);
-    for (HWND h : segnate) {
-        HANDLE t = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD { ripristinaFinestra((HWND)p); return 0; }, h, 0, nullptr);
+    // Un thread per ogni thread UI delle app, con una sola scadenza di 3 s per tutti: in serie (3 s ciascuna) cento
+    // finestre appese facevano durare il ripristino oltre i 5 minuti dopo cui il guardiano vecchio smette di aspettare
+    // (R20261121-142449, S2). Le finestre della stessa app vanno una dopo l'altra: due ripristini insieme sullo stesso
+    // thread UI si ostacolavano (la sonda dell'una scadeva mentre l'altra cambiava stile, R20261121-142831-S1). Passata
+    // la scadenza un thread non comincia altre finestre: i segni restano per il prossimo giro
+    // Prima di tutto ogni finestra torna opaca (alfa sua o 255): SetLayeredWindowAttributes non aspetta l'app, e cosi'
+    // una finestra non resta invisibile perche' la precedente dello stesso gruppo si e' bloccata (R20261121-143243-S1).
+    // I segni restano: il resto lo fanno i thread qui sotto (o il prossimo giro)
+    for (HWND h : segnate)
+        if (GetPropW(h, PROP_NASCOSTA)) {
+            const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA);
+            SetLayeredWindowAttributes(h, 0, orig ? (BYTE)orig : 255, LWA_ALPHA);
+        }
+    struct Gruppo { std::vector<HWND> finestre; ULONGLONG fine = 0; };
+    const ULONGLONG fine = GetTickCount64() + 3000;
+    std::unordered_map<DWORD, std::vector<HWND>> perThread;   // (GetWindowThreadProcessId non aspetta l'app)
+    for (HWND h : segnate) perThread[GetWindowThreadProcessId(h, nullptr)].push_back(h);
+    std::vector<std::pair<DWORD, HANDLE>> lanciati;   // (thread UI del gruppo, per il registro)
+    for (auto& [tid, fin] : perThread) {
+        // (il vettore si sposta, non si copia: niente allocazioni che possano lanciare a meta' ripristino, S2)
+        Gruppo* g = new (std::nothrow) Gruppo{};
+        if (!g) { logf("ripristino: memoria finita per il gruppo del thread %lu: solo opacita', segni lasciati", (unsigned long)tid); continue; }
+        g->finestre = std::move(fin); g->fine = fine;
+        HANDLE t = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+            Gruppo* x = (Gruppo*)p;
+            for (HWND h : x->finestre) { if (GetTickCount64() >= x->fine) break; ripristinaFinestra(h); }
+            delete x;
+            return 0;
+        }, g, 0, nullptr);
         // Senza thread non si ripiega sul ripristino completo: SetWindowLongPtr potrebbe fermare il guardiano senza
-        // limite (R20261113-011012-S1). Solo cio' che non aspetta l'app: la finestra torna opaca (alfa sua o 255);
-        // tutti i segni restano, e il resto lo fa il prossimo avvio di FluidWin
+        // limite (R20261113-011012-S1). L'opacita' e' gia' tornata qui sopra; il resto lo fa il prossimo avvio
         if (!t) {
-            logf("guardiano: thread non creato per %p (%lu): solo opacita', segni lasciati", h, GetLastError());
-            if (GetPropW(h, PROP_NASCOSTA)) {
-                const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA);
-                SetLayeredWindowAttributes(h, 0, orig ? (BYTE)orig : 255, LWA_ALPHA);
-            }
+            const DWORD e = GetLastError();
+            logf("ripristino: thread non creato per il gruppo del thread %lu (%zu finestre, errore %lu): solo opacita', segni lasciati",
+                 (unsigned long)tid, g->finestre.size(), (unsigned long)e);
+            delete g;
             continue;
         }
-        if (WaitForSingleObject(t, 3000) == WAIT_TIMEOUT) logf("guardiano: %p bloccata durante il ripristino, si passa alla prossima", h);
+        lanciati.emplace_back(tid, t);
+    }
+    for (const auto& [tid, t] : lanciati) {
+        const ULONGLONG ora = GetTickCount64();
+        if (WaitForSingleObject(t, ora < fine ? (DWORD)(fine - ora) : 0) == WAIT_TIMEOUT)
+            logf("ripristino: il gruppo del thread %lu non ha finito entro la scadenza comune, segni rimasti per il prossimo giro", (unsigned long)tid);
         CloseHandle(t);
     }
 }
@@ -1026,7 +1095,8 @@ static void annullaAnimDi(HWND h) {
         if (it->hwnd == h) {
             // ingrandimento interrotto (riduzione, chiusura...): finestra e capsula tornano normali
             // (una preparazione non ancora coperta non ha toccato la finestra: magari e' la gelatina a tenerla nascosta)
-            if (it->zoom) { if (IsWindow(h) && !(it->zoomAtteso && it->attesa < 3)) rendiVisibileFinestra(h); liberaFotoZoom(*it); }
+            if (it->zoom && IsWindow(h) && !(it->zoomAtteso && it->attesa < 3)) rendiVisibileFinestra(h);
+            liberaFotoZoom(*it);   // (anche il genio ha la sua rilettura: prima restava appesa, R20261121-001054-S17)
             // preparazione: i clic trattenuti per lei ripartono, il doppio clic armato su di lei si spegne
             if (it->zoomAtteso) { liberaTrattenuti(*it); if (gDoppioH == h) { gDoppioH = nullptr; disarmaDoppioClic(); } if (IsWindow(h)) daiComando(*it); }
             chiudiMiniatura(*it); it = gAnim.erase(it);
@@ -1563,8 +1633,11 @@ static void riquadroDaTastiera(HWND h) {
 static void aggiornaAffiancamento() {
     const bool vuole = impostazioni::valori().affianca && !gPausa;
     if (vuole == gAffAttivo) return;
-    gAffAttivo = vuole;
-    if (vuole) affianca::spegniSnap(); else { affianca::rimettiSnap(); gAffAnteprima.subito(); gAffRiquadro.chiudi(); gAffH = nullptr; KillTimer(gMessaggi, 24); }
+    // acceso solo se lo Snap di Windows e' davvero spento: con tutti e due attivi reagirebbero allo stesso
+    // trascinamento (R20261121-001054-S15). Non riuscito: si riprova alla prossima applicazione delle impostazioni
+    if (vuole) { gAffAttivo = affianca::spegniSnap(); return; }
+    gAffAttivo = false;
+    { affianca::rimettiSnap(); gAffAnteprima.subito(); gAffRiquadro.chiudi(); gAffH = nullptr; KillTimer(gMessaggi, 24); }
 }
 
 static void suFineSpostamento(HWND h) {
@@ -1793,11 +1866,14 @@ static std::atomic<LONG> gNascondendo{0};   // thread ancora in corso (all'uscit
 static DWORD WINAPI nascondiNata(LPVOID p) {
     const HWND h = (HWND)p;
     BOOL ok = FALSE;
-    const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
     // l'app ha 3 s per rispondere (si puo' star ancora avviando); una finestra che non legge mai i messaggi (vedi
     // risponde) non si tocca: SetWindowLongPtr la aspetterebbe per sempre, tenendo occupato il thread
     // (solo se ha ancora il segno messo da suCreata: un HWND riusato da una finestra nuova non ce l'ha, FW-AUDIT-007)
-    if (!(ex & WS_EX_LAYERED) && GetPropW(h, PROP_NASCOSTA) && risponde(h, 3000) && GetPropW(h, PROP_NASCOSTA)) {
+    // Lo stile si rilegge dopo l'attesa: l'app puo' averne aggiunti intanto, e la copia di prima li cancellava
+    // (R20261121-001054-S9); se nel frattempo e' diventata layered da sola non si tocca
+    const bool pronta = !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) && GetPropW(h, PROP_NASCOSTA) && risponde(h, 3000) && GetPropW(h, PROP_NASCOSTA);
+    const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    if (pronta && !(ex & WS_EX_LAYERED)) {
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
         ok = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) && SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA);
         if (!ok && IsWindow(h)) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
@@ -2600,7 +2676,9 @@ static void passo(double t) {
             if (gLog && ora() - t1 > 0.012) logf("disegno lento: %.1f ms", (ora() - t1) * 1000);
         }
         // finite le animazioni l'overlay va sempre svuotato e nascosto, anche se in questo passo ha appena disegnato
-        if (gGenio.visibile && ((gAnim.empty() && gGelatine.empty() && !chiusureAttive()) || (elementi.empty() && !serveGenio))) { gGenio.svuota(); gGenio.mostra(false); }
+        // (anche le coperture delle finestre nuove ancora da rendere trasparenti tengono l'overlay: prima venivano
+        // svuotate nello stesso fotogramma in cui erano disegnate, R20261121-001054-S16)
+        if (gGenio.visibile && ((gAnim.empty() && gGelatine.empty() && !chiusureAttive() && !copertureAttive()) || (elementi.empty() && !serveGenio))) { gGenio.svuota(); gGenio.mostra(false); }
     }
 }
 
@@ -2616,10 +2694,18 @@ static bool scopertaSulloSchermo(HWND h, const RECT& v) {
         BYTE alfa = 255; DWORD fl = 0;
         if (!GetLayeredWindowAttributes(h, nullptr, &alfa, &fl) || ((fl & LWA_ALPHA) && alfa < 255)) return no("layered");
     }
-    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfoW(MonitorFromRect(&v, MONITOR_DEFAULTTONULL), &mi)) return no("fuori dagli schermi");
+    // Tutta dentro gli schermi, anche a cavallo di due (lo schermo intero del desktop li contiene tutti): le parti che
+    // cadono sui monitor, che non si sovrappongono, sommate devono fare tutto il rettangolo. Prima si chiedeva un solo
+    // monitor e una finestra fra due schermi affiancati perdeva la foto di ripiego (R20261121-121040-S1)
+    if (IsRectEmpty(&v)) return no("vuota");
+    struct Somma { RECT v; long long area = 0; } sm{v};
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR, HDC, LPRECT r, LPARAM p) -> BOOL {
+        Somma* s = (Somma*)p; RECT y;
+        if (IntersectRect(&y, &s->v, r)) s->area += (long long)(y.right - y.left) * (y.bottom - y.top);
+        return TRUE;
+    }, (LPARAM)&sm);
+    if (sm.area != (long long)(v.right - v.left) * (v.bottom - v.top)) return no("in parte fuori dagli schermi");
     RECT x;
-    if (!IntersectRect(&x, &v, &mi.rcMonitor) || !EqualRect(&x, &v)) return no("a cavallo di due schermi");
     for (HWND w = GetWindow(h, GW_HWNDPREV); w; w = GetWindow(w, GW_HWNDPREV)) {
         if (!IsWindowVisible(w)) continue;
         BOOL nascosta = FALSE; DwmGetWindowAttribute(w, DWMWA_CLOAKED, &nascosta, sizeof(nascosta));
@@ -2874,6 +2960,9 @@ static bool preparaZoom(HWND h, const InfoFinestra& i, bool coprire, const char*
 // stato della finestra in primo piano per Win+frecce (vedi gFgZoom)
 static void aggiornaFgZoom() {
     HWND f = GetForegroundWindow();
+    // Alt+F4 lo lascia a Windows sulle finestre che FluidWin non raggiunge (elevate: il SC_CLOSE postato non arriva, e
+    // il tasto vero era gia' stato inghiottito, R20261121-001054-S12). Il gancio legge solo questo valore
+    { const HWND r = f ? GetAncestor(f, GA_ROOT) : nullptr; gFgNonRaggiungibile = (r && !livelloRaggiungibile(r)) ? r : nullptr; }
     int st = 0;
     if (f && zoomAnimato() && finestraApp(f) && !IsIconic(f) && IsWindowVisible(f)) {
         if (IsZoomed(f)) st = 2;
@@ -3622,8 +3711,11 @@ static DWORD WINAPI threadMouse(LPVOID) {
             // ingoia il prossimo rilascio vero. Il resto (clic fatti dopo, movimento) riparte in ordine
             INPUT in[GTR_INPUT]; int n = 0;
             AcquireSRWLockExclusive(&gTrLock);
-            if (!m.wParam || gTrAttesa == (HWND)m.wParam) gTrAttesa = nullptr;
-            int k = 0;
+            // solo se la coda e' ancora quella del doppio clic per cui e' chiesto lo scarto: scaduta (e gia' rimandata),
+            // in coda ci possono essere i clic di un'altra finestra, che non vanno cancellati (R20261121-001054-S13)
+            const bool mio = gTrAttesa && (!m.wParam || gTrAttesa == (HWND)m.wParam);
+            if (mio) gTrAttesa = nullptr;
+            int k = mio ? 0 : gTrN;
             while (k < gTrN && gTrCoda[k].flag != MOUSEEVENTF_LEFTDOWN) k++;
             if (k < gTrN) {
                 for (int i = k; i + 1 < gTrN; i++) gTrCoda[i] = gTrCoda[i + 1];
@@ -3729,7 +3821,7 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
             if (k->vkCode == VK_F4 && (gF4Preso || ((k->flags & LLKHF_ALTDOWN) && giu && !gWinGiu && gLauncherTasto && viva))) {
                 if (giu && !gF4Preso) {
                     HWND fg = GetAncestor(GetForegroundWindow(), GA_ROOT);
-                    if (!fg || !finestraApp(fg)) return CallNextHookEx(nullptr, code, w, l);   // desktop e altro: Alt+F4 di Windows
+                    if (!fg || !finestraApp(fg) || fg == gFgNonRaggiungibile.load()) return CallNextHookEx(nullptr, code, w, l);   // desktop, elevate e altro: Alt+F4 di Windows
                     PostMessageW(gMessaggi, WM_CHIUDI_FG, (WPARAM)fg, 0);
                     gF4Preso = true; gAltMaschera = true;
                 } else if (!giu) gF4Preso = false;
@@ -3876,7 +3968,7 @@ static std::wstring diagnostica() {
         DWORD ubr = 0, n = sizeof(ubr);
         RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"UBR", RRF_RT_REG_DWORD, nullptr, &ubr, &n);
         riga(L"Windows: %ls %ls, build %ls.%lu", leggi(L"EditionID").c_str(), leggi(L"DisplayVersion").c_str(), leggi(L"CurrentBuildNumber").c_str(), ubr);
-        riga(L"Lingua di Windows: 0x%04x, di FluidWin: %ls", GetUserDefaultUILanguage(), testi::inglese() ? L"inglese" : L"italiano");
+        riga(L"Lingua di Windows: 0x%04x, di FluidWin: %ls", GetUserDefaultUILanguage(), testi::nome(testi::attuale()));
     }
     // schermi
     struct Ctx { std::wstring* t; } c{&t};
@@ -3929,13 +4021,16 @@ static bool copiaDiagnostica() {
     if (OpenClipboard(gMessaggi)) {
         EmptyClipboard();
         if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (t.size() + 1) * sizeof(wchar_t))) {
-            memcpy(GlobalLock(g), t.c_str(), (t.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g);
-            ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr; if (!ok) GlobalFree(g);
+            if (void* d = GlobalLock(g)) {   // (lock fallito: niente memcpy su null)
+                memcpy(d, t.c_str(), (t.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g);
+                ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr;
+            }
+            if (!ok) GlobalFree(g);
         }
         CloseClipboard();
     }
-    wchar_t p[MAX_PATH]; GetTempPathW(MAX_PATH, p); wcscat(p, L"FluidWin-diagnostica.txt");
-    if (FILE* f = _wfopen(p, L"wb")) { fwrite("\xEF\xBB\xBF", 1, 3, f); const std::string u8 = [&] { int n = WideCharToMultiByte(CP_UTF8, 0, t.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    const std::wstring tmp = cartellaTemp(), p = tmp + L"FluidWin-diagnostica.txt";
+    if (FILE* f = tmp.empty() ? nullptr : _wfopen(p.c_str(), L"wb")) { fwrite("\xEF\xBB\xBF", 1, 3, f); const std::string u8 = [&] { int n = WideCharToMultiByte(CP_UTF8, 0, t.c_str(), -1, nullptr, 0, nullptr, nullptr);
         std::string s(n > 0 ? n - 1 : 0, '\0'); WideCharToMultiByte(CP_UTF8, 0, t.c_str(), -1, s.data(), n, nullptr, nullptr); return s; }(); fwrite(u8.data(), 1, u8.size(), f); fclose(f); }
     logf("diagnostica copiata negli appunti: %s", ok ? "si'" : "no");
     return ok;
@@ -3947,6 +4042,7 @@ static void apriImpostazioni(bool dalMouse = false) {
 }
 
 // applica le impostazioni (all'avvio e a ogni cambio dalla finestra)
+static bool gRtlAvvio = false;   // lingua da destra a sinistra all'avvio (vedi applicaImpostazioni)
 static void applicaImpostazioni() {
     const impostazioni::Valori& v = impostazioni::valori();
     gTastiVolume = v.volume && gOsdOk;
@@ -3965,6 +4061,10 @@ static void applicaImpostazioni() {
     }
     if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
+    // Arabo acceso o spento: i formati di testo prendono la direzione (da destra a sinistra) quando nascono, e molti
+    // vivono quanto FluidWin. Riavviare e' il modo sicuro di rifarli tutti
+
+    if (testi::rtl() != gRtlAvvio) riavvia("lingua da destra a sinistra cambiata");
     aggiornaTransizioni();
     aggiornaAffiancamento();   // affiancamento di FluidWin acceso: Snap di Windows spento (e viceversa)
     // cursori di FluidWin (cursori.h): il pacchetto scelto, o quelli di Windows
@@ -4081,6 +4181,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_BARRA_CREATA && WM_BARRA_CREATA) {
         Shell_NotifyIconW(NIM_ADD, &gIcona);
         logf("Explorer riavviato: icona di FluidWin rimessa");
+        if (gDockOk) gDock.explorerRiavviato();   // (spazio riservato al dock: l'Explorer nuovo non lo conosce)
         return 0;
     }
     // prova del riavvio (solo con --log): come se la GPU fosse stata persa
@@ -4137,6 +4238,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_APP + 17: if (gLog) { comodita::avviaTimer(w); comodita::stato().senzaSuono = true; logf("prova: timer di %llu ms", (unsigned long long)w); } return 0;
         // (prove, solo col registro: notch acceso o spento senza salvarlo; non disturbare e tieni sveglio, w e l 0/1)
         case WM_APP + 62: if (gLog && gDockOk) { gDock.impostaNotch(w != 0); logf("prova: notch %s", w ? "acceso" : "spento"); } return 0;
+        case WM_APP + 64: if (gLog && gDockOk) { const std::wstring a = gDock.ilNotch().musicaOra().aumid; logf("prova: clic sulla musica (%ls)", a.c_str()); gDock.apriAppMusica(a); } return 0;
         case WM_APP + 63: if (gLog) { comodita::nonDisturbare(w ? comodita::SEMPRE : 0); comodita::tieniSveglio(l ? comodita::SEMPRE : 0); logf("prova: non disturbare %d, tieni sveglio %d", (int)(w != 0), (int)(l != 0)); } return 0;
         case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
         case WM_TASTO_DESTRO: {
@@ -4337,6 +4439,9 @@ static void uscitaEmergenza(DWORD pid, HANDLE proc) {
 }
 
 static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
+    // il mutex dell'istanza resta aperto anche qui: finito il FluidWin, il guardiano lo prende prima di ripristinare, e
+    // un FluidWin nuovo aspetta che lo lasci (vedi wWinMain, R20261121-001054-S14)
+    const HANDLE istanza = CreateMutexW(nullptr, FALSE, NOME_ISTANZA);
     // maniglie non valide: come prima, il processo dal PID (e il segnale solo se valido). Prima di attendere, cosi'
     // l'attesa e la scorciatoia sono le stesse anche nel ripiego (R20261120-020556-S1)
     auto valida = [](HANDLE x) { return x && WaitForSingleObject(x, 0) != WAIT_FAILED; };
@@ -4355,11 +4460,13 @@ static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
         int tentativi = 15;
         DWORD r;
         for (;;) {
-            r = MsgWaitForMultipleObjects(n, h, FALSE, tasto || tentativi <= 0 ? INFINITE : 2000, QS_HOTKEY);
+            // dopo il primo mezzo minuto si continua a riprovare, ogni 30 s: la combinazione puo' liberarsi piu' tardi, e
+            // prima da li' in poi la scorciatoia restava persa per tutta la sessione (R20261121-001054-S10)
+            r = MsgWaitForMultipleObjects(n, h, FALSE, tasto ? INFINITE : tentativi > 0 ? 2000 : 30000, QS_HOTKEY);
             if (r < WAIT_OBJECT_0 + n) break;
             if (r == WAIT_FAILED) { r = WaitForMultipleObjects(n, h, FALSE, INFINITE); break; }   // (senza scorciatoia)
             if (r == WAIT_TIMEOUT) {
-                tentativi--;
+                if (tentativi > 0) tentativi--;
                 tasto = RegisterHotKey(nullptr, TASTO_EMERGENZA, MOD_CONTROL | MOD_ALT | MOD_SHIFT | MOD_NOREPEAT, VK_F12) != FALSE;
                 continue;
             }
@@ -4375,6 +4482,27 @@ static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
     // aggiornamento interrotto fra le due rinomine (crash, chiusura da Gestione attivita'): senza FluidWin.exe nessuno
     // lo potrebbe piu' avviare; il guardiano (che gira dalla stessa cartella) lo rimette (R20261116-000127-S1)
     aggiorna::recupera(aggiorna::dettagli::exeInUso());
+    // Il mutex: se lo ha gia' un FluidWin nuovo (partito appena finito questo), quello ha gia' fatto il suo ripristino
+    // all'avvio e sta lavorando: rimettere in vista la barra e le finestre adesso lo disferebbe. Nessuno lo ha (o lo ha
+    // lasciato un FluidWin caduto): si ripristina tenendolo, e il FluidWin nuovo aspetta
+    // Chi tiene il mutex senza il segnale "pronto" (NOME_PRONTO, creato subito dopo il ripristino iniziale e prima di
+    // toccare barra e dock) e' un FluidWin nuovo ancora nel suo ripristino: si aspetta che finisca invece di rinunciare
+    // dopo 10 s, perche' se resta appeso dentro un'app le finestre successive resterebbero trasparenti senza nessuno a
+    // rimetterle (R20261121-115445-S1). Prima il segno era la finestra dei messaggi, che nasce dopo il dock: scaduta
+    // l'attesa il guardiano poteva disfare la barra appena nascosta (R20261121-122837-S1). Si ripristina solo tenendo il
+    // mutex (preso, o lasciato da un FluidWin caduto): prima dopo un minuto si ripristinava comunque, e se il FluidWin
+    // nuovo finiva proprio allora il suo ripristino la barra tornava in vista sopra il dock (R20261121-140048-S1). Il
+    // ripristino iniziale non puo' restare appeso dentro un'app: anche lui ha il limite di 3 s per finestra (wWinMain).
+    // Resta un tetto di 5 minuti per un FluidWin nuovo fermo prima del "pronto" fuori dalle finestre (registro su un
+    // disco bloccato, chiamate di sistema appese: R20261121-141020-S2): a quel punto e' appeso davvero e Windows va
+    // rimesso a posto comunque
+    if (istanza) {
+        for (int ms = 0; ms < 300000; ms += 500) {
+            const DWORD r = WaitForSingleObject(istanza, 500);
+            if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED) break;
+            if (r == WAIT_FAILED || prontoAltrui()) ExitProcess(0);
+        }
+    }
     ripristinaTutte(true);   // (i banner di Windows restano spenti finche' l'opzione e' accesa: vedi banner.h)
     // (un thread di ripristino rimasto appeso dentro un'altra app non deve tenere vivo il guardiano: ExitProcess lo
     // chiude senza aspettarlo; il ritorno normale passerebbe dai distruttori statici con quel thread ancora attivo)
@@ -4450,17 +4578,23 @@ static void avviaGuardiano() {
 // che aspetta la fine di questo; questo si chiude normalmente, rimettendo tutto a posto. Il guardiano si ferma prima:
 // altrimenti, finito questo, rimetterebbe in vista la barra di Windows proprio mentre il nuovo la nasconde
 static bool gRiavvio = false;
+static ULONGLONG gRiavvioDopo = 0;   // riavvio non riuscito: il prossimo tentativo non prima di questo momento
 static void riavvia(const char* perche) {
-    if (gRiavvio) return;
+    if (gRiavvio || GetTickCount64() < gRiavvioDopo) return;
     gRiavvio = true;
     logf("riavvio: %s", perche);
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
     wchar_t cmd[MAX_PATH + 96]; swprintf(cmd, MAX_PATH + 96, L"\"%ls\" --dopo %lu%ls", exe, GetCurrentProcessId(), gLog ? L" --log" : L"");
     STARTUPINFOW si{}; si.cb = sizeof(si); PROCESS_INFORMATION pi;
-    // (se non riesce non si riprova a ogni fotogramma: FluidWin resta com'e', senza dock ne' genio)
-    if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) { logf("riavvio non riuscito (%lu)", GetLastError()); return; }
+    // non riuscito: si riprova fra 10 s (non a ogni fotogramma). Prima gRiavvio restava acceso e FluidWin rimaneva per
+    // sempre senza dock ne' genio anche quando la causa passava (R20261121-001054-S11)
+    if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        logf("riavvio non riuscito (%lu), si riprova fra 10 s", GetLastError());
+        gRiavvio = false; gRiavvioDopo = GetTickCount64() + 10000;
+        return;
+    }
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    if (gFermaGuardiano) SetEvent(gFermaGuardiano);   // tutti i guardiani di questo FluidWin finiscono senza ripristinare
+    // (il segnale ai guardiani parte alla fine dell'uscita, a Windows rimesso a posto: vedi wWinMain)
     PostQuitMessage(0);
 }
 
@@ -4499,6 +4633,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool riavviato = false, vuoleLog = false;
+    HANDLE prima = nullptr;   // il FluidWin di prima in un riavvio (--dopo): finche' vive il suo "pronto" non conta
     std::wstring versioneFinta;   // --versione-finta x.y.z (solo con --log): per provare l'avviso degli aggiornamenti
     for (int i = 1; argv && i < argc; i++) {
         // --guardiano / --lancia-guardiano <pid> <processo> <evento> (maniglie ereditate: vedi guardiano)
@@ -4508,26 +4643,58 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
             const HANDLE proc = i + 2 < argc ? (HANDLE)(UINT_PTR)wcstoull(argv[i + 2], nullptr, 10) : nullptr;
             const HANDLE ferma = i + 3 < argc ? (HANDLE)(UINT_PTR)wcstoull(argv[i + 3], nullptr, 10) : nullptr;
             LocalFree(argv);
+            if (prima) CloseHandle(prima);   // (solo con --dopo prima di --guardiano, che FluidWin non scrive mai)
             return g ? guardiano(pid, proc, ferma) : lanciaGuardiano(pid, proc, ferma);
         }
         // riavvio (vedi riavvia): prima si aspetta che il FluidWin di prima abbia finito di rimettere tutto a posto
         if (!wcscmp(argv[i], L"--dopo") && i + 1 < argc) {
             riavviato = true;
-            if (HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, wcstoul(argv[i + 1], nullptr, 10))) { WaitForSingleObject(p, 15000); CloseHandle(p); }
+            if (!prima) prima = OpenProcess(SYNCHRONIZE, FALSE, wcstoul(argv[i + 1], nullptr, 10));
+            if (prima) WaitForSingleObject(prima, 15000);
         }
         if (!wcscmp(argv[i], L"--log")) vuoleLog = true;
         if (!wcscmp(argv[i], L"--versione-finta") && i + 1 < argc) versioneFinta = argv[i + 1];
     }
     if (argv) LocalFree(argv);
 
-    HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\FluidWin.Istanza");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
+    // Istanza unica. Il mutex lo tiene aperto anche il guardiano, che lo prende per ripristinare Windows quando questo
+    // FluidWin finisce: esiste gia' ma nessuno lo possiede = un guardiano sta finendo (o ha finito) il suo ripristino,
+    // si aspetta un poco che lo lasci. Prima il FluidWin nuovo poteva partire mentre il guardiano di quello vecchio
+    // rimetteva in vista la barra e le finestre sopra di lui (R20261121-001054-S14)
+    HANDLE mutex = CreateMutexW(nullptr, TRUE, NOME_ISTANZA);
+    if (!mutex) return 0;
+    // Un FluidWin acceso ha il segnale "pronto": allora si esce subito. Senza, il mutex lo tiene un guardiano che
+    // ripristina (3 s per finestra appesa, in serie, senza un tetto sul numero) o un FluidWin ancora nel ripristino
+    // iniziale: si aspetta, uscendo appena compare il segnale di un altro. Prima dopo 10 s, poi dopo 60 s si usciva, e
+    // un ripristino lungo del guardiano faceva perdere un avvio voluto (R20261121-115445-S2 e conferma del giro 3).
+    // Cinque minuti restano come limite per un FluidWin appeso nel suo ripristino
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        bool preso = false;
+        // In un riavvio il segnale puo' essere ancora quello del FluidWin di prima che sta chiudendo: non conta finche'
+        // quel processo vive. Prima valeva dopo 20 s fissi, e un FluidWin vecchio lento a chiudere (piu' di 35 s con
+        // l'attesa di --dopo) faceva uscire quello nuovo: FluidWin restava chiuso (R20261121-140048-S7)
+        auto primaViva = [&] { return prima && WaitForSingleObject(prima, 0) == WAIT_TIMEOUT; };
+        for (int ms = 0; ms < 300000 && !(!primaViva() && prontoAltrui()); ms += 500) {
+            const DWORD r = WaitForSingleObject(mutex, 500);
+            if (r == WAIT_OBJECT_0 || r == WAIT_ABANDONED) { preso = true; break; }
+            if (r == WAIT_FAILED) break;
+        }
+        if (!preso) { if (prima) CloseHandle(prima); return 0; }   // un altro FluidWin e' acceso davvero
+    }
+    if (prima) CloseHandle(prima);
     // il registro si apre solo ora: una seconda copia avviata per sbaglio svuoterebbe quello della prima
     // (dopo un riavvio continua quello di prima)
-    if (vuoleLog) { wchar_t p[MAX_PATH]; GetTempPathW(MAX_PATH, p); wcscat(p, L"fluidwin.log"); gLog = _wfopen(p, riavviato ? L"a" : L"w"); }
+    if (vuoleLog) { const std::wstring tmp = cartellaTemp(), p = tmp + L"fluidwin.log"; if (!tmp.empty()) gLog = _wfopen(p.c_str(), riavviato ? L"a" : L"w"); }
     if (riavviato) logf("FluidWin riavviato");
 
-    ripristinaTutte();          // recupero da un'eventuale chiusura anomala precedente
+    // recupero da un'eventuale chiusura anomala precedente. Con il limite di 3 s per finestra, come nel guardiano: un
+    // guardiano vecchio aspetta questo ripristino senza scadenza (vedi guardiano), quindi non deve poter restare appeso
+    // dentro un'app bloccata (R20261121-140048-S1). Una finestra non ripristinata tiene i suoi segni per il prossimo giro
+    ripristinaTutte(true);
+    // da qui FluidWin cambia lo stato di Windows (barra, dock): un guardiano vecchio che aspetta non deve piu'
+    // ripristinare, e una copia nuova deve uscire (vedi prontoAltrui). Resta aperto fino alla fine del processo
+    static HANDLE pronto = CreateEventW(nullptr, TRUE, TRUE, NOME_PRONTO);
+    (void)pronto;
     riprendiPrimoPiano();
     avviaGuardiano();
     SetUnhandledExceptionFilter(suCrash);
@@ -4543,7 +4710,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gGenioOk = gGenio.inizializza(inst);   // senza GPU disponibile resta l'animazione a molla
     if (gGenioOk) viva::proteggi(gGenio.contesto());   // la GPU del genio la usa anche la cattura del contenuto vivo
     logf("genio disponibile: %d", (int)gGenioOk);
-    salvaStatoBarra();                      // prima che il dock nasconda la barra di Windows
+    gDock.barraSalvata = salvaStatoBarra();   // prima che il dock nasconda la barra di Windows
+    if (!gDock.barraSalvata) logf("stato della barra di Windows non salvato: resta com'e' (niente scomparsa)");
     gDock.riduci = riduciDalDock;
     gDock.preparaChiusura = preparaChiusura;
     gDock.registro = [](const char* s) { logf("dock: %s", s); };
@@ -4551,6 +4719,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     cursori::registro = [](const char* s) { logf("%s", s); };
     cursori::pulisciAvanzi();   // installazioni di cursori interrotte: recupero (prima di leggere quale pacchetto e' scelto)
     impostazioni::carica();   // prima di tutto: la lingua dei testi (dock compreso)
+    gRtlAvvio = testi::rtl();
+    // testi senza traduzione nella lingua scelta: una riga per testo (solo con --log)
+    if (gLog) testi::registro() = [](const wchar_t* en) { logf("testo senza traduzione: %ls", en); };
     gDock.altriSchermi = impostazioni::valori().dockSchermi;   // (spento: il dock nasce sul principale)
     gDock.impostaLato(impostazioni::valori().dockLato);   // (prima di inizializza: il dock nasce gia' sul suo lato)
     gDockOk = gDock.inizializza(inst);
@@ -4728,20 +4899,30 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (!condividi::ferma(5000)) {
         logf("condividi: il provider non finisce, chiusura dopo il ripristino di Windows");
         ReleaseMutex(mutex);
+        if (gRiavvio && gFermaGuardiano) SetEvent(gFermaGuardiano);   // (Windows gia' rimesso a posto)
         TerminateProcess(GetCurrentProcess(), 0);
     }
     // thread del widget (meteo, notizie, ricerca della citta') e delle jump list: stessa regola, i loro dati stanno in gDock
     if (!gDock.fermaWidget(3000)) {
         logf("widget o jump list: un thread non finisce, chiusura senza aspettarlo");
         ReleaseMutex(mutex);
+        if (gRiavvio && gFermaGuardiano) SetEvent(gFermaGuardiano);   // (Windows gia' rimesso a posto)
         TerminateProcess(GetCurrentProcess(), 0);
     }
     if (gAggThread && WaitForSingleObject(gAggThread, 5000) != WAIT_OBJECT_0) {
         logf("aggiornamenti: il thread non finisce, chiusura senza aspettarlo");
         ReleaseMutex(mutex);
+        if (gRiavvio && gFermaGuardiano) SetEvent(gFermaGuardiano);   // (Windows gia' rimesso a posto)
         TerminateProcess(GetCurrentProcess(), 0);
     }
     if (gLog) fclose(gLog);
+    gLog = nullptr;
     ReleaseMutex(mutex);
+    // Riavvio: solo adesso, a Windows gia' rimesso a posto, i guardiani di questo FluidWin finiscono senza ripristinare.
+    // Prima il segnale partiva subito: un FluidWin bloccato in chiusura restava senza guardiano (R20261121-001054-S2)
+    if (gRiavvio && gFermaGuardiano) SetEvent(gFermaGuardiano);
+    // Windows e' gia' rimesso a posto: si esce senza i distruttori statici, che potrebbero girare mentre un thread di
+    // lavoro rimasto dentro un provider della shell (ricerca, icone) usa ancora quei dati (R20261121-002818-S6, S7)
+    ExitProcess(0);
     return 0;
 }

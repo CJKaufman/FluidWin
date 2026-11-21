@@ -83,10 +83,21 @@ inline const wchar_t* descrizione(int c) {
 
 // nome breve del giorno nelle previsioni ("Oggi", "Lun"...)
 inline const wchar_t* nomeGiorno(const Giorno& g) {
-    static const wchar_t* it[7] = {L"Dom", L"Lun", L"Mar", L"Mer", L"Gio", L"Ven", L"Sab"};
-    static const wchar_t* en[7] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
     if (g.settimana < 0 || g.settimana > 6) return testi::t(L"Oggi", L"Today");
-    return testi::inglese() ? en[g.settimana] : it[g.settimana];
+    // nomi brevi dalla lingua scelta (Windows li conosce tutti): letti una volta per lingua, dal 1 gennaio 2023 che era
+    // domenica. Solo dal thread principale (lo usa il disegno del pannello)
+    static wchar_t nomi[testi::N_LINGUE][7][24] = {};
+    const int l = testi::attuale();
+    wchar_t* s = nomi[l][g.settimana];
+    if (!*s) {
+        SYSTEMTIME st{}; st.wYear = 2023; st.wMonth = 1; st.wDay = (WORD)(1 + g.settimana); st.wDayOfWeek = (WORD)g.settimana;
+        if (!GetDateFormatEx(testi::locale(), 0, &st, L"ddd", s, 24, nullptr)) {
+            static const wchar_t* en[7] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+            wcsncpy(s, en[g.settimana], 23);
+        }
+        if (l == testi::ITALIANO || l == testi::SPAGNOLO || l == testi::PORTOGHESE || l == testi::FRANCESE) s[0] = (wchar_t)towupper(s[0]);   // ("lun" -> "Lun")
+    }
+    return s;
 }
 
 // Tutti i metodi pubblici si chiamano dal thread principale. I thread di lavoro leggono solo la richiesta copiata
@@ -120,7 +131,8 @@ public:
     }
 
     // la fonte vera (F_AUTO risolta con la lingua di adesso), F_NESSUNA se le notizie sono spente
-    int fonteEffettiva() const { return fonte == F_AUTO ? (testi::inglese() ? F_BBC : F_ANSA) : fonte; }
+    // (automatica: ANSA in italiano, Al Jazeera in arabo, BBC nelle altre lingue)
+    int fonteEffettiva() const { return fonte == F_AUTO ? (testi::italiano() ? F_ANSA : testi::rtl() ? F_ALJAZEERA : F_BBC) : fonte; }
     bool fahrenheit() const { return unita == U_AUTO ? fahrenheitDiWindows() : unita == U_FAHRENHEIT; }
     double gradi(double celsius) const { return fahrenheit() ? celsius * 9 / 5 + 32 : celsius; }
 
@@ -179,7 +191,7 @@ public:
         while (!t.empty() && t.front() == L' ') t.erase(t.begin());
         EnterCriticalSection(&cs);
         cercaGen++;
-        cercaTesto = t; cercaInglese = testi::inglese();
+        cercaTesto = t; cercaLingua = testi::codice();
         const bool corto = t.size() < 2;
         if (corto) { luoghi.clear(); statoRicerca = R_VUOTA; }
         else statoRicerca = R_CERCA;
@@ -224,7 +236,7 @@ private:
     std::vector<Luogo> luoghi;
     int statoRicerca = R_VUOTA;
     std::wstring cercaTesto;
-    bool cercaInglese = false;
+    const wchar_t* cercaLingua = L"en";   // lingua dei nomi delle citta' (codice di due lettere, statico)
     unsigned cercaGen = 0;
     bool cercaInCorso = false;
     // solo thread principale (ultimo e' scritto anche dal thread, per riprovare prima quando la rete manca)
@@ -299,7 +311,33 @@ private:
     static double numero(const std::string& j, const std::string& chiave, size_t da, bool& ok) {
         const size_t p = dopo(j, chiave, da);
         if (p == std::string::npos || p == 0) { ok = false; return 0; }
-        return strtod(j.c_str() + p, nullptr);
+        // (un null o un valore non numerico non e' uno 0 vero: dato mancante, S19)
+        const char* c = j.c_str() + p; while (*c == ' ') c++;
+        char* e = nullptr; const double x = strtod(c, &e);
+        if (e == c || !std::isfinite(x)) { ok = false; return 0; }
+        return x;
+    }
+    // giorno della settimana (0 domenica) di ogni data "AAAA-MM-GG" dell'elenco 'chiave' (-1 se non si legge)
+    static std::vector<int> giorniSettimana(const std::string& j, const std::string& chiave, size_t da) {
+        std::vector<int> v;
+        size_t p = dopo(j, chiave, da);
+        if (p == std::string::npos || p == 0) return v;
+        p = j.find('[', p); const size_t fine = j.find(']', p);
+        if (p == std::string::npos || fine == std::string::npos) return v;
+        for (size_t q = j.find('"', p); q != std::string::npos && q < fine; q = j.find('"', q + 1)) {
+            const size_t r = j.find('"', q + 1); if (r == std::string::npos || r > fine) break;
+            SYSTEMTIME st{}; FILETIME f{};
+            const char* s = j.c_str() + q + 1; char* e = nullptr;
+            const long a = strtol(s, &e, 10); const bool t1 = e != s && *e == '-';
+            const long m = t1 ? strtol(e + 1, &e, 10) : 0; const bool t2 = t1 && *e == '-';
+            const long g = t2 ? strtol(e + 1, &e, 10) : 0;
+            if (t2 && *e == '"' && a > 1600 && a < 3000 && m >= 1 && m <= 12 && g >= 1 && g <= 31) {
+                st.wYear = (WORD)a; st.wMonth = (WORD)m; st.wDay = (WORD)g;
+                v.push_back(SystemTimeToFileTime(&st, &f) && FileTimeToSystemTime(&f, &st) ? (int)st.wDayOfWeek : -1);
+            } else v.push_back(-1);
+            q = r;
+        }
+        return v;
     }
     static std::vector<double> elenco(const std::string& j, const std::string& chiave, size_t da) {
         std::vector<double> v;
@@ -327,9 +365,12 @@ private:
         const size_t day = j.find("\"daily\":");
         if (day != std::string::npos) {
             const auto cod = elenco(j, "weather_code", day), mx = elenco(j, "temperature_2m_max", day), mn = elenco(j, "temperature_2m_min", day);
+            // il giorno della settimana dalla data di ogni previsione (fuso della citta'): prima dal giorno del PC, e
+            // con la citta' gia' al giorno dopo le etichette erano spostate di uno (R20261121-002818-S18)
+            const auto gs = giorniSettimana(j, "time", day);
             SYSTEMTIME st; GetLocalTime(&st);
             for (size_t i = 0; i < cod.size() && i < mx.size() && i < mn.size(); i++)
-                d.giorni.push_back({(int)cod[i], mx[i], mn[i], i == 0 ? -1 : (int)((st.wDayOfWeek + i) % 7)});
+                d.giorni.push_back({(int)cod[i], mx[i], mn[i], i == 0 ? -1 : (i < gs.size() && gs[i] >= 0 ? gs[i] : (int)((st.wDayOfWeek + i) % 7))});
         }
         d.meteoOk = ok;
     }
@@ -526,7 +567,7 @@ private:
         Dati* me = (Dati*)p;
         for (;;) {
             EnterCriticalSection(&me->cs);
-            const std::wstring testo = me->cercaTesto; const bool en = me->cercaInglese; const unsigned g = me->cercaGen;
+            const std::wstring testo = me->cercaTesto; const std::wstring lingua = me->cercaLingua; const unsigned g = me->cercaGen;
             // Avviato per un testo lungo che nel frattempo e' diventato corto: cerca ha gia' messo stato ed elenco
             // (vuoti); il thread se ne va senza toccarli. Prima risultava "nessuna connessione" (prova_widget:
             // "Parigi" e subito "P")
@@ -535,7 +576,7 @@ private:
             std::vector<Luogo> trovati;
             bool ok = false;
             {
-                const std::wstring percorso = L"/v1/search?name=" + perIndirizzo(testo.substr(0, 60)) + L"&count=6&format=json&language=" + (en ? L"en" : L"it");
+                const std::wstring percorso = L"/v1/search?name=" + perIndirizzo(testo.substr(0, 60)) + L"&count=6&format=json&language=" + lingua;
                 const std::string j = scarica(L"geocoding-api.open-meteo.com", percorso);
                 ok = j.find('{') != std::string::npos;   // risposta arrivata (anche senza "results": nessun luogo)
                 for (const std::string& o : oggettiRisultati(j)) {

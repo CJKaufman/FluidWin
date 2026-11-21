@@ -121,7 +121,9 @@ inline auto Motore::apriPannello(int tipo) -> void {
     PH = altezzaVista(tipo);
     phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
     // in basso e in alto: allineato al bordo destro dell'icona (dentro lo schermo); ai lati: accanto al dock
-    int x1 = std::clamp((int)ic.right + (int)std::round(PAD), (int)schermo.left + (int)PW + 8, (int)schermo.right - 8);
+    // (schermo piu' stretto del pannello: i due limiti si invertirebbero, e std::clamp con lo > hi non e' definito, S15)
+    const int xMin = (int)schermo.left + (int)PW + 8, xMax = std::max(xMin, (int)schermo.right - 8);
+    int x1 = std::clamp((int)ic.right + (int)std::round(PAD), xMin, xMax);
     if (lato == 2) x1 = ic.right + stacco + (int)PW;
     else if (lato == 3) x1 = ic.left - stacco;
     rettPannello = lato == 1 ? RECT{x1 - (int)PW, y1, x1, y1 + (int)PH} : RECT{x1 - (int)PW, y1 - (int)PH, x1, y1};
@@ -655,12 +657,18 @@ inline auto Motore::altezzaMixer() const -> float {
 }
 
 inline auto Motore::rileggiMixer() -> void {
+    // chi c'e' e in che ordine, prima e dopo: se cambia, le zone cliccabili e il tasto premuto (indici di riga) non
+    // valgono piu'. Prima un rilascio dopo la rilettura poteva silenziare l'app arrivata in quella riga (S7)
+    auto firma = [&] { std::wstring f; for (const auto& u : mix.uscite) { f += u.id; f += L'|'; for (const auto& a : u.app) { f += a.exe; f += L'/'; f += a.nome; f += L'|'; } f += L'#'; } return f; };
+    const std::wstring prima = firma();
     mix.leggi();
+    const bool cambiata = firma() != prima;
     const int s = slotCorrente;
     usa(0);
     if (pannelloTipo == P_MIXER && !pChiusura) {
         const float nuova = altezzaVista(P_MIXER);
         if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        if (cambiata) { pSopra = pPremuto = -1; trascinaMixer = -1; elementi.clear(); }
         pDirty = true;
     }
     usa(s);
@@ -968,7 +976,7 @@ inline DWORD WINAPI Motore::threadNotifiche(LPVOID p) {
     {
         notifiche::Lettore l;   // suo: gli oggetti di Windows restano su questo thread
         while (!m->fineN) {
-            WaitForSingleObject(m->eventoN, INFINITE);
+            if (WaitForSingleObject(m->eventoN, INFINITE) != WAIT_OBJECT_0) break;   // (attesa fallita: niente giri a vuoto)
             if (m->fineN) break;
             const LONG g = m->genN;   // richieste arrivate durante la lettura: ne rifara' un'altra (l'evento resta acceso)
             std::vector<notifiche::Notifica> lista;
@@ -986,7 +994,9 @@ inline auto Motore::chiediNotifiche() -> void {
     if (!csNOk) {
         InitializeCriticalSection(&csN); csNOk = true;
         eventoN = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-        threadNH = CreateThread(nullptr, 0, threadNotifiche, this, 0, nullptr);
+        // il thread solo con l'evento: senza, la sua attesa fallirebbe subito e rileggerebbe le notifiche in un ciclo
+        // continuo (R20261121-001738-S11)
+        threadNH = eventoN ? CreateThread(nullptr, 0, threadNotifiche, this, 0, nullptr) : nullptr;
         if (threadNH) SetThreadPriority(threadNH, THREAD_PRIORITY_BELOW_NORMAL);
     }
     if (!threadNH) {   // (senza thread: come prima, sul thread principale)
@@ -999,6 +1009,7 @@ inline auto Motore::chiediNotifiche() -> void {
 
 // elenco nuovo dal thread: se il pannello delle notifiche e' aperto cambia altezza con la molla e si ridisegna
 inline auto Motore::notificheLette() -> void {
+    if (!csNOk) return;   // (messaggio arrivato prima che il lettore esista: la sezione critica non c'e', S3)
     EnterCriticalSection(&csN);
     const bool vecchia = genLetta < genValida;
     if (!vecchia) { listaN = lettaN; permessoN = permessoLetto; }
@@ -1058,10 +1069,12 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     SYSTEMTIME oggi; GetLocalTime(&oggi);
     const calendario::Mese& cm = calendario::meseUtente(testi::locale());
     std::wstring mese;
-    int giorni = 0, inizio = 0, oggiG = oggi.wDay, primoSett = 0;   // inizio: colonna del primo del mese
+    // (il primo giorno della settimana scelto in Windows vale anche per il gregoriano: prima solo per i calendari di
+    // ICU, e con la domenica scelta la griglia gregoriana partiva comunque di lunedi', R20261121-001738-S17)
+    int giorni = 0, inizio = 0, oggiG = oggi.wDay;   // inizio: colonna del primo del mese
+    const int primoSett = calendario::primoGiornoUtente();
     if (cm.ok) {
         mese = cm.titolo; giorni = cm.giorni; oggiG = cm.oggi;
-        primoSett = calendario::primoGiornoUtente();
         inizio = (cm.lunediPrimo - primoSett + 7) % 7;
     } else {
         wchar_t b[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", b, 64, nullptr);
@@ -1069,7 +1082,7 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
         if (!mese.empty()) mese[0] = (wchar_t)towupper(mese[0]);
         SYSTEMTIME primo = oggi; primo.wDay = 1;
         FILETIME fp; SystemTimeToFileTime(&primo, &fp); FileTimeToSystemTime(&fp, &primo);   // giorno della settimana del primo
-        inizio = (primo.wDayOfWeek + 6) % 7;   // 0 = lunedi'
+        inizio = ((primo.wDayOfWeek + 6) % 7 - primoSett + 7) % 7;   // (wDayOfWeek + 6) % 7: 0 = lunedi'
         static const int giorniMese[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
         giorni = giorniMese[oggi.wMonth - 1];
         if (oggi.wMonth == 2 && ((oggi.wYear % 4 == 0 && oggi.wYear % 100 != 0) || oggi.wYear % 400 == 0)) giorni = 29;
@@ -1223,7 +1236,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         std::wstring st = testi::t(L"Spento", L"Off");
         if (comodita::timerSuona()) st = testi::t(L"Finito", L"Done");
         else if (comodita::timerAttivo()) st = comodita::durata(comodita::timerResto()) + testi::t(L" rimasti", L" left");
-        piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), L"Timer", st, scuro, ink);
+        piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), testi::t(L"Timer", L"Timer"), st, scuro, ink);
         const sensori::Sensori& se = sensori::Sensori::io();
         std::wstring sm = !se.micC ? std::wstring(testi::t(L"Nessuno", L"None")) : se.micMuto ? std::wstring(testi::t(L"Muto", L"Muted"))
                         : se.micApp.empty() ? std::wstring(testi::t(L"Non in uso", L"Not in use")) : se.micApp[0];
@@ -1353,7 +1366,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
 
     // scorciatoie tonde
     y += 36 * dpi + (cp ? 8 : 16) * dpi;
-    const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
+    const wchar_t* nomi[4] = {testi::t(L"Widget", L"Widget"), testi::t(L"In background", L"In background"), testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
     const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_APPUNTI};
     for (int i = 0; i < 4; i++) {
         const float rc = (cp ? 22 : 26) * dpi, cx = 16 * dpi + larg * (i + 0.5f) / 4, cy = y + rc;
@@ -1634,8 +1647,10 @@ inline auto Motore::carattereCitta(wchar_t c) -> void {
     else if (c == 22) {   // Ctrl+V: la prima riga degli appunti
         if (OpenClipboard(pannello)) {
             if (HANDLE g = GetClipboardData(CF_UNICODETEXT)) {
+                // (mai oltre il blocco: un testo senza terminatore faceva leggere memoria dopo la fine, S2)
                 if (const wchar_t* t = (const wchar_t*)GlobalLock(g)) {
-                    for (const wchar_t* x = t; *x && *x != L'\r' && *x != L'\n' && wTesto.size() < 60; x++) if (*x >= 32) wTesto += *x;
+                    const size_t n = GlobalSize(g) / sizeof(wchar_t);
+                    for (size_t k = 0; k < n && t[k] && t[k] != L'\r' && t[k] != L'\n' && wTesto.size() < 60; k++) if (t[k] >= 32) wTesto += t[k];
                     GlobalUnlock(g);
                 }
             }
@@ -1647,7 +1662,9 @@ inline auto Motore::carattereCitta(wchar_t c) -> void {
 }
 
 inline auto Motore::scegliLuogo(int i) -> void {
-    if (!wCitta || i < 0 || i >= (int)wLuoghi.size()) return;
+    // (anche col mouse solo se i risultati sono del testo scritto: prima un clic nei 300 ms dopo aver cambiato il testo
+    // salvava una citta' della ricerca di prima, R20261121-001738-S16)
+    if (!wCitta || i < 0 || i >= (int)wLuoghi.size() || wTesto != wCercato || wStato != widget::R_PRONTA) return;
     widD.impostaLuogo(wLuoghi[i]);
     wid = widD.copia();   // (il meteo della citta' di prima e' gia' tolto: "Meteo in arrivo...")
     scrivi("widget: citta' cambiata");   // (il nome no: e' dove sta l'utente)
@@ -1734,8 +1751,8 @@ inline auto Motore::simboloTema(float cx, float cy) -> void {
     ID2D1EllipseGeometry *a = nullptr, *b = nullptr; ID2D1PathGeometry* g = nullptr;
     f2d->CreateEllipseGeometry({{cx, cy}, r, r}, &a);
     f2d->CreateEllipseGeometry({{ox, oy}, r * 0.86f, r * 0.86f}, &b);
-    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;   // (Open puo' fallire anche con la geometria creata: R20261121-001738-S4)
+    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
         s->Close(); s->Release();
         dc->FillGeometry(g, pennello);
@@ -1757,14 +1774,14 @@ inline auto Motore::simboloTimer(float cx, float cy) -> void {
 inline auto Motore::simboloMicrofono(float cx, float cy, bool) -> void {
     const float d = dpi;
     dc->FillRoundedRectangle({{cx - 3.5f * d, cy - 9 * d, cx + 3.5f * d, cy + 2 * d}, 3.5f * d, 3.5f * d}, pennello);
-    ID2D1PathGeometry* g = nullptr;
-    if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         s->BeginFigure({cx - 6.5f * d, cy - 1 * d}, D2D1_FIGURE_BEGIN_HOLLOW);
         s->AddArc(D2D1::ArcSegment({cx + 6.5f * d, cy - 1 * d}, {6.5f * d, 6.5f * d}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
         s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
-        dc->DrawGeometry(g, pennello, 1.5f * d, tratto); g->Release();
+        dc->DrawGeometry(g, pennello, 1.5f * d, tratto);
     }
+    if (g) g->Release();
     linea(0, 5.5f, 0, 9, cx, cy, 1.5f);
     if (sensori::Sensori::io().micMuto) linea(-7, -8, 7, 8, cx, cy, 1.6f);
 }
@@ -1784,8 +1801,8 @@ inline auto Motore::simboloLuna(float cx, float cy) -> void {
     ID2D1EllipseGeometry *a = nullptr, *b = nullptr; ID2D1PathGeometry* g = nullptr;
     f2d->CreateEllipseGeometry({{cx, cy}, r, r}, &a);
     f2d->CreateEllipseGeometry({{cx + 4.5f * dpi, cy - 3.5f * dpi}, r * 0.85f, r * 0.85f}, &b);
-    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;
+    if (a && b && SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         a->CombineWithGeometry(b, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
         s->Close(); s->Release();
         dc->FillGeometry(g, pennello);
@@ -1797,7 +1814,8 @@ inline auto Motore::simboloLuna(float cx, float cy) -> void {
 inline auto Motore::simboloGoccia(float cx, float cy) -> void {
     ID2D1PathGeometry* g = nullptr;
     if (FAILED(f2d->CreatePathGeometry(&g))) return;
-    ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1GeometrySink* s = nullptr;
+    if (FAILED(g->Open(&s))) { g->Release(); return; }
     const float r = 6 * dpi;
     s->BeginFigure({cx, cy - 10 * dpi}, D2D1_FIGURE_BEGIN_FILLED);
     s->AddBezier(D2D1::BezierSegment({cx + 2 * dpi, cy - 6 * dpi}, {cx + r, cy - 2 * dpi}, {cx + r, cy + 2.5f * dpi}));
@@ -1816,16 +1834,15 @@ inline auto Motore::simboloSole(float cx, float cy) -> void {
 }
 
 inline auto Motore::simboloEnergia(float cx, float cy) -> void {
-    ID2D1PathGeometry* g = nullptr;
-    if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
-        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
         const float r = 7 * dpi, a0 = -(float)M_PI / 2 + 0.65f, a1 = -(float)M_PI / 2 - 0.65f;
         s->BeginFigure({cx + r * std::cos(a0), cy + r * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
         s->AddArc(D2D1::ArcSegment({cx + r * std::cos(a1), cy + r * std::sin(a1)}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
         s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
         dc->DrawGeometry(g, pennello, 1.9f * dpi, tratto);
-        g->Release();
     }
+    if (g) g->Release();
     linea(0, -9, 0, -2, cx, cy, 1.9f);
 }
 
@@ -2181,7 +2198,7 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             break;
         }
         case A_TIMER: {
-            std::vector<menu::Voce> voci = {menu::titolo(L"Timer")};
+            std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Timer", L"Timer"))};
             const int minuti[] = {1, 3, 5, 10, 15, 25, 30, 45, 60};
             for (int i = 0; i < 9; i++) {
                 wchar_t b[32]; swprintf(b, 32, minuti[i] == 60 ? testi::t(L"1 ora", L"1 hour") : testi::t(L"%d minuti", L"%d minutes"), minuti[i]);
@@ -2263,7 +2280,7 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
                 if (n.connessa) break;
                 // gia' usata (Windows ha la password) o aperta: ci si collega da qui; nuova protetta: le impostazioni di
                 // Windows, che chiedono la password (FluidWin non ne tocca: scelta dell'utente)
-                if (n.profilo || n.aperta) { wlan.collega(n.ssid); copiaWifi(); scrivi(n.profilo ? "wifi: collegamento a una rete salvata" : "wifi: collegamento a una rete aperta"); }
+                if (n.profilo || n.aperta) { wlan.collega(n.ssid, n.profilo); copiaWifi(); scrivi(n.profilo ? "wifi: collegamento a una rete salvata" : "wifi: collegamento a una rete aperta"); }
                 else { scrivi("wifi: rete nuova protetta, impostazioni di Windows"); chiudiPannello(); apriPagina(L"ms-settings:network-wifi"); }
                 pDirty = true;
             }
@@ -2294,8 +2311,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             if (e.indice < (int)listaN.size()) {
                 const notifiche::Notifica n = listaN[e.indice];
                 chiudiPannello();
-                if (!n.aumid.empty()) ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + n.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-                lettoreN.rimuovi(n.id);
+                // la notifica se ne va solo se l'app si e' aperta: app disinstallata o non attivabile, la notifica resta
+                // nel centro notifiche di Windows (R20261121-001738-S13)
+                const bool aperta = !n.aumid.empty() && (INT_PTR)ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + n.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL) > 32;
+                if (aperta) lettoreN.rimuovi(n.id);
             }
             break;
         case A_RIMUOVI:

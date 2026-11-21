@@ -43,8 +43,20 @@ inline void spegniBannerWindows(const std::wstring& aumid) {
     if (aumid.empty()) return;
     DWORD x = 0, n = sizeof(x);
     const LSTATUS ec = RegGetValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), RRF_RT_REG_DWORD, nullptr, &x, &n);
-    if (ec != ERROR_FILE_NOT_FOUND) return;   // gia' fatto (ERROR_SUCCESS), o copia che non si sa leggere: non si tocca
     const std::wstring k = IMPOST + aumid;
+    if (ec == ERROR_SUCCESS) {
+        // copia gia' salvata: se lo zero non era stato scritto (errore di un momento) si riprova, la copia buona resta
+        // quella di prima. Prima la copia bastava a saltare l'app per sempre (R20261121-002056-S14)
+        // Solo su esiti certi: DWORD letto e diverso da zero, o valore assente. Un ShowBanner diventato di un altro tipo
+        // non si sovrascrive (R20261121-120306-S1)
+        DWORD ora = 1, m = sizeof(ora);
+        const LSTATUS eo = RegGetValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", RRF_RT_REG_DWORD, nullptr, &ora, &m);
+        if ((eo == ERROR_SUCCESS && ora != 0) || eo == ERROR_FILE_NOT_FOUND) {
+            DWORD zero = 0; RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &zero, sizeof(zero));
+        }
+        return;
+    }
+    if (ec != ERROR_FILE_NOT_FOUND) return;   // copia che non si sa leggere: non si tocca
     DWORD prima = 0xFFFFFFFF; n = sizeof(prima);   // 0xFFFFFFFF = il valore non c'era
     const LSTATUS es = RegGetValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", RRF_RT_REG_DWORD, nullptr, &prima, &n);
     if (es == ERROR_FILE_NOT_FOUND) prima = 0xFFFFFFFF;
@@ -205,8 +217,10 @@ public:
         attivo = si;
         if (si) {
             if (!v.fin && !v.crea(L"FluidWin.Banner", vetro::procedura<Banner>, this, false)) { attivo = false; return; }
-            primaLettura = true;
-            spegniBannerTutte(); tScansione = GetTickCount64();
+            primaLettura = true; soglia = 0;
+            { FILETIME ft; GetSystemTimeAsFileTime(&ft); tAttivo = (INT64)(((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime); }
+            // i banner di Windows si spengono alla prima lettura riuscita (vedi controlla), non qui: senza il permesso
+            // di leggere le notifiche sparivano quelli di Windows e FluidWin non ne mostrava (R20261121-002056-S1)
             avviaLettura();
             SetTimer(v.fin, 2, 250, nullptr);
         } else {
@@ -261,12 +275,18 @@ private:
     notifiche::Notifica attuale;
     ID2D1Bitmap* icona = nullptr;
     IDWriteTextFormat *fApp = nullptr, *fTitolo = nullptr, *fTesto = nullptr;
+    float fDpi = 0;   // scala a cui sono fatti i tre formati
     bool primaLettura = true, dentro = false, sopraX = false;
     int stato = 0;   // 0 nascosto, 1 entra, 2 fermo, 3 esce, 4 la mostra il notch
     ULONGLONG t0 = 0, tFine = 0;
     double k = 0;
     int x = 0, y = 0;
     ULONGLONG tScansione = 0;
+    // Finche' non arriva una lista completa (oltre 500 notifiche Windows non la da' mai): sono nuove solo quelle piu'
+    // recenti dell'istante in cui i banner si sono accesi (FILETIME; 0 = c'e' stata una lista completa, conta "viste").
+    // Non la piu' nuova della prima lista: le voci illeggibili mancano, e una piu' recente comparsa poi sembrava nuova
+    // (R20261121-141020-S3, S4)
+    INT64 soglia = 0, tAttivo = 0;
 
     // La lettura delle notifiche aspetta Windows (decine di millisecondi): la fa un thread a parte, ogni secondo e
     // mezzo, cosi' il thread principale (che disegna le animazioni) non si ferma mai
@@ -274,7 +294,7 @@ private:
     std::atomic<bool> basta{false};
     std::mutex mx;
     std::vector<notifiche::Notifica> letta;
-    bool nuova = false;
+    bool nuova = false, lettaTutte = false;   // lettaTutte: la lista letta e' completa (vedi controlla)
     std::atomic<ULONGLONG> tLettura{0};   // ultima lettura riuscita (il thread di lettura e' vivo)
 
     void avviaLettura() {
@@ -286,7 +306,8 @@ private:
                 notifiche::Lettore l;
                 while (!basta) {
                     std::vector<notifiche::Notifica> lista;
-                    if (l.leggi(lista)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); nuova = true; tLettura = GetTickCount64(); }
+                    bool tutte = false;
+                    if (l.leggi(lista, &tutte)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); lettaTutte = tutte; nuova = true; tLettura = GetTickCount64(); }
                     for (int i = 0; i < 15 && !basta; i++) Sleep(100);
                 }
                 l.chiudi();   // prima di RoUninitialize (FW-AUDIT-011)
@@ -304,34 +325,48 @@ private:
     void controlla() {
         sblocca();
         std::vector<notifiche::Notifica> lista;
+        bool completa = false;
         {
             std::lock_guard<std::mutex> g(mx);
             if (!nuova) return;
-            lista = std::move(letta); nuova = false;
+            lista = std::move(letta); completa = lettaTutte; nuova = false;
         }
-        // le app nuove (installate o che notificano per la prima volta) ogni mezzo minuto
-        if (GetTickCount64() - tScansione > 30000) { spegniBannerTutte(); tScansione = GetTickCount64(); }
+        // (qui la lettura e' riuscita: FluidWin vede le notifiche, quindi puo' prendere il posto dei banner di Windows)
+        // alla prima lettura e poi le app nuove (installate o che notificano per la prima volta) ogni mezzo minuto
+        if (primaLettura || GetTickCount64() - tScansione > 30000) { spegniBannerTutte(); tScansione = GetTickCount64(); }
         // sopra un gioco o un video a tutto schermo un banner in primo piano lo fa uscire dal tutto schermo (o lo
         // riduce a icona): li' le notifiche non compaiono, restano nel centro notifiche come fa Windows
         const bool zitto = silenzio && silenzio();
-        if (conteggi) {
+        // Lista parziale (qualche voce illeggibile): le nuove leggibili entrano in coda, ma niente si toglie e i numeri
+        // sulle icone restano quelli dell'ultima lista completa (R20261121-123420-S2)
+        if (conteggi && completa) {
             std::unordered_map<std::wstring, int> c;
             for (const auto& n : lista) if (!n.aumid.empty()) { std::wstring k = n.aumid; for (auto& ch : k) ch = (wchar_t)towlower(ch); c[k]++; }
             conteggi(c);
         }
         std::unordered_set<UINT32> ora;
+        std::unordered_set<std::wstring> spente;   // una volta per app a lista: prima fino a 500 letture del registro (S5)
         for (auto it = lista.rbegin(); it != lista.rend(); ++it) {   // dalla piu' vecchia: in coda nell'ordine di arrivo
             const auto& n = *it;
             ora.insert(n.id);
             if (diSistema(n.aumid)) continue;   // le mostra Windows
-            spegniBannerWindows(n.aumid);   // da qui in poi le notifiche di quest'app le mostra FluidWin
+            if (spente.insert(n.aumid).second) spegniBannerWindows(n.aumid);   // da qui in poi le notifiche di quest'app le mostra FluidWin
             // alla prima lettura quelle gia' presenti non si mostrano
-            if (!primaLettura && !zitto && !viste.count(n.id)) {
+            if (!primaLettura && !zitto && !viste.count(n.id) && (soglia == 0 || n.quando >= soglia)) {   // (anche alla stessa data: R20261121-142449)
                 coda.push_back(n);
                 if (registro) { char t[160]; snprintf(t, sizeof t, "notifica nuova (id %u), stato %d, in coda %zu", n.id, stato, coda.size()); registro(t); }
             }
         }
-        viste = std::move(ora);
+        // in coda solo quelle ancora presenti in Windows: una ritirata dall'app intanto non deve piu' comparire (S9)
+        if (completa) {
+            coda.erase(std::remove_if(coda.begin(), coda.end(), [&](const notifiche::Notifica& n) { return !ora.count(n.id); }), coda.end());
+            viste = std::move(ora);
+        } else viste.insert(ora.begin(), ora.end());
+        // Dopo una prima lettura parziale le voci saltate comparirebbero poi come nuove: fino a una lista completa vale
+        // la soglia di data. Prima si aspettava una lista completa, e con piu' di 500 notifiche (lista sempre tagliata)
+        // non partiva piu' nessun banner, e la scansione delle app si ripeteva a ogni lettura (R20261121-140048-S4)
+        if (completa) soglia = 0;
+        else if (primaLettura) soglia = std::max<INT64>(1, tAttivo);
         primaLettura = false;
         if (zitto) { coda.clear(); if (stato != 0 && stato != 4) nascondi(); return; }
         if (stato == 0 && !coda.empty()) entra();
@@ -353,6 +388,10 @@ private:
     }
 
     void entra() {
+        // un gioco o un video a tutto schermo: niente (come alla lettura, la coda si svuota). Prima la fine della
+        // notifica nel notch consumava subito la prossima, e il banner di vetro compariva sopra il gioco (S4)
+        if (silenzio && silenzio()) { coda.clear(); return; }
+        if (coda.empty()) return;
         attuale = coda.front(); coda.pop_front();
         if (nelNotch) {   // dal notch, se si vede
             std::vector<UINT> px; int iw = 0, ih = 0;
@@ -365,8 +404,22 @@ private:
         const float d = v.dpi;
         const int w = (int)std::lround(360 * d), h = (int)std::lround(84 * d);
         x = is.right - w; y = is.top - (int)std::lround(12 * d) - h;
+        // sempre dentro l'area di lavoro: senza spazio sopra l'ancora (nessun dock, l'area intera come ancora) va sotto,
+        // poi i bordi. Prima poteva finire tutto sopra lo schermo (R20261121-002056-S13)
+        {
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromPoint({is.left, is.top}, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+                const RECT& a = mi.rcWork; const int m = (int)std::lround(8 * d);
+                if (y < a.top + m) y = std::min((int)is.bottom + (int)std::lround(12 * d), (int)a.top + m);
+                x = std::clamp(x, (int)a.left + m, std::max((int)a.left + m, (int)a.right - w - m));
+                y = std::clamp(y, (int)a.top + m, std::max((int)a.top + m, (int)a.bottom - h - m));
+            }
+        }
         v.posiziona(x, y + (int)std::lround(16 * d), w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
+        // (rifatti se la scala e' cambiata: banner su un altro schermo, R20261121-120306 su S18)
+        if (fApp && fDpi != d) { for (auto* f : {fApp, fTitolo, fTesto}) if (f) f->Release(); fApp = fTitolo = fTesto = nullptr; }
         if (!fApp) {
+            fDpi = d;
             fApp = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
             fTitolo = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fTesto = v.formato(12.5f * d);
