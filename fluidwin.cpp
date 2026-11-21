@@ -4010,7 +4010,11 @@ static std::wstring diagnostica() {
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
     riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
          v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockLato);
-    riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
+    // icone fissate del dock (solo conteggi, niente nomi di app): per le segnalazioni di icone doppie, vuote o mancanti
+    if (gDockOk) { const auto& f = gDock.diagFissate;
+        riga(L"Dock, app fissate: lista di Windows %ls, collegamenti %d, app di pacchetto %d, Squirrel di versioni cancellate %d, senza destinazione %d, file dell'icona mancante %d, doppie %d, scartate %d",
+             f.lista ? L"letta" : L"non letta (solo la cartella)", f.collegamenti, f.pacchetto, f.squirrel, f.morte, f.iconeRotte, f.doppie, f.scartate); }
+    riga(L"Registro: %ls", gLog ?L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
     return t;
 }
 
@@ -4360,7 +4364,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 static bool prima = false; const bool si = schermoInteroAttivo();
                 if (si != prima) {
                     prima = si; wchar_t k[64] = L""; GetClassNameW(GetForegroundWindow(), k, 64);
-                    logf("schermo intero %s (primo piano %ls)%s%s", si ? "si': dock nascosto" : "finito", k, si ? ": " : "", si ? gPercheSchermoIntero : "");
+                    logf("schermo intero %s (primo piano %ls)%s%s", si ? "si'" : "finito", k, si ? ": " : "", si ? gPercheSchermoIntero : "");
                 }
             }
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
