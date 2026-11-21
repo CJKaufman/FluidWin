@@ -130,6 +130,13 @@ struct Voce {
     // app di pacchetto (Teams...) fissata: "shell:AppsFolder\<AUMID>", per aprirla e per l'icona. Il collegamento
     // punta all'exe di una versione precisa (WindowsApps\<nome>_<versione>_...), che sparisce a ogni aggiornamento
     std::wstring pacchetto;
+    // collegamento di Squirrel a una versione cancellata (vedi squirrelVersione): l'exe della versione di adesso, da
+    // aprire e da cui prendere l'icona al posto del collegamento
+    std::wstring ripiego;
+    std::wstring argomenti;    // del collegamento: per riconoscere i doppi veri e per aprire il ripiego (R20261121-230321-S1, S3)
+    // il collegamento indica come icona un file che non c'e' piu' (Chromium e Brave usano un .ico del profilo, che
+    // sparisce cambiando o togliendo il profilo): la shell dava l'icona generica di Windows. L'icona si prende dall'exe
+    bool iconaRotta = false;
     bool fissata = false;      // aggiunta alla barra
     ID2D1Bitmap1* icona = nullptr;
     std::vector<HWND> finestre;
@@ -172,6 +179,102 @@ static bool exeSquirrel(const std::wstring& exe, const std::wstring& argomenti, 
     prima = exe.substr(0, barra + 1) + L"app-";
     dopo = L"\\" + nome;
     return true;
+}
+
+// Collegamento di Squirrel che punta direttamente a una versione: "<cartella>\app-1.0.9187\discord.exe". Succede
+// fissando l'app mentre e' aperta; al primo aggiornamento Squirrel cancella quella cartella e il collegamento resta
+// senza destinazione (icona vuota, il clic non apre nulla, le finestre della versione nuova facevano un'icona a
+// parte). exe e' gia' minuscolo. Se e' cosi': prima/dopo come exeSquirrel e in 'attuale' l'exe della versione
+// installata adesso (la cartella app-* con la versione piu' alta che lo contiene, confrontata per numeri: prima la
+// data di modifica, che puo' preferire una versione vecchia rimasta, R20261121-230321-S2); false altrimenti
+// "1.0.9269" -> {1, 0, 9269}; 'suffisso' se dopo i numeri c'e' altro ("1.0.0-beta": versione preliminare, che a pari
+// numeri vale meno della definitiva, R20261121-230855-S1)
+static std::vector<unsigned long> numeriVersione(const wchar_t* s, bool& suffisso) {
+    std::vector<unsigned long> n;
+    while (*s) {
+        if (!iswdigit(*s)) { if (*s != L'.') break; s++; continue; }
+        wchar_t* fine = nullptr; n.push_back(wcstoul(s, &fine, 10)); s = fine;
+    }
+    suffisso = *s != 0;
+    return n;
+}
+static bool squirrelVersione(const std::wstring& exe, std::wstring& prima, std::wstring& dopo, std::wstring& attuale) {
+    const size_t barra = exe.find_last_of(L'\\');
+    if (barra == std::wstring::npos || barra < 6) return false;
+    const size_t cart = exe.find_last_of(L'\\', barra - 1);   // inizio di "\app-<versione>"
+    if (cart == std::wstring::npos || exe.compare(cart + 1, 4, L"app-")) return false;
+    const std::wstring base = exe.substr(0, cart + 1);
+    if (GetFileAttributesW((base + L"update.exe").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+    prima = base + L"app-"; dopo = exe.substr(barra);
+    WIN32_FIND_DATAW fd; HANDLE h = FindFirstFileW((base + L"app-*").c_str(), &fd);
+    std::vector<unsigned long> vMax; bool sMax = false;
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            bool suff = false;
+            const std::vector<unsigned long> ver = numeriVersione(fd.cFileName + 4, suff);   // (dopo "app-")
+            if (ver.empty()) continue;
+            std::wstring c = base; c += fd.cFileName; c += dopo; c = minuscolo(c);
+            const bool meglio = attuale.empty() || ver > vMax || (ver == vMax && sMax && !suff);
+            if (meglio && GetFileAttributesW(c.c_str()) != INVALID_FILE_ATTRIBUTES) { vMax = ver; sMax = suff; attuale = c; }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    return true;
+}
+
+// Le app fissate alla barra di Windows, nel suo ordine. La lista vera e' in HKCU\...\Explorer\Taskband, valore
+// Favorites: una sequenza di {1 byte, lunghezza a 4 byte, PIDL}, chiusa da 0xFF (misurato su Windows 11 25H2,
+// FavoritesVersion 3). Ogni PIDL si fa leggere alla shell: un collegamento della cartella User Pinned\TaskBar
+// (percorso) oppure un'app di pacchetto (il suo AUMID). Le app di pacchetto fissate (WhatsApp, Store, Outlook...)
+// stanno solo qui, senza collegamento: prima il dock leggeva solo la cartella e non le mostrava. Sola lettura.
+// false se il valore manca o ha una forma diversa (allora vale solo la cartella, come prima)
+struct FissataWindows { std::wstring lnk, aumid, nome; };
+static bool fissateWindows(std::vector<FissataWindows>& out) {
+    out.clear();
+    static const wchar_t* chiave = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband";
+    DWORD n = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, chiave, L"Favorites", RRF_RT_REG_BINARY, nullptr, nullptr, &n) != ERROR_SUCCESS || n < 1 || n > 1024 * 1024) return false;
+    std::vector<BYTE> b(n);
+    if (RegGetValueW(HKEY_CURRENT_USER, chiave, L"Favorites", RRF_RT_REG_BINARY, nullptr, b.data(), &n) != ERROR_SUCCESS) return false;
+    b.resize(n);
+    size_t i = 0;
+    while (i < b.size()) {
+        if (b[i] == 0xFF) return true;   // fine della lista
+        if (i + 5 > b.size()) return false;
+        DWORD cb = 0; memcpy(&cb, &b[i + 1], 4);
+        const size_t o = i + 5;
+        if (cb < 2 || cb > b.size() - o) return false;
+        // il PIDL deve stare tutto dentro i suoi cb byte e finire con il terminatore (la shell lo legge fino a quello)
+        size_t j = o; bool chiuso = false;
+        while (j + 2 <= o + cb) {
+            USHORT l = 0; memcpy(&l, &b[j], 2);
+            if (l == 0) { chiuso = true; break; }
+            if (l < 3 || j + l > o + cb) break;
+            j += l;
+        }
+        if (!chiuso) return false;
+        PIDLIST_ABSOLUTE pidl = (PIDLIST_ABSOLUTE)CoTaskMemAlloc(cb);
+        if (!pidl) return false;
+        memcpy(pidl, &b[o], cb);
+        IShellItem* si = nullptr;
+        if (SUCCEEDED(SHCreateItemFromIDList(pidl, IID_PPV_ARGS(&si))) && si) {
+            FissataWindows f;
+            wchar_t* s = nullptr;
+            if (SUCCEEDED(si->GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING, &s)) && s) {
+                std::wstring p = s; CoTaskMemFree(s); s = nullptr;
+                if (p.rfind(L"shell:AppsFolder\\", 0) == 0) p = p.substr(17);
+                if (p.size() > 4 && minuscolo(p.substr(p.size() - 4)) == L".lnk") f.lnk = p;
+                else if (p.find(L'!') != std::wstring::npos && p.find(L'\\') == std::wstring::npos) f.aumid = p;
+            }
+            if (SUCCEEDED(si->GetDisplayName(SIGDN_NORMALDISPLAY, &s)) && s) { f.nome = s; CoTaskMemFree(s); }
+            si->Release();
+            if (!f.lnk.empty() || !f.aumid.empty()) out.push_back(std::move(f));
+        }
+        CoTaskMemFree(pidl);
+        i = o + cb;
+    }
+    return true;   // (finita senza 0xFF: si tiene quello che c'era)
 }
 
 // exe di un'app di pacchetto senza la versione: "...\windowsapps\msteams_26276.513_x64__8wekyb3d8bbwe\ms-teams.exe"
@@ -659,6 +762,8 @@ public:
         // a scomparsa spento: il dock resta su sopra qualsiasi finestra (le app a schermo intero lo tolgono a parte,
         // vedi schermoIntero)
         if (!autoNascondi) n = false;
+        // app a schermo intero (vedi schermoIntero): giu' anche col dock fisso, che altrimenti coprirebbe il video
+        if (appSchermoIntero) { n = true; if (!*perche) snprintf(perche, sizeof(perche), "app a schermo intero"); }
         // orario e centro di controllo restano sempre giu' e risalgono solo col mouse sul bordo in basso
         nI = true;
         if (!forza && n == vuoleNascondersi && nI == vuoleNascondersiI) return;
@@ -671,9 +776,17 @@ public:
     }
 
     // tipo: 0 niente, 1 app a schermo intero (video, presentazione), 2 gioco
+    // Solo coi giochi il dock si toglie del tutto (li' il mouse sul bordo e' normale). Con le altre app a schermo intero
+    // (browser con F11, ChatGPT a tutto schermo, video) scende sotto il bordo e risale col mouse in fondo, come sotto una
+    // finestra ingrandita (vedi controllaFinestre): prima si toglieva anche li' e il bordo non lo faceva piu' risalire
     void schermoIntero(int tipo) {
         notch.modo(tipo == 0 ? notch::NORMALE : notch::NASCOSTO);   // video, presentazioni e giochi: via
-        const bool si = tipo != 0;
+        if ((tipo == 1) != appSchermoIntero) {
+            appSchermoIntero = tipo == 1;
+            if (registro) scrivi(appSchermoIntero ? "app a schermo intero: dock sotto il bordo, risale col mouse" : "app a schermo intero finita");
+            controllaFinestre(true);
+        }
+        const bool si = tipo == 2;
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
         for (HWND h : {icone, vetro}) {
@@ -941,6 +1054,7 @@ private:
                         b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
     }
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
+    bool appSchermoIntero = false;   // app (non gioco) a schermo intero: dock giu', risale dal bordo (schermoIntero)
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
     bool mouseDentro = false, mouseSulDock = false; float mouseX = 0, mouseY = 0;
     double lente = 0, lenteVel = 0;  // 0 = icone normali, 1 = ingrandimento pieno (molla)
@@ -1323,6 +1437,14 @@ private:
     }
 
     static std::wstring chiave(const Voce& v) { return v.exe.empty() ? v.avvio : v.exe; }
+    // cosa apre il clic: il pacchetto (collegamento dello Store vecchio), l'exe di adesso (Squirrel, versione
+    // cancellata) o il collegamento
+    static const std::wstring& daAprire(const Voce& v) { return !v.pacchetto.empty() ? v.pacchetto : !v.ripiego.empty() ? v.ripiego : v.avvio; }
+    // ... e con quali argomenti: solo per il ripiego, che sostituisce il collegamento e ne perderebbe gli argomenti
+    // (il collegamento e il pacchetto li hanno gia', R20261121-230321-S3)
+    static const wchar_t* argomentiDaAprire(const Voce& v) {
+        return v.pacchetto.empty() && !v.ripiego.empty() && !v.argomenti.empty() ? v.argomenti.c_str() : nullptr;
+    }
     // la voce trascinata, senza ambiguita': le aggiunte per collegamento (due collegamenti allo stesso exe, per esempio
     // due profili di un browser, sono due icone: con chiave() si ritrovava l'ultima, R20261120-013029-S1); le altre per
     // chiave, come le raggruppa aggiornaApp
@@ -1330,7 +1452,11 @@ private:
 
     // cache di aggiornaApp (gira a ogni cambio di primo piano)
     std::vector<Voce> fissateCache;                 // le app fissate (senza icone ne' finestre)
-    ULONGLONG fissateT = 0; double fissateLette = -1e9; bool fissateOk = false;
+    ULONGLONG fissateT = 0, fissateTBand = 0; double fissateLette = -1e9; bool fissateOk = false;
+public:
+    // diagnostica delle app fissate (ultima lettura): lista di Windows letta, voci per tipo, scartate
+    struct DiagFissate { bool lista = false; int collegamenti = 0, pacchetto = 0, squirrel = 0, morte = 0, doppie = 0, scartate = 0, iconeRotte = 0; } diagFissate;
+private:
     std::unordered_map<HWND, std::pair<DWORD, std::wstring>> exeFinestre;   // finestra -> (processo, eseguibile)
     std::unordered_map<std::wstring, std::wstring> nomiExe;                 // eseguibile -> nome leggibile
 
@@ -1354,11 +1480,19 @@ private:
             WIN32_FILE_ATTRIBUTE_DATA ad{};
             const bool letta = GetFileAttributesExW(dir.c_str(), GetFileExInfoStandard, &ad);
             const ULONGLONG tCart = letta ? ((ULONGLONG)ad.ftLastWriteTime.dwHighDateTime << 32) | ad.ftLastWriteTime.dwLowDateTime : 0;
-            const bool valida = fissateOk && letta && tCart == fissateT && adesso() - fissateLette < 60;
+            // (anche la lista di Windows: fissare un'app di pacchetto non tocca la cartella, solo la chiave Taskband)
+            ULONGLONG tBand = 0;
+            { HKEY k = nullptr; FILETIME ft{};
+              if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Taskband", 0, KEY_READ, &k) == ERROR_SUCCESS) {
+                  if (RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &ft) == ERROR_SUCCESS)
+                      tBand = ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+                  RegCloseKey(k);
+              } }
+            const bool valida = fissateOk && letta && tCart == fissateT && tBand == fissateTBand && adesso() - fissateLette < 60;
             if (valida) for (const Voce& f : fissateCache) nuove.push_back(f);
             // (l'ora dell'ultima lettura cambia solo quando si rileggono davvero i collegamenti: prima ogni consultazione
             // la rinnovava, e un .lnk cambiato senza toccare la cartella restava vecchio per sempre, R20261121-001416-S14)
-            fissateT = tCart; if (!valida) fissateLette = adesso();
+            fissateT = tCart; fissateTBand = tBand; if (!valida) fissateLette = adesso();
             WIN32_FIND_DATAW fd; HANDLE fh = valida ? INVALID_HANDLE_VALUE : FindFirstFileW((dir + L"*.lnk").c_str(), &fd);
             std::vector<std::pair<ULONGLONG, std::wstring>> lnk;
             if (fh != INVALID_HANDLE_VALUE) {
@@ -1367,8 +1501,49 @@ private:
                 FindClose(fh);
             }
             std::sort(lnk.begin(), lnk.end());
-            for (auto& [t, p] : lnk) {
-                Voce v; v.fissata = true; v.avvio = p;
+            // Ordine e voci come la barra di Windows (fissateWindows): prima la sua lista (collegamenti che ci sono
+            // ancora e app di pacchetto), poi i collegamenti che stanno solo nella cartella (quelli di "Aggiungi al
+            // dock", e i resti lasciati da installazioni e aggiornamenti: questi si scartano sotto se non aprono nulla
+            // o sono doppi). Senza la lista (valore mancante o di forma diversa) solo la cartella, come prima
+            struct Candidata { std::wstring lnk, aumid, nome; bool daWindows; };
+            std::vector<Candidata> cand;
+            std::vector<FissataWindows> win;
+            const bool winOk = !valida && fissateWindows(win);
+            if (winOk)
+                for (auto& f : win) {
+                    if (!f.lnk.empty()) {
+                        bool c = false;
+                        for (auto& l : lnk) if (!_wcsicmp(l.second.c_str(), f.lnk.c_str())) { c = true; break; }
+                        if (!c) continue;   // (tolto dalla cartella, per esempio con "Rimuovi dal dock")
+                    }
+                    cand.push_back({f.lnk, f.aumid, f.nome, true});
+                }
+            if (!valida)
+                for (auto& l : lnk) {
+                    bool gia = false;
+                    for (auto& c : cand) if (!_wcsicmp(c.lnk.c_str(), l.second.c_str())) { gia = true; break; }
+                    if (!gia) cand.push_back({l.second, L"", L"", false});
+                }
+            if (!valida) { diagFissate = {}; diagFissate.lista = winOk; }
+            auto scrivi1 = [&](const char* cosa, const std::wstring& n) { if (registro) { char b[300]; snprintf(b, 300, "fissata %s: %ls", cosa, n.c_str()); scrivi(b); } };
+            // destinazione che non esiste (e niente con cui sostituirla): il clic non aprirebbe nulla
+            auto morta = [](const Voce& x) {
+                return x.avvio.size() > 4 && !x.exe.empty() && x.pacchetto.empty() && x.ripiego.empty() &&
+                       GetFileAttributesW(x.exe.c_str()) == INVALID_FILE_ATTRIBUTES;
+            };
+            for (auto& c : cand) {
+                Voce v; v.fissata = true;
+                if (c.lnk.empty()) {   // app di pacchetto fissata in Windows: si apre e prende l'icona dalla cartella delle app
+                    v.avvio = L"shell:AppsFolder\\" + c.aumid; v.aumid = c.aumid; v.nome = c.nome.empty() ? c.aumid : c.nome;
+                    diagFissate.pacchetto++; scrivi1("app di pacchetto", v.avvio);
+                    bool doppia = false;
+                    for (size_t k = 1; k < nuove.size(); k++) if (nuove[k].aumid == v.aumid) { doppia = true; break; }
+                    if (doppia) { diagFissate.doppie++; scrivi1("doppia, scartata", v.avvio); continue; }
+                    nuove.push_back(std::move(v));
+                    continue;
+                }
+                const std::wstring& p = c.lnk;
+                v.avvio = p;
                 v.nome = p.substr(p.find_last_of(L'\\') + 1); v.nome = v.nome.substr(0, v.nome.size() - 4);
                 IShellLinkW* sl = nullptr;
                 if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&sl)))) {
@@ -1384,7 +1559,13 @@ private:
                             esp.resize(fatti && fatti <= serve ? fatti - 1 : 0);
                             v.exe = minuscolo(esp.empty() ? std::wstring(dest) : esp);
                             wchar_t arg[1024] = L"";
-                            if (SUCCEEDED(sl->GetArguments(arg, 1024))) exeSquirrel(v.exe, arg, v.sqPrima, v.sqDopo);
+                            if (SUCCEEDED(sl->GetArguments(arg, 1024))) { v.argomenti = arg; exeSquirrel(v.exe, arg, v.sqPrima, v.sqDopo); }
+                        }
+                        wchar_t ic[MAX_PATH] = L""; int ii = 0;
+                        if (SUCCEEDED(sl->GetIconLocation(ic, MAX_PATH, &ii)) && ic[0]) {
+                            wchar_t icEsp[MAX_PATH] = L"";
+                            const DWORD k = ExpandEnvironmentStringsW(ic, icEsp, MAX_PATH);
+                            v.iconaRotta = k && k <= MAX_PATH && GetFileAttributesW(icEsp) == INVALID_FILE_ATTRIBUTES;
                         }
                         IPropertyStore* ps = nullptr;
                         if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&ps)))) {
@@ -1408,6 +1589,36 @@ private:
                     v.pacchetto = avvioPacchetto(v.exe);
                     if (v.aumid.empty() && v.pacchetto.size() > 17) v.aumid = v.pacchetto.substr(17);   // dopo "shell:AppsFolder\"
                 }
+                // Squirrel fissato mentre era aperto: il collegamento punta a "app-<versione>\x.exe", cancellata dal
+                // primo aggiornamento. Si riconoscono le finestre di ogni versione e si apre quella di adesso
+                if (!v.exe.empty() && v.sqPrima.empty() && v.pacchetto.empty() && GetFileAttributesW(v.exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    std::wstring att;
+                    if (squirrelVersione(v.exe, v.sqPrima, v.sqDopo, att)) { v.ripiego = att; diagFissate.squirrel++; scrivi1("Squirrel di una versione cancellata", v.nome + L" -> " + att); }
+                }
+                const bool vuota = morta(v);
+                if (vuota) diagFissate.morte++;
+                // fuori dalla lista di Windows e senza destinazione: un resto (la barra di Windows non la mostra)
+                if (vuota && winOk && !c.daWindows) { diagFissate.scartate++; scrivi1("senza destinazione e fuori dalla lista di Windows, scartata", v.nome); continue; }
+                // doppia: stesso AUMID di una gia' presa, e una delle due senza destinazione (prima quella prendeva le
+                // finestre e l'icona giusta restava vuota accanto) oppure stessa destinazione e stessi argomenti. Due
+                // collegamenti vivi con lo stesso AUMID ma argomenti diversi (due profili di un browser) restano due
+                // icone (R20261121-230321-S1: prima bastava l'AUMID, e un profilo spariva)
+                size_t doppia = 0;
+                if (!v.aumid.empty())
+                    for (size_t k = 1; k < nuove.size(); k++) {
+                        const Voce& x = nuove[k];
+                        if (x.aumid != v.aumid) continue;
+                        if (vuota || morta(x) || (x.exe == v.exe && x.argomenti == v.argomenti)) { doppia = k; break; }
+                    }
+                if (doppia) {
+                    diagFissate.doppie++;
+                    if (morta(nuove[doppia]) && !vuota) { scrivi1("doppia, sostituisce quella senza destinazione", v.nome); nuove[doppia] = std::move(v); }
+                    else scrivi1("doppia, scartata", v.nome);
+                    continue;
+                }
+                diagFissate.collegamenti++;
+                if (v.iconaRotta) diagFissate.iconeRotte++;
+                scrivi1(c.daWindows ? "dalla barra di Windows" : "solo nella cartella", v.nome + (vuota ? L" (senza destinazione)" : L"") + (v.iconaRotta ? L" (file dell'icona mancante: icona dall'exe)" : L""));
                 nuove.push_back(std::move(v));
             }
             if (!valida) { fissateCache.assign(nuove.begin() + nTesta, nuove.end()); fissateOk = letta; }
@@ -1780,7 +1991,10 @@ private:
         if (sulBordo(pt, schermo) && PtInRect(&schermo, pt) && (zonaIsola || zonaDock)) {
             bool &r = zonaIsola ? rivelatoI : rivelato;
             // risalendo torna sopra a tutto (anche alle finestre "sempre in primo piano" ingrandite dopo di lui)
-            if (!r) { r = true; (zonaIsola ? fuoriDalI : fuoriDal) = -1; dirty = true; posizionaVetri(); }
+            if (!r) {
+                r = true; (zonaIsola ? fuoriDalI : fuoriDal) = -1; dirty = true; posizionaVetri();
+                if (registro) { char b[120]; snprintf(b, 120, "bordo: risale %s (mouse %ld,%ld, nascosto per schermo intero %d)", zonaIsola ? "l'isola" : "il dock", pt.x, pt.y, (int)nascostoSchermoIntero); scrivi(b); }
+            }
         }
         const bool alto = ly >= yBaseRiposo() - M - PAD - 30 * dpi;   // (vicino al dock, dal lato interno)
         if (rivelato) {
@@ -3702,7 +3916,7 @@ private:
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
             segnaLancio(v);   // la sua prima finestra uscira' dall'icona col genio
-            ShellExecuteW(nullptr, L"open", (v.pacchetto.empty() ? v.avvio : v.pacchetto).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            ShellExecuteW(nullptr, L"open", daAprire(v).c_str(), argomentiDaAprire(v), nullptr, SW_SHOWNORMAL);
             v.rimbalzoT0 = ultimoT;   // rimbalza finche' l'app non si apre
             appDaAggiornare = true;
             return;
@@ -4111,7 +4325,7 @@ private:
         }
         if (s == 1) {
             // (stessa scelta del clic normale: collegamento Store vecchio -> il pacchetto, R20261121-001416-S15)
-            segnaLancio(v); ShellExecuteW(nullptr, L"open", (v.pacchetto.empty() ? v.avvio : v.pacchetto).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            segnaLancio(v); ShellExecuteW(nullptr, L"open", daAprire(v).c_str(), argomentiDaAprire(v), nullptr, SW_SHOWNORMAL);
             for (auto& x : this->voci) if (!x.uscente && chiave(x) == chiave(v)) x.rimbalzoT0 = ultimoT;   // la voce di adesso
             dirty = true;
         }
