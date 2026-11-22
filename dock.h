@@ -66,6 +66,7 @@
 #include "pila.h"
 #include "appunti.h"
 #include <ole2.h>
+#include <commdlg.h>
 #include <knownfolders.h>
 #include "testi.h"
 
@@ -102,9 +103,12 @@ static const UINT_PTR TIMER_TESTA = 14;     // testa del dock (musica e timer): 
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
+static const wchar_t* const AVVIO_PILA_PREF = L"*pila:";
+static bool ePilaPers(const std::wstring& a) { return a.rfind(AVVIO_PILA_PREF, 0) == 0; }
+static std::wstring percorsoPilaPers(const std::wstring& a) { return ePilaPers(a) ? a.substr(6) : L""; }
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -459,6 +463,7 @@ public:
         aggiornaStato(true);
         leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
         caricaNascoste();       // (le app nascoste dal dock, PR #20)
+        caricaPilePers();
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -1024,6 +1029,156 @@ private:
         RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", REG_MULTI_SZ,
                         b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
     }
+    struct PilaPers { std::wstring nome, percorso; };
+    std::vector<PilaPers> pilePers;
+
+    static std::wstring cartellaPileBase() {
+        PWSTR p = nullptr;
+        std::wstring base;
+        if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) base = p;
+        CoTaskMemFree(p);
+        if (base.empty()) return L"";
+        const std::wstring rad = base + L"\\FluidWin";
+        CreateDirectoryW(rad.c_str(), nullptr);
+        const std::wstring dir = rad + L"\\Pile";
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir;
+    }
+
+    static bool ePilaGestita(const std::wstring& percorso) {
+        std::wstring base = minuscolo(cartellaPileBase());
+        if (base.empty()) return false;
+        if (base.back() != L'\\') base.push_back(L'\\');
+        const std::wstring p = minuscolo(percorso);
+        return p.size() > base.size() && p.rfind(base, 0) == 0;
+    }
+
+    void caricaPilePers() {
+        pilePers.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"PilePers", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < sizeof(wchar_t)) return;
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, 0);
+        DWORD sz = n;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"PilePers", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &sz) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); *p; p += wcslen(p) + 1) {
+            const std::wstring s(p);
+            const size_t t = s.find(L'\t');
+            if (t == std::wstring::npos || t == 0) continue;
+            const std::wstring nm = s.substr(0, t), perc = s.substr(t + 1);
+            if (nm.empty() || perc.empty()) continue;
+            const std::wstring lc = minuscolo(perc);
+            if (std::any_of(pilePers.begin(), pilePers.end(), [&](const PilaPers& x) { return minuscolo(x.percorso) == lc; })) continue;
+            pilePers.push_back({nm, perc});
+        }
+    }
+
+    void salvaPilePers() const {
+        if (pilePers.empty()) {
+            RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"PilePers");
+            return;
+        }
+        std::vector<wchar_t> b;
+        for (const auto& x : pilePers) {
+            const std::wstring s = x.nome + L"\t" + x.percorso;
+            b.insert(b.end(), s.begin(), s.end());
+            b.push_back(L'\0');
+        }
+        b.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"PilePers", REG_MULTI_SZ,
+                        b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
+    }
+
+    static std::wstring percorsoUnico(const std::wstring& cartella, const std::wstring& base, const std::wstring& ext) {
+        std::wstring cand = cartella + L"\\" + base + ext;
+        for (int n = 2; GetFileAttributesW(cand.c_str()) != INVALID_FILE_ATTRIBUTES && n < 1000; n++)
+            cand = cartella + L"\\" + base + L" (" + std::to_wstring(n) + L")" + ext;
+        return cand;
+    }
+
+    static bool aggiungiElementoAPila(const std::wstring& cartellaPila, const std::wstring& src) {
+        const DWORD att = GetFileAttributesW(src.c_str());
+        if (att == INVALID_FILE_ATTRIBUTES) return false;
+        const size_t sl = src.find_last_of(L"\\/");
+        const std::wstring nomeFile = sl == std::wstring::npos ? src : src.substr(sl + 1);
+        if (nomeFile.empty()) return false;
+        const bool eDir = (att & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        const size_t dot = eDir ? std::wstring::npos : nomeFile.rfind(L'.');
+        const std::wstring ext = dot != std::wstring::npos ? minuscolo(nomeFile.substr(dot)) : L"";
+        if (!eDir && (ext == L".lnk" || ext == L".url")) {
+            const std::wstring base = nomeFile.substr(0, dot);
+            const std::wstring dest = percorsoUnico(cartellaPila, base, nomeFile.substr(dot));
+            return CopyFileW(src.c_str(), dest.c_str(), TRUE) != 0;
+        }
+        const std::wstring base = (dot != std::wstring::npos && dot > 0) ? nomeFile.substr(0, dot) : nomeFile;
+        const std::wstring dest = percorsoUnico(cartellaPila, base, L".lnk");
+        IShellLinkW* link = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&link))) || !link) return false;
+        bool ok = SUCCEEDED(link->SetPath(src.c_str()));
+        if (ok) {
+            const std::wstring wd = eDir ? src : (sl != std::wstring::npos ? src.substr(0, sl) : L"");
+            if (!wd.empty()) link->SetWorkingDirectory(wd.c_str());
+            IPersistFile* pf = nullptr;
+            if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&pf))) && pf) {
+                ok = SUCCEEDED(pf->Save(dest.c_str(), TRUE));
+                pf->Release();
+            } else {
+                ok = false;
+            }
+        }
+        link->Release();
+        return ok;
+    }
+
+    void aggiungiPilaCartella() {
+        IFileOpenDialog* dlg = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dlg))) || !dlg) return;
+        DWORD opt = 0;
+        if (SUCCEEDED(dlg->GetOptions(&opt))) dlg->SetOptions(opt | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+        dlg->SetTitle(testi::t(L"Scegli una cartella per la pila", L"Choose a folder for the stack"));
+        if (SUCCEEDED(dlg->Show(icone))) {
+            IShellItem* it = nullptr;
+            if (SUCCEEDED(dlg->GetResult(&it)) && it) {
+                PWSTR path = nullptr, disp = nullptr;
+                if (SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path && path[0]) {
+                    std::wstring p = path;
+                    std::wstring nm;
+                    if (SUCCEEDED(it->GetDisplayName(SIGDN_NORMALDISPLAY, &disp)) && disp && disp[0]) nm = disp;
+                    if (nm.empty()) {
+                        const size_t sl = p.find_last_of(L"\\/");
+                        nm = sl == std::wstring::npos ? p : p.substr(sl + 1);
+                    }
+                    const std::wstring lc = minuscolo(p);
+                    if (!nm.empty() && !std::any_of(pilePers.begin(), pilePers.end(), [&](const PilaPers& x) { return minuscolo(x.percorso) == lc; })) {
+                        pilePers.push_back({nm, p});
+                        salvaPilePers();
+                        aggiornaApp();
+                    }
+                }
+                CoTaskMemFree(path);
+                CoTaskMemFree(disp);
+                it->Release();
+            }
+        }
+        dlg->Release();
+    }
+
+    void nuovaPilaApp() {
+        std::wstring nome;
+        if (!pila::chiediNomePila(icone, testi::t(L"Nuova pila", L"New stack"), L"", nome)) return;
+        std::wstring safe = nome;
+        for (auto& c : safe) if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
+        while (!safe.empty() && (safe.back() == L' ' || safe.back() == L'.')) safe.pop_back();
+        if (safe.empty()) safe = L"Pila";
+        const std::wstring base = cartellaPileBase();
+        if (base.empty()) return;
+        std::wstring dest = base + L"\\" + safe;
+        for (int n = 2; GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES && n < 1000; n++)
+            dest = base + L"\\" + safe + L"_" + std::to_wstring(n);
+        if (!CreateDirectoryW(dest.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
+        pilePers.push_back({nome, dest});
+        salvaPilePers();
+        aggiornaApp();
+    }
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
     bool appSchermoIntero = false;   // app (non gioco) a schermo intero: dock giu', risale dal bordo (schermoIntero)
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
@@ -1581,7 +1736,14 @@ private:
         std::stable_sort(nuove.begin() + fissate, nuove.end(), [&](const Voce& a, const Voce& b) {
             return std::find(ordineAperte.begin(), ordineAperte.end(), chiave(a)) < std::find(ordineAperte.begin(), ordineAperte.end(), chiave(b));
         });
-        // in fondo, come su macOS: la pila dei Download, il cestino e per ultimo il centro di controllo (disegnati dal dock)
+        // in fondo, come su macOS: le pile personalizzate, la pila dei Download, il cestino e per ultimo il centro di controllo
+        for (const auto& ps : pilePers) {
+            const DWORD att = GetFileAttributesW(ps.percorso.c_str());
+            if (att != INVALID_FILE_ATTRIBUTES && (att & FILE_ATTRIBUTE_DIRECTORY)) {
+                Voce p; p.fissata = true; p.avvio = AVVIO_PILA_PREF + ps.percorso; p.nome = ps.nome;
+                nuove.push_back(std::move(p));
+            }
+        }
         { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
@@ -2112,7 +2274,13 @@ private:
             if (d < 0.5f) continue;
             const float alfa = (premuto < 1 ? 0.8f : 1.0f) * std::min(1.0f, sc * 1.5f);
             dritto((r.left + r.right) / 2, (r.top + r.bottom) / 2);   // (icona e numero dritti anche ai lati e in alto)
-            if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            if (v.icona) {
+                dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+                if (dropSopra == (int)i && ePilaPers(v.avvio)) {
+                    pennello->SetColor(D2D1::ColorF(0.25f, 0.58f, 1.0f, 0.85f * alfa));
+                    dc->DrawRoundedRectangle({{r.left - 3 * dpi, r.top - 3 * dpi, r.right + 3 * dpi, r.bottom + 3 * dpi}, dd * 0.24f, dd * 0.24f}, pennello, 2.5f * dpi);
+                }
+            }
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
@@ -3204,11 +3372,13 @@ private:
         return n;
     }
     void apriPila(const Voce& v) {
-        if (pilaDownload.aperta()) { pilaDownload.chiudi(); return; }
+        const bool pers = ePilaPers(v.avvio);
+        const std::wstring cartella = pers ? percorsoPilaPers(v.avvio) : cartellaDownload();
+        if (pilaDownload.apertaPer(cartella)) { pilaDownload.chiudi(); return; }
         const RECT r = aSchermo(v.rett);   // (sul lato del dock)
-        pilaDownload.apri(r, cartellaDownload(), v.nome, lato);
+        pilaDownload.apri(r, cartella, v.nome, lato, pers, pers && ePilaGestita(cartella));
     }
-    // trascinamento di file sul dock: sul cestino si spostano nel Cestino di Windows (come trascinarli sull'icona del desktop)
+    // trascinamento di file sul dock: sul cestino si spostano nel Cestino di Windows; sulle pile personalizzate crea collegamenti
     struct Bersaglio : IDropTarget {
         Motore* d = nullptr; bool file = false;
         HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropTarget) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
@@ -3223,40 +3393,60 @@ private:
             float x = 0, y = 0; d->logicoSchermo({pt.x, pt.y}, x, y);
             d->mouseDentro = true; d->mouseSulDock = true; d->mouseX = x; d->mouseY = y;   // la lente segue il trascinamento
             const int i = d->iconaInPunto(x, y);
-            const int s = (file && i >= 0 && d->voci[i].avvio == AVVIO_CESTINO) ? i : -1;
-            // (solo se la sorgente permette lo spostamento: *e porta gli effetti che consente)
-            const int c = (*e & DROPEFFECT_MOVE) ? s : -1;
+            int c = -1;
+            DWORD eff = DROPEFFECT_NONE;
+            if (file && i >= 0 && i < (int)d->voci.size()) {
+                if (d->voci[i].avvio == AVVIO_CESTINO) {
+                    if (*e & DROPEFFECT_MOVE) { c = i; eff = DROPEFFECT_MOVE; }
+                } else if (ePilaPers(d->voci[i].avvio)) {
+                    if (*e & (DROPEFFECT_COPY | DROPEFFECT_LINK)) {
+                        c = i;
+                        eff = (*e & DROPEFFECT_LINK) ? DROPEFFECT_LINK : DROPEFFECT_COPY;
+                    }
+                }
+            }
             if (c != d->dropSopra) d->dropSopra = c;
             d->dirty = true;
-            *e = c >= 0 ? DROPEFFECT_MOVE : DROPEFFECT_NONE;   // (aspetto del cursore: "sposta" nel Cestino)
+            *e = eff;
             return S_OK;
         }
         HRESULT STDMETHODCALLTYPE DragLeave() override { d->dropSopra = -1; d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->dirty = true; return S_OK; }
         HRESULT STDMETHODCALLTYPE Drop(IDataObject* o, DWORD k, POINTL pt, DWORD* e) override {
             DragOver(k, pt, e);
-            const bool cestino = d->dropSopra >= 0;
+            const int idx = d->dropSopra;
+            const bool eCestino = idx >= 0 && idx < (int)d->voci.size() && d->voci[idx].avvio == AVVIO_CESTINO;
+            const std::wstring pilaDest = (idx >= 0 && idx < (int)d->voci.size() && ePilaPers(d->voci[idx].avvio))
+                                          ? percorsoPilaPers(d->voci[idx].avvio) : L"";
             DragLeave();
-            if (!cestino || !o) { *e = DROPEFFECT_NONE; return S_OK; }
+            if ((!eCestino && pilaDest.empty()) || !o) { *e = DROPEFFECT_NONE; return S_OK; }
             FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
             if (FAILED(o->GetData(&f, &m))) { *e = DROPEFFECT_NONE; return S_OK; }
-            std::wstring lista;   // percorsi separati da \0, con \0\0 in fondo (come vuole SHFileOperation)
-            // DragQueryFile vuole l'handle del blocco, non il puntatore di GlobalLock: con memoria mobile i due sono
-            // diversi e non si trovava nessun file (audit FW-AUDIT-016)
-            // Ogni percorso intero, di qualsiasi lunghezza: uno non letto per intero annulla tutto. Prima un buffer fisso
-            // poteva troncare un nome lungo o saltarlo, e il Cestino riceveva una lista diversa da quella trascinata
-            // (R20261121-001416-S2)
+            std::vector<std::wstring> percorsi;
             if (const HDROP hd = (HDROP)m.hGlobal) {
                 const UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
                 for (UINT i = 0; i < n; i++) {
                     const UINT len = DragQueryFileW(hd, i, nullptr, 0);
                     std::wstring p(len + 1, L'\0');
-                    if (!len || DragQueryFileW(hd, i, p.data(), len + 1) != len) { lista.clear(); break; }
+                    if (!len || DragQueryFileW(hd, i, p.data(), len + 1) != len) { percorsi.clear(); break; }
                     p.resize(len);
-                    lista += p; lista.push_back(L'\0');
+                    percorsi.push_back(std::move(p));
                 }
             }
             ReleaseStgMedium(&m);
-            if (lista.empty()) { *e = DROPEFFECT_NONE; return S_OK; }
+            if (percorsi.empty()) { *e = DROPEFFECT_NONE; return S_OK; }
+            if (!pilaDest.empty()) {
+                for (const auto& p : percorsi) aggiungiElementoAPila(pilaDest, p);
+                if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD))) {
+                    if (DWORD* v = (DWORD*)GlobalLock(g)) { *v = DROPEFFECT_NONE; GlobalUnlock(g); }
+                    FORMATETC pf = {(CLIPFORMAT)RegisterClipboardFormatW(L"Performed DropEffect"), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+                    STGMEDIUM sm{}; sm.tymed = TYMED_HGLOBAL; sm.hGlobal = g;
+                    if (FAILED(o->SetData(&pf, &sm, TRUE))) GlobalFree(g);
+                }
+                *e = DROPEFFECT_NONE;
+                return S_OK;
+            }
+            std::wstring lista;   // percorsi separati da \0, con \0\0 in fondo (come vuole SHFileOperation)
+            for (const auto& p : percorsi) { lista += p; lista.push_back(L'\0'); }
             lista.push_back(L'\0');
             if (d->registro) d->scrivi("file trascinati sul cestino: nel Cestino di Windows");
             // nel Cestino (FOF_ALLOWUNDO: si possono ripristinare), in un thread a parte per non fermare il dock
@@ -3687,7 +3877,7 @@ private:
         Voce& v = voci[i];
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
-        if (v.avvio == AVVIO_PILA) { apriPila(v); return; }
+        if (v.avvio == AVVIO_PILA || ePilaPers(v.avvio)) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
             segnaLancio(v);   // la sua prima finestra uscira' dall'icona col genio
@@ -3976,6 +4166,9 @@ private:
                 vv.push_back(vn);
             }
             if (vv.size() > 1) vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Aggiungi pila cartella…", L"Add folder stack…"), 10));
+            vv.push_back(menu::voce(testi::t(L"Nuova pila app…", L"New app stack…"), 11));
+            vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1));
             // (con la barra di Windows nascosta l'icona nell'area di notifica non si vede: qui l'uscita si trova, #16)
             if (esci) vv.push_back(menu::voce(testi::t(L"Esci da FluidWin", L"Quit FluidWin"), 4));
@@ -3985,6 +4178,8 @@ private:
             else if (s == 4 && esci) esci();
             else if (s == 2) mostraDesktop();
             else if (s == 3) ripristinaDesktop();
+            else if (s == 10) aggiungiPilaCartella();
+            else if (s == 11) nuovaPilaApp();
             else if (s == 999) mostraAppNascosta(L"");
             else if (s >= 1000 && s - 1000 < (int)appNascoste.size()) mostraAppNascosta(appNascoste[s - 1000].chiave);
             return;
@@ -3993,6 +4188,49 @@ private:
         // copia: mentre il menu e' aperto (ha un suo ciclo dei messaggi) l'elenco delle app puo' essere rifatto da
         // capo, e un riferimento a voci[i] resterebbe a puntare a memoria liberata
         const Voce v = voci[i];
+        if (ePilaPers(v.avvio)) {
+            const std::wstring cartella = percorsoPilaPers(v.avvio);
+            std::vector<menu::Voce> vv = {
+                menu::titolo(v.nome),
+                menu::voce(testi::t(L"Apri la cartella", L"Open folder"), 1),
+                menu::voce(testi::t(L"Aggiungi elemento…", L"Add item…"), 2),
+                menu::voce(testi::t(L"Rinomina…", L"Rename…"), 3),
+                menu::separatore(),
+                menu::voce(testi::t(L"Rimuovi pila dal dock", L"Remove stack from dock"), 4)
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) {
+                ShellExecuteW(nullptr, L"open", cartella.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            } else if (s == 2) {
+                wchar_t buf[32768] = L"";
+                OPENFILENAMEW ofn{};
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = icone;
+                ofn.lpstrFilter = L"Apps & Shortcuts (*.exe;*.lnk;*.url)\0*.exe;*.lnk;*.url\0All files (*.*)\0*.*\0";
+                ofn.lpstrFile = buf;
+                ofn.nMaxFile = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+                ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NODEREFERENCELINKS | OFN_NOCHANGEDIR;
+                if (GetOpenFileNameW(&ofn) && buf[0]) aggiungiElementoAPila(cartella, buf);
+            } else if (s == 3) {
+                std::wstring nuovo;
+                if (pila::chiediNomePila(icone, testi::t(L"Rinomina pila", L"Rename stack"), v.nome, nuovo)) {
+                    const std::wstring lc = minuscolo(cartella);
+                    for (auto& ps : pilePers) if (minuscolo(ps.percorso) == lc) { ps.nome = nuovo; break; }
+                    salvaPilePers();
+                    aggiornaApp();
+                }
+            } else if (s == 4) {
+                const std::wstring lc = minuscolo(cartella);
+                pilePers.erase(std::remove_if(pilePers.begin(), pilePers.end(),
+                                              [&](const PilaPers& ps) { return minuscolo(ps.percorso) == lc; }),
+                               pilePers.end());
+                if (pilaDownload.apertaPer(cartella)) pilaDownload.chiudi();
+                salvaPilePers();
+                aggiornaApp();
+            }
+            return;
+        }
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
             const bool c = v.avvio == AVVIO_CESTINO;
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
