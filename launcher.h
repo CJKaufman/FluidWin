@@ -76,6 +76,7 @@ inline auto Motore::fermaIcone() -> void {
 
 inline auto Motore::sorgenteIcona(const Voce& v) -> std::wstring {
     if (v.avvio == AVVIO_PILA) return cartellaDownload();   // l'icona della cartella Download
+    if (ePilaPers(v.avvio)) return percorsoPilaPers(v.avvio);
     if (!v.pacchetto.empty()) return v.pacchetto;             // app di pacchetto fissata (vedi Voce::pacchetto)
     if (!v.ripiego.empty()) return v.ripiego;                 // Squirrel, versione cancellata (vedi Voce::ripiego)
     if (v.iconaRotta && !v.exe.empty() && GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES) return v.exe;   // (vedi Voce::iconaRotta)
