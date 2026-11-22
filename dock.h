@@ -666,6 +666,7 @@ public:
             usa(0);
             if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso && !pMenuTray) chiudiTutte();
         }
+        if (lAperto && lModoGiochi && !lChiusura && (++giroGiochiAttivi % 4 == 0)) aggiornaGiochiInEsecuzione();
         if (lAperto && !lChiusura && !lDialogoAperto && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
     }
 
@@ -3814,6 +3815,11 @@ private:
         bool manuale = false;
         bool iconaPers = false;
         bool nomePers = false;
+        bool preferito = false;
+        ULONGLONG ultimoAvvio = 0;
+        std::wstring argomentiExtra;
+        bool comeAdmin = false;
+        DWORD pidInEsecuzione = 0;
         ID2D1Bitmap1* icona = nullptr;
         bool provata = false;
     };
@@ -3843,6 +3849,9 @@ private:
     float lPresaY = 0; double lPresaScroll = 0;
     int lSel = 0, lSopra = -1;
     bool lSopraEnergia = false;
+    bool lOrdineRecenti = true;
+    bool lSopraOrdine = false;
+    int giroGiochiAttivi = 0;
     // File e cartelle nel launcher (indice.h; issue #14: "la ricerca mostra solo le app"). Mentre si scrive, 0,2 s dopo
     // l'ultimo tasto, un thread chiede all'indice di Windows; sotto la griglia compare la sezione con i risultati del
     // testo lFileTesto e, in fondo, "Cerca in Esplora file". lFileGen scarta i risultati di un testo vecchio; lFileH e'
@@ -3928,6 +3937,14 @@ private:
     static void salvaIconeGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
     static std::unordered_map<std::wstring, std::wstring> leggiNomiGiochi();
     static void salvaNomiGiochi(const std::unordered_map<std::wstring, std::wstring>& m);
+    static auto leggiGiochiPreferiti() -> std::unordered_set<std::wstring>;
+    static auto salvaGiochiPreferiti(const std::unordered_set<std::wstring>& s) -> void;
+    static auto leggiGiochiRecenti() -> std::unordered_map<std::wstring, ULONGLONG>;
+    static auto salvaGiochiRecenti(const std::unordered_map<std::wstring, ULONGLONG>& m) -> void;
+    static auto leggiOpzioniGiochi() -> std::unordered_map<std::wstring, std::pair<bool, std::wstring>>;
+    static auto salvaOpzioniGiochi(const std::unordered_map<std::wstring, std::pair<bool, std::wstring>>& m) -> void;
+    static auto leggiOrdineRecenti() -> bool;
+    static auto salvaOrdineRecenti(bool rec) -> void;
     static auto leggiChiaveSteamGridDB() -> std::wstring;
     static auto salvaChiaveSteamGridDB(const std::wstring& k) -> void;
     static auto scaricaIconaGiocoOnline(const AppL& a, const std::wstring& apiKey) -> std::wstring;
@@ -3997,6 +4014,22 @@ private:
     void avviaApp(int i);
 
     D2D1_RECT_F rettEnergia() const;
+
+    auto rettOrdineGiochi() const -> D2D1_RECT_F;
+
+    auto ordinaGiochi() -> void;
+
+    auto registraAvvioGioco(const AppL& a) -> void;
+
+    auto lanciaGioco(const AppL& a) -> void;
+
+    auto alternaPreferitoGioco(const AppL& a) -> void;
+
+    auto opzioniGioco(const AppL& a) -> void;
+
+    auto aggiornaGiochiInEsecuzione() -> void;
+
+    auto chiudiGiocoInEsecuzione(const AppL& a, bool forza = false) -> void;
 
     void menuApp(int i, POINT pt);
 
