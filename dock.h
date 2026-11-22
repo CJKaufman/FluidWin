@@ -137,6 +137,7 @@ struct Voce {
     // sparisce cambiando o togliendo il profilo): la shell dava l'icona generica di Windows. L'icona si prende dall'exe
     bool iconaRotta = false;
     bool fissata = false;      // aggiunta alla barra
+    std::wstring iconaFile;
     ID2D1Bitmap1* icona = nullptr;
     std::vector<HWND> finestre;
     double rimbalzoT0 = -1;    // istante di inizio del rimbalzo (avvio), -1 = fermo
@@ -1029,7 +1030,7 @@ private:
         RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"AppNascoste", REG_MULTI_SZ,
                         b.data(), (DWORD)(b.size() * sizeof(wchar_t)));
     }
-    struct PilaPers { std::wstring nome, percorso; };
+    struct PilaPers { std::wstring nome, percorso, icona; };
     std::vector<PilaPers> pilePers;
 
     static std::wstring cartellaPileBase() {
@@ -1064,11 +1065,14 @@ private:
             const std::wstring s(p);
             const size_t t = s.find(L'\t');
             if (t == std::wstring::npos || t == 0) continue;
-            const std::wstring nm = s.substr(0, t), perc = s.substr(t + 1);
+            const size_t t2 = s.find(L'\t', t + 1);
+            const std::wstring nm = s.substr(0, t);
+            const std::wstring perc = t2 == std::wstring::npos ? s.substr(t + 1) : s.substr(t + 1, t2 - t - 1);
+            const std::wstring ic = t2 == std::wstring::npos ? L"" : s.substr(t2 + 1);
             if (nm.empty() || perc.empty()) continue;
             const std::wstring lc = minuscolo(perc);
             if (std::any_of(pilePers.begin(), pilePers.end(), [&](const PilaPers& x) { return minuscolo(x.percorso) == lc; })) continue;
-            pilePers.push_back({nm, perc});
+            pilePers.push_back({nm, perc, ic});
         }
     }
 
@@ -1079,7 +1083,8 @@ private:
         }
         std::vector<wchar_t> b;
         for (const auto& x : pilePers) {
-            const std::wstring s = x.nome + L"\t" + x.percorso;
+            std::wstring s = x.nome + L"\t" + x.percorso;
+            if (!x.icona.empty()) { s += L"\t"; s += x.icona; }
             b.insert(b.end(), s.begin(), s.end());
             b.push_back(L'\0');
         }
@@ -1149,7 +1154,7 @@ private:
                     }
                     const std::wstring lc = minuscolo(p);
                     if (!nm.empty() && !std::any_of(pilePers.begin(), pilePers.end(), [&](const PilaPers& x) { return minuscolo(x.percorso) == lc; })) {
-                        pilePers.push_back({nm, p});
+                        pilePers.push_back({nm, p, L""});
                         salvaPilePers();
                         aggiornaApp();
                     }
@@ -1175,7 +1180,30 @@ private:
         for (int n = 2; GetFileAttributesW(dest.c_str()) != INVALID_FILE_ATTRIBUTES && n < 1000; n++)
             dest = base + L"\\" + safe + L"_" + std::to_wstring(n);
         if (!CreateDirectoryW(dest.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) return;
-        pilePers.push_back({nome, dest});
+        pilePers.push_back({nome, dest, L""});
+        salvaPilePers();
+        aggiornaApp();
+    }
+
+    void cambiaIconaPila(const std::wstring& cartella) {
+        wchar_t buf[32768] = L"";
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = icone;
+        ofn.lpstrFilter = L"Icons & images\0*.ico;*.png;*.jpg;*.jpeg;*.bmp;*.webp;*.exe\0All files\0*.*\0";
+        ofn.lpstrFile = buf;
+        ofn.nMaxFile = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&ofn) || !buf[0]) return;
+        const std::wstring lc = minuscolo(cartella);
+        for (auto& ps : pilePers) if (minuscolo(ps.percorso) == lc) { ps.icona = buf; break; }
+        salvaPilePers();
+        aggiornaApp();
+    }
+
+    void ripristinaIconaPila(const std::wstring& cartella) {
+        const std::wstring lc = minuscolo(cartella);
+        for (auto& ps : pilePers) if (minuscolo(ps.percorso) == lc) { ps.icona.clear(); break; }
         salvaPilePers();
         aggiornaApp();
     }
@@ -1428,9 +1456,73 @@ private:
         return true;
     }
 
+    static bool pixelIconaWic(const std::wstring& percorso, int lato, int& w, int& h, std::vector<UINT>& px) {
+        IWICImagingFactory* wic = nullptr;
+        if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) || !wic) return false;
+        IWICBitmapDecoder* dec = nullptr;
+        IWICBitmapFrameDecode* fr = nullptr;
+        IWICBitmapClipper* cl = nullptr;
+        IWICBitmapScaler* sc = nullptr;
+        IWICFormatConverter* cv = nullptr;
+        bool ok = false;
+        if (SUCCEEDED(wic->CreateDecoderFromFilename(percorso.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &dec)) && dec) {
+            UINT nFrame = 0, fw = 0, fh = 0;
+            if (SUCCEEDED(dec->GetFrameCount(&nFrame)) && nFrame > 0) {
+                UINT64 bestArea = 0;
+                for (UINT idx = 0; idx < nFrame; idx++) {
+                    IWICBitmapFrameDecode* cand = nullptr;
+                    UINT cw = 0, ch = 0;
+                    if (SUCCEEDED(dec->GetFrame(idx, &cand)) && cand) {
+                        if (SUCCEEDED(cand->GetSize(&cw, &ch)) && cw && ch && ((UINT64)cw * ch > bestArea || !fr)) {
+                            if (fr) fr->Release();
+                            fr = cand;
+                            bestArea = (UINT64)cw * ch;
+                            fw = cw; fh = ch;
+                        } else {
+                            cand->Release();
+                        }
+                    }
+                }
+            }
+            if (fr && fw && fh) {
+                IWICBitmapSource* src = fr;
+                bool okSrc = true;
+                if (fw != fh) {
+                    const UINT q = std::min(fw, fh);
+                    const WICRect r = {(INT)((fw - q) / 2), (INT)((fh - q) / 2), (INT)q, (INT)q};
+                    okSrc = SUCCEEDED(wic->CreateBitmapClipper(&cl)) && cl && SUCCEEDED(cl->Initialize(fr, &r));
+                    if (okSrc) src = cl;
+                }
+                if (okSrc && SUCCEEDED(wic->CreateBitmapScaler(&sc)) && sc &&
+                    SUCCEEDED(sc->Initialize(src, (UINT)lato, (UINT)lato, WICBitmapInterpolationModeFant)) &&
+                    SUCCEEDED(wic->CreateFormatConverter(&cv)) && cv &&
+                    SUCCEEDED(cv->Initialize(sc, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom))) {
+                    px.resize((size_t)lato * (size_t)lato);
+                    if (SUCCEEDED(cv->CopyPixels(nullptr, (UINT)lato * 4, (UINT)(px.size() * sizeof(UINT)), (BYTE*)px.data()))) {
+                        w = lato; h = lato; ok = true;
+                    } else {
+                        px.clear();
+                    }
+                }
+            }
+        }
+        for (IUnknown* u : {(IUnknown*)cv, (IUnknown*)sc, (IUnknown*)cl, (IUnknown*)fr, (IUnknown*)dec, (IUnknown*)wic})
+            if (u) u->Release();
+        return ok;
+    }
+
     // ---- icone ----
     // pixel dell'icona (premoltiplicati), senza Direct2D: si puo' chiamare anche da un altro thread
     static bool pixelIcona(const std::wstring& percorso, int lato, int& w, int& h, std::vector<UINT>& px) {
+        const size_t dot = percorso.rfind(L'.');
+        if (dot != std::wstring::npos && lato > 0) {
+            const std::wstring ext = minuscolo(percorso.substr(dot));
+            if (ext == L".png" || ext == L".jpg" || ext == L".jpeg" || ext == L".bmp" || ext == L".webp" || ext == L".ico") {
+                const DWORD att = GetFileAttributesW(percorso.c_str());
+                if (att != INVALID_FILE_ATTRIBUTES && !(att & FILE_ATTRIBUTE_DIRECTORY) && pixelIconaWic(percorso, lato, w, h, px))
+                    return true;
+            }
+        }
         IShellItemImageFactory* fab = nullptr;
         if (FAILED(SHCreateItemFromParsingName(percorso.c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
         HBITMAP hb = nullptr;
@@ -1740,7 +1832,7 @@ private:
         for (const auto& ps : pilePers) {
             const DWORD att = GetFileAttributesW(ps.percorso.c_str());
             if (att != INVALID_FILE_ATTRIBUTES && (att & FILE_ATTRIBUTE_DIRECTORY)) {
-                Voce p; p.fissata = true; p.avvio = AVVIO_PILA_PREF + ps.percorso; p.nome = ps.nome;
+                Voce p; p.fissata = true; p.avvio = AVVIO_PILA_PREF + ps.percorso; p.nome = ps.nome; p.iconaFile = ps.icona;
                 nuove.push_back(std::move(p));
             }
         }
@@ -1756,7 +1848,7 @@ private:
                 Voce& vecchia = voci[j];
                 if (ritrovata[j]) continue;   // anche una voce che si stava restringendo: se l'app si riapre torna a crescere
                 if (vecchia.avvio == v.avvio || (!v.exe.empty() && vecchia.exe == v.exe)) {
-                    v.icona = vecchia.icona; vecchia.icona = nullptr;
+                    if (vecchia.iconaFile == v.iconaFile) { v.icona = vecchia.icona; vecchia.icona = nullptr; }
                     v.rimbalzoT0 = v.finestre.empty() ? vecchia.rimbalzoT0 : -1;   // l'app si e' aperta: fine del rimbalzo
                     v.sobbalzoT0 = vecchia.sobbalzoT0; v.sobbalzoDopo = vecchia.sobbalzoDopo; v.sobbalzoAmp = vecchia.sobbalzoAmp;
                     v.scala = vecchia.scala; v.dx = vecchia.dx;
@@ -4195,9 +4287,11 @@ private:
                 menu::voce(testi::t(L"Apri la cartella", L"Open folder"), 1),
                 menu::voce(testi::t(L"Aggiungi elemento…", L"Add item…"), 2),
                 menu::voce(testi::t(L"Rinomina…", L"Rename…"), 3),
-                menu::separatore(),
-                menu::voce(testi::t(L"Rimuovi pila dal dock", L"Remove stack from dock"), 4)
+                menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 5),
             };
+            if (!v.iconaFile.empty()) vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 6));
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Rimuovi pila dal dock", L"Remove stack from dock"), 4));
             SetForegroundWindow(icone);
             const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (s == 1) {
@@ -4220,6 +4314,10 @@ private:
                     salvaPilePers();
                     aggiornaApp();
                 }
+            } else if (s == 5) {
+                cambiaIconaPila(cartella);
+            } else if (s == 6) {
+                ripristinaIconaPila(cartella);
             } else if (s == 4) {
                 const std::wstring lc = minuscolo(cartella);
                 pilePers.erase(std::remove_if(pilePers.begin(), pilePers.end(),

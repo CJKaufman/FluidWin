@@ -76,7 +76,11 @@ inline auto Motore::fermaIcone() -> void {
 
 inline auto Motore::sorgenteIcona(const Voce& v) -> std::wstring {
     if (v.avvio == AVVIO_PILA) return cartellaDownload();   // l'icona della cartella Download
-    if (ePilaPers(v.avvio)) return percorsoPilaPers(v.avvio);
+    if (ePilaPers(v.avvio)) {
+        if (!v.iconaFile.empty() && GetFileAttributesW(v.iconaFile.c_str()) != INVALID_FILE_ATTRIBUTES)
+            return v.iconaFile;
+        return percorsoPilaPers(v.avvio);
+    }
     if (!v.pacchetto.empty()) return v.pacchetto;             // app di pacchetto fissata (vedi Voce::pacchetto)
     if (!v.ripiego.empty()) return v.ripiego;                 // Squirrel, versione cancellata (vedi Voce::ripiego)
     if (v.iconaRotta && !v.exe.empty() && GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES) return v.exe;   // (vedi Voce::iconaRotta)
@@ -93,7 +97,14 @@ inline auto Motore::raccogliIcone() -> bool {
         ID2D1Bitmap1* b = ip.ok ? bitmapDaPixel(ip.w, ip.h, ip.px) : nullptr;
         bool presa = false;
         if (ip.lato == 256) {          // dock
-            for (auto& v : voci) if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && sorgenteIcona(v) == ip.percorso) { v.icona = b; presa = true; dirty = true; break; }
+            for (auto& v : voci) {
+                if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && sorgenteIcona(v) == ip.percorso) {
+                    if (presa && b) b->AddRef();
+                    v.icona = b;
+                    presa = true;
+                    dirty = true;
+                }
+            }
             // (si potra' richiedere: l'app puo' chiudersi e riaprirsi; se e' fallita si riprova al prossimo aggiornamento)
             iconeChieste.erase(chiaveIcona(ip.percorso, ip.lato));
         } else if (ip.lato == 128) {   // app in background (se non c'e', la piccola foto salvata da Windows)
