@@ -574,6 +574,116 @@ inline auto Motore::salvaNomiGiochi(const std::unordered_map<std::wstring, std::
     salvaMappaGiochi(L"NomiGiochi", m);
 }
 
+inline auto Motore::leggiGiochiPreferiti() -> std::unordered_set<std::wstring> {
+    std::unordered_set<std::wstring> s;
+    DWORD cb = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiPreferiti", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return s;
+    std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiPreferiti", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return s;
+    for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) s.insert(minuscolo(p));
+    return s;
+}
+
+inline auto Motore::salvaGiochiPreferiti(const std::unordered_set<std::wstring>& s) -> void {
+    std::vector<wchar_t> buf;
+    for (const auto& x : s) {
+        if (x.empty()) continue;
+        const std::wstring k = minuscolo(x);
+        buf.insert(buf.end(), k.begin(), k.end());
+        buf.push_back(L'\0');
+    }
+    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiPreferiti"); return; }
+    buf.push_back(L'\0');
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiPreferiti", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+}
+
+inline auto Motore::leggiGiochiRecenti() -> std::unordered_map<std::wstring, ULONGLONG> {
+    std::unordered_map<std::wstring, ULONGLONG> m;
+    DWORD cb = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiRecenti", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return m;
+    std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiRecenti", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return m;
+    for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+        const std::wstring r = p;
+        const size_t tab = r.find(L'\t');
+        if (tab == std::wstring::npos || tab == 0 || tab + 1 >= r.size()) continue;
+        wchar_t* fine = nullptr;
+        const ULONGLONG ts = wcstoull(r.c_str() + tab + 1, &fine, 10);
+        if (fine && fine != r.c_str() + tab + 1 && ts > 0) m[minuscolo(r.substr(0, tab))] = ts;
+    }
+    return m;
+}
+
+inline auto Motore::salvaGiochiRecenti(const std::unordered_map<std::wstring, ULONGLONG>& m) -> void {
+    std::vector<wchar_t> buf;
+    for (const auto& [chiave, ts] : m) {
+        if (chiave.empty() || ts == 0) continue;
+        const std::wstring k = minuscolo(chiave);
+        const std::wstring v = std::to_wstring(ts);
+        buf.insert(buf.end(), k.begin(), k.end());
+        buf.push_back(L'\t');
+        buf.insert(buf.end(), v.begin(), v.end());
+        buf.push_back(L'\0');
+    }
+    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiRecenti"); return; }
+    buf.push_back(L'\0');
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiRecenti", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+}
+
+inline auto Motore::leggiOpzioniGiochi() -> std::unordered_map<std::wstring, std::pair<bool, std::wstring>> {
+    std::unordered_map<std::wstring, std::pair<bool, std::wstring>> m;
+    DWORD cb = 0;
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"OpzioniGiochi", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return m;
+    std::vector<wchar_t> buf(cb / sizeof(wchar_t) + 2, L'\0');
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"OpzioniGiochi", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return m;
+    for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) {
+        const std::wstring r = p;
+        const size_t t1 = r.find(L'\t');
+        if (t1 == std::wstring::npos || t1 == 0) continue;
+        const size_t t2 = r.find(L'\t', t1 + 1);
+        if (t2 == std::wstring::npos) continue;
+        const bool admin = (t2 == t1 + 2 && r[t1 + 1] == L'1');
+        std::wstring args = r.substr(t2 + 1);
+        if (!admin && args.empty()) continue;
+        m[minuscolo(r.substr(0, t1))] = {admin, std::move(args)};
+    }
+    return m;
+}
+
+inline auto Motore::salvaOpzioniGiochi(const std::unordered_map<std::wstring, std::pair<bool, std::wstring>>& m) -> void {
+    std::vector<wchar_t> buf;
+    for (const auto& [chiave, opt] : m) {
+        if (chiave.empty()) continue;
+        std::wstring pulito;
+        pulito.reserve(opt.second.size());
+        for (wchar_t ch : opt.second) {
+            if (ch != L'\t' && ch != L'\r' && ch != L'\n') pulito.push_back(ch);
+        }
+        if (!opt.first && pulito.empty()) continue;
+        const std::wstring k = minuscolo(chiave);
+        buf.insert(buf.end(), k.begin(), k.end());
+        buf.push_back(L'\t');
+        buf.push_back(opt.first ? L'1' : L'0');
+        buf.push_back(L'\t');
+        buf.insert(buf.end(), pulito.begin(), pulito.end());
+        buf.push_back(L'\0');
+    }
+    if (buf.empty()) { RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"OpzioniGiochi"); return; }
+    buf.push_back(L'\0');
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"OpzioniGiochi", REG_MULTI_SZ, buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+}
+
+inline auto Motore::leggiOrdineRecenti() -> bool {
+    DWORD val = 1, cb = sizeof(val);
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiOrdineRecenti", RRF_RT_REG_DWORD, nullptr, &val, &cb) != ERROR_SUCCESS) return true;
+    return val != 0;
+}
+
+inline auto Motore::salvaOrdineRecenti(bool rec) -> void {
+    const DWORD val = rec ? 1 : 0;
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"GiochiOrdineRecenti", REG_DWORD, &val, sizeof(val));
+}
+
 inline auto Motore::leggiChiaveSteamGridDB() -> std::wstring {
     DWORD cb = 0;
     if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"SteamGridDBKey", RRF_RT_REG_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return L"";
@@ -1193,6 +1303,18 @@ inline auto Motore::leggiTuttiGiochi(bool subito) -> void {
     inSottofondo([ris] { *ris = elencaTuttiGiochi(); }, [this, ris] { lavoroGiochi = false; applicaTuttiGiochi(std::move(*ris)); });
 }
 
+inline auto Motore::ordinaGiochi() -> void {
+    const bool rec = lOrdineRecenti;
+    std::sort(tuttiGiochi.begin(), tuttiGiochi.end(), [rec](const AppL& a, const AppL& b) {
+        if (a.preferito != b.preferito) return a.preferito > b.preferito;
+        if (rec && a.ultimoAvvio != b.ultimoAvvio) return a.ultimoAvvio > b.ultimoAvvio;
+        const int c = lstrcmpiW(a.nome.c_str(), b.nome.c_str());
+        if (c != 0) return c < 0;
+        if (a.avvio != b.avvio) return a.avvio < b.avvio;
+        return a.argomenti < b.argomenti;
+    });
+}
+
 inline auto Motore::applicaTuttiGiochi(std::vector<AppL> nuovi) -> void {
     for (auto& a : nuovi) {
         const std::wstring s = sorgenteIconaL(a);
@@ -1204,6 +1326,9 @@ inline auto Motore::applicaTuttiGiochi(std::vector<AppL> nuovi) -> void {
     }
     for (auto& v : tuttiGiochi) if (v.icona) v.icona->Release();
     tuttiGiochi = std::move(nuovi);
+    lOrdineRecenti = leggiOrdineRecenti();
+    ordinaGiochi();
+    aggiornaGiochiInEsecuzione();
     {
         const int sel = lSel; const double scr = lScrollObj;
         filtra();
@@ -1753,6 +1878,9 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
 
     const auto iconePers = leggiIconeGiochi();
     const auto nomiPers = leggiNomiGiochi();
+    const auto preferiti = leggiGiochiPreferiti();
+    const auto recenti = leggiGiochiRecenti();
+    const auto opzioni = leggiOpzioniGiochi();
     for (AppL& a : nuove) {
         const std::wstring chiave = chiaveGioco(a);
         auto it = iconePers.find(chiave);
@@ -1766,6 +1894,12 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
             a.nome = itN->second;
             a.minuscolo = minuscolo(a.nome);
             a.nomePers = true;
+        }
+        a.preferito = preferiti.count(chiave) != 0;
+        if (auto itR = recenti.find(chiave); itR != recenti.end()) a.ultimoAvvio = itR->second;
+        if (auto itO = opzioni.find(chiave); itO != opzioni.end()) {
+            a.comeAdmin = itO->second.first;
+            a.argomentiExtra = itO->second.second;
         }
     }
 
@@ -2054,8 +2188,14 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
     if (nascostoSchermoIntero) schermoIntero(false);
     auto caricaElenco = [&](bool g) {
         if (g) {
+            lOrdineRecenti = leggiOrdineRecenti();
+            giroGiochiAttivi = 0;
             if (tuttiGiochi.empty()) leggiTuttiGiochi(true);
-            else if (adesso() - gLetto > 600) leggiTuttiGiochi();
+            else {
+                ordinaGiochi();
+                aggiornaGiochiInEsecuzione();
+                if (adesso() - gLetto > 600) leggiTuttiGiochi();
+            }
         } else {
             if (mostraGiochi && tuttiGiochi.empty()) leggiTuttiGiochi(true);
             if (tutteApp.empty()) leggiTutteApp(true);
@@ -2079,6 +2219,7 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
     if (lAperto && !lChiusura && lModoGiochi == giochi) { chiudiLauncher(); return; }
     if (lAperto && !lChiusura && lModoGiochi != giochi) {
         lModoGiochi = giochi;
+        lSopraOrdine = false;
         aggiornaAncora(giochi);
         caricaElenco(giochi);
         query.clear(); filtra(); lSopra = -1; lScroll = lScrollObj = 0;
@@ -2089,10 +2230,14 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
     if (lAperto && lChiusura) {
         if (lModoGiochi != giochi) {
             lModoGiochi = giochi;
+            lSopraOrdine = false;
             aggiornaAncora(giochi);
             caricaElenco(giochi);
             query.clear(); filtra(); lSopra = -1; lScroll = lScrollObj = 0;
             dirty = true;
+        } else if (giochi) {
+            giroGiochiAttivi = 0;
+            aggiornaGiochiInEsecuzione();
         }
         lChiusura = false; lDirty = true; lRipreso = true;
         // una ricerca dei file arrivata durante la chiusura e' stata scartata: si rifa' (R20261119-195000-S3)
@@ -2102,6 +2247,7 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
         return;
     }
     lModoGiochi = giochi;
+    lSopraOrdine = false;
     caricaElenco(giochi);
     if (!nessunaScheda()) { if (dopo != 1) { chiudiTutte(); apriDopo(1, giochi ? 1 : 0); } return; }
     primaDelLauncher = GetForegroundWindow();
@@ -2173,15 +2319,201 @@ inline auto Motore::posizionaLauncher() -> void {
     dcomp->Commit();
 }
 
+static inline bool processoGiocoIgnorato(const std::wstring& exeMin) {
+    static const wchar_t* const scarta[] = {
+        L"riotclientservices.exe", L"crashhandler", L"crashreporter", L"ue4prereq",
+        L"unins", L"vcredist", L"dxsetup", L"easyanticheat_setup", L"battleye", L"webhelper"
+    };
+    const size_t bar = exeMin.find_last_of(L'\\');
+    const std::wstring nome = (bar == std::wstring::npos) ? exeMin : exeMin.substr(bar + 1);
+    for (const wchar_t* s : scarta) {
+        if (nome.find(s) != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+static inline std::vector<std::pair<DWORD, std::wstring>> elencaProcessiAttivi() {
+    std::vector<std::pair<DWORD, std::wstring>> out;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return out;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(snap, &pe)) {
+        do {
+            if (pe.th32ProcessID <= 4) continue;
+            HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID);
+            if (!hProc) continue;
+            wchar_t buf[1024];
+            DWORD sz = (DWORD)(sizeof(buf) / sizeof(buf[0]));
+            if (QueryFullProcessImageNameW(hProc, 0, buf, &sz) && sz > 0) {
+                std::wstring p = minuscolo(normalizzaPercorso(std::wstring(buf, sz)));
+                if (!processoGiocoIgnorato(p)) out.push_back({pe.th32ProcessID, std::move(p)});
+            }
+            CloseHandle(hProc);
+        } while (Process32NextW(snap, &pe));
+    }
+    CloseHandle(snap);
+    return out;
+}
+
+inline auto Motore::registraAvvioGioco(const AppL& a) -> void {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    ULARGE_INTEGER ui{};
+    ui.LowPart = ft.dwLowDateTime;
+    ui.HighPart = ft.dwHighDateTime;
+    const ULONGLONG nowSec = ui.QuadPart >= 116444736000000000ULL
+        ? (ui.QuadPart - 116444736000000000ULL) / 10000000ULL : 1ULL;
+    const std::wstring chiave = chiaveGioco(a);
+    auto rec = leggiGiochiRecenti();
+    rec[chiave] = nowSec;
+    salvaGiochiRecenti(rec);
+    for (auto& g : tuttiGiochi) {
+        if (chiaveGioco(g) == chiave) g.ultimoAvvio = nowSec;
+    }
+    ordinaGiochi();
+    if (lModoGiochi) filtra();
+}
+
+inline auto Motore::lanciaGioco(const AppL& a) -> void {
+    registraAvvioGioco(a);
+    const std::wstring avvMin = minuscolo(a.avvio);
+    const bool isSteamUri = avvMin.rfind(L"steam://rungameid/", 0) == 0;
+    const bool isUri = a.avvio.find(L"://") != std::wstring::npos;
+    std::wstring target = a.avvio;
+    std::wstring params;
+    const wchar_t* verb = L"open";
+    if (isSteamUri && !a.argomentiExtra.empty()) {
+        target = a.avvio + L"//" + a.argomentiExtra;
+    } else {
+        params = a.argomenti;
+        if (!a.argomentiExtra.empty()) {
+            if (!params.empty()) params.push_back(L' ');
+            params += a.argomentiExtra;
+        }
+        if (a.comeAdmin && !isUri) verb = L"runas";
+    }
+    ShellExecuteW(nullptr, verb, target.c_str(),
+        params.empty() ? nullptr : params.c_str(),
+        a.cartella.empty() ? nullptr : a.cartella.c_str(),
+        SW_SHOWNORMAL);
+}
+
+inline auto Motore::alternaPreferitoGioco(const AppL& a) -> void {
+    const std::wstring chiave = chiaveGioco(a);
+    auto pref = leggiGiochiPreferiti();
+    const bool nuovo = pref.count(chiave) == 0;
+    if (nuovo) pref.insert(chiave);
+    else pref.erase(chiave);
+    salvaGiochiPreferiti(pref);
+    for (auto& g : tuttiGiochi) {
+        if (chiaveGioco(g) == chiave) g.preferito = nuovo;
+    }
+    ordinaGiochi();
+    if (lModoGiochi) filtra();
+    lDirty = true;
+}
+
+inline auto Motore::aggiornaGiochiInEsecuzione() -> void {
+    if (tuttiGiochi.empty()) return;
+    const auto processi = elencaProcessiAttivi();
+    bool cambiato = false;
+    for (auto& g : tuttiGiochi) {
+        DWORD trovato = 0;
+        const bool isExe = finisceCon(g.avvio, L".exe");
+        const std::wstring avvMin = isExe ? minuscolo(normalizzaPercorso(g.avvio)) : L"";
+        const bool checkExe = isExe && !avvMin.empty() && !finisceCon(avvMin, L"\\riotclientservices.exe");
+        std::wstring prefCart;
+        if (!g.cartella.empty()) {
+            prefCart = minuscolo(normalizzaPercorso(g.cartella));
+            if (!prefCart.empty() && prefCart.back() != L'\\') prefCart.push_back(L'\\');
+        }
+        for (const auto& [pid, pExe] : processi) {
+            if (checkExe && pExe == avvMin) { trovato = pid; break; }
+            if (!prefCart.empty() && pExe.size() > prefCart.size() && pExe.compare(0, prefCart.size(), prefCart) == 0) {
+                trovato = pid;
+                break;
+            }
+        }
+        if (g.pidInEsecuzione != trovato) {
+            g.pidInEsecuzione = trovato;
+            cambiato = true;
+        }
+    }
+    if (cambiato) lDirty = true;
+}
+
+inline auto Motore::chiudiGiocoInEsecuzione(const AppL& a, bool forza) -> void {
+    const auto processi = elencaProcessiAttivi();
+    std::unordered_set<DWORD> pids;
+    const bool isExe = finisceCon(a.avvio, L".exe");
+    const std::wstring avvMin = isExe ? minuscolo(normalizzaPercorso(a.avvio)) : L"";
+    const bool checkExe = isExe && !avvMin.empty() && !finisceCon(avvMin, L"\\riotclientservices.exe");
+    std::wstring prefCart;
+    if (!a.cartella.empty()) {
+        prefCart = minuscolo(normalizzaPercorso(a.cartella));
+        if (!prefCart.empty() && prefCart.back() != L'\\') prefCart.push_back(L'\\');
+    }
+    for (const auto& [pid, pExe] : processi) {
+        if ((checkExe && pExe == avvMin) ||
+            (!prefCart.empty() && pExe.size() > prefCart.size() && pExe.compare(0, prefCart.size(), prefCart) == 0)) {
+            pids.insert(pid);
+        }
+    }
+    if (pids.empty()) {
+        aggiornaGiochiInEsecuzione();
+        return;
+    }
+    int inviati = 0;
+    if (!forza) {
+        struct ChiudiCtx {
+            const std::unordered_set<DWORD>* pids;
+            int inviati = 0;
+        } ctx{&pids, 0};
+        EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
+            auto* c = (ChiudiCtx*)lp;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hw, &pid);
+            if (c->pids->count(pid) && GetWindow(hw, GW_OWNER) == nullptr) {
+                PostMessageW(hw, WM_CLOSE, 0, 0);
+                c->inviati++;
+            }
+            return TRUE;
+        }, (LPARAM)&ctx);
+        inviati = ctx.inviati;
+    }
+    if (forza || inviati == 0) {
+        for (DWORD pid : pids) {
+            HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
+            if (hProc) {
+                TerminateProcess(hProc, 1);
+                CloseHandle(hProc);
+            }
+        }
+    }
+    aggiornaGiochiInEsecuzione();
+}
+
 inline auto Motore::avviaApp(int i) -> void {
     if (i < 0 || i >= (int)filtrate.size()) return;
     const AppL a = elencoAttivo()[filtrate[i]];
     primaDelLauncher = nullptr;   // il primo piano va all'app che si apre
     chiudiLauncher();
+    if (lModoGiochi) {
+        lanciaGioco(a);
+        return;
+    }
     ShellExecuteW(nullptr, L"open", a.avvio.c_str(), a.argomenti.empty() ? nullptr : a.argomenti.c_str(), a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
 }
 
 inline auto Motore::rettEnergia() const -> D2D1_RECT_F { return {LW - 64 * dpi, 22 * dpi, LW - 24 * dpi, 62 * dpi}; }
+
+inline auto Motore::rettOrdineGiochi() const -> D2D1_RECT_F {
+    const D2D1_RECT_F re = rettEnergia();
+    const float w = 70 * dpi, h = 32 * dpi, gap = 8 * dpi;
+    const float cy = (re.top + re.bottom) * 0.5f;
+    return {re.left - gap - w, cy - h * 0.5f, re.left - gap, cy + h * 0.5f};
+}
 
 // Menu di Windows per l'app (lo stesso dello Start), con in cima "Aggiungi al dock"
 inline auto Motore::menuApp(int i, POINT pt) -> void {
@@ -2938,6 +3270,625 @@ inline auto Motore::rinominaGioco(const AppL& a) -> void {
         leggiTuttiGiochi(true);
         lDirty = true;
     }
+}
+
+inline auto Motore::opzioniGioco(const AppL& a) -> void {
+    lDialogoAperto = true;
+
+    struct OpzioniGiocoDlg {
+        vetro::Finestra v;
+        std::wstring titolo;
+        std::wstring sottotitolo;
+        std::wstring placeholder;
+        std::wstring testo;
+        bool comeAdmin = false;
+        bool adminDisabilitato = false;
+        int caret = 0;
+        int selIni = 0;
+        int selFin = 0;
+        float scrollX = 0.0f;
+        bool caretVis = true;
+        bool draggingSel = false;
+        bool trackingMouse = false;
+        bool hovSave = false;
+        bool hovCancel = false;
+        bool hovToggle = false;
+        int pressedBtn = 0;
+        bool finito = false;
+        bool confermato = false;
+        ULONGLONG tFade = 0;
+
+        IDWriteTextFormat* fTitolo = nullptr;
+        IDWriteTextFormat* fSotto = nullptr;
+        IDWriteTextFormat* fInput = nullptr;
+        IDWriteTextFormat* fRow = nullptr;
+        IDWriteTextFormat* fBtn = nullptr;
+        ID2D1LinearGradientBrush* sheen = nullptr;
+        unsigned sheenGiro = ~0u;
+
+        static std::wstring trim(const std::wstring& s) {
+            std::wstring pulita;
+            pulita.reserve(s.size());
+            for (wchar_t ch : s) {
+                if (ch != L'\t' && ch != L'\r' && ch != L'\n') pulita.push_back(ch);
+            }
+            const size_t ini = pulita.find_first_not_of(L' ');
+            if (ini == std::wstring::npos) return {};
+            const size_t fin = pulita.find_last_not_of(L' ');
+            return pulita.substr(ini, fin - ini + 1);
+        }
+
+        void aggiornaFormati() {
+            const float s = v.dpi;
+            if (!fTitolo) fTitolo = v.formato(14.5f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            if (!fSotto) fSotto = v.formato(12.0f * s, DWRITE_FONT_WEIGHT_NORMAL);
+            if (!fInput) {
+                fInput = v.formato(13.5f * s);
+                if (fInput) {
+                    DWRITE_TRIMMING tr{ DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0 };
+                    fInput->SetTrimming(&tr, nullptr);
+                }
+            }
+            if (!fRow) fRow = v.formato(13.0f * s, DWRITE_FONT_WEIGHT_NORMAL);
+            if (!fBtn) fBtn = v.formato(13.0f * s, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+        }
+
+        void aggiornaSheen() {
+            if (!v.rt) return;
+            if (sheen && sheenGiro == v.giroRt) return;
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            D2D1_GRADIENT_STOP stops[2]{
+                { 0.0f, D2D1::ColorF(1, 1, 1, v.scuro ? 0.10f : 0.35f) },
+                { 1.0f, D2D1::ColorF(1, 1, 1, 0.0f) }
+            };
+            ID2D1GradientStopCollection* col = nullptr;
+            if (SUCCEEDED(v.rt->CreateGradientStopCollection(stops, 2, &col)) && col) {
+                v.rt->CreateLinearGradientBrush(
+                    D2D1::LinearGradientBrushProperties({ 0, 0 }, { 0, (float)v.H * 0.45f }),
+                    col, &sheen);
+                col->Release();
+            }
+            sheenGiro = v.giroRt;
+        }
+
+        void libera() {
+            if (sheen) { sheen->Release(); sheen = nullptr; }
+            if (fTitolo) { fTitolo->Release(); fTitolo = nullptr; }
+            if (fSotto) { fSotto->Release(); fSotto = nullptr; }
+            if (fInput) { fInput->Release(); fInput = nullptr; }
+            if (fRow) { fRow->Release(); fRow = nullptr; }
+            if (fBtn) { fBtn->Release(); fBtn = nullptr; }
+        }
+
+        D2D1_RECT_F rectInput() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s;
+            return { pad, 66.0f * s, (float)v.W - pad, 104.0f * s };
+        }
+
+        D2D1_RECT_F rectToggleRow() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s;
+            return { pad, 118.0f * s, (float)v.W - pad, 154.0f * s };
+        }
+
+        D2D1_RECT_F rectTogglePill() const {
+            const float s = v.dpi;
+            const D2D1_RECT_F row = rectToggleRow();
+            const float pw = 42.0f * s, ph = 24.0f * s;
+            const float cy = (row.top + row.bottom) * 0.5f;
+            return { row.right - pw, cy - ph * 0.5f, row.right, cy + ph * 0.5f };
+        }
+
+        D2D1_RECT_F rectCancel() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s, btnW = 86.0f * s, btnH = 32.0f * s, gap = 10.0f * s;
+            const float y = (float)v.H - pad - btnH;
+            const float x = (float)v.W - pad - 2.0f * btnW - gap;
+            return { x, y, x + btnW, y + btnH };
+        }
+
+        D2D1_RECT_F rectSave() const {
+            const float s = v.dpi;
+            const float pad = 18.0f * s, btnW = 86.0f * s, btnH = 32.0f * s;
+            const float y = (float)v.H - pad - btnH;
+            const float x = (float)v.W - pad - btnW;
+            return { x, y, x + btnW, y + btnH };
+        }
+
+        static bool dentro(const D2D1_RECT_F& r, float x, float y) {
+            return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        }
+
+        IDWriteTextLayout* creaLayoutInput() const {
+            if (!v.fdw || !fInput) return nullptr;
+            IDWriteTextLayout* layout = nullptr;
+            const D2D1_RECT_F ri = rectInput();
+            v.fdw->CreateTextLayout(testo.c_str(), (UINT32)testo.size(), fInput, 10000.0f, ri.bottom - ri.top, &layout);
+            return layout;
+        }
+
+        int posDaPunto(float px) {
+            IDWriteTextLayout* layout = creaLayoutInput();
+            if (!layout) return (int)testo.size();
+            const float s = v.dpi;
+            const D2D1_RECT_F ri = rectInput();
+            const float textX = ri.left + 11.0f * s;
+            DWRITE_HIT_TEST_METRICS htm{};
+            BOOL isTrailing = FALSE, isInside = FALSE;
+            layout->HitTestPoint(px - (textX - scrollX), (ri.bottom - ri.top) * 0.5f, &isTrailing, &isInside, &htm);
+            layout->Release();
+            const int pos = (int)htm.textPosition + (isTrailing ? 1 : 0);
+            return std::clamp(pos, 0, (int)testo.size());
+        }
+
+        void eliminaSelezione() {
+            if (selIni == selFin) return;
+            const int lo = std::min(selIni, selFin);
+            const int hi = std::max(selIni, selFin);
+            testo.erase((size_t)lo, (size_t)(hi - lo));
+            caret = selIni = selFin = lo;
+        }
+
+        void resetBlink(HWND h) {
+            caretVis = true;
+            SetTimer(h, 1, 530, nullptr);
+            InvalidateRect(h, nullptr, FALSE);
+        }
+
+        void copiaSelezione(HWND h) const {
+            if (selIni == selFin) return;
+            const int lo = std::min(selIni, selFin);
+            const int hi = std::max(selIni, selFin);
+            const std::wstring sub = testo.substr((size_t)lo, (size_t)(hi - lo));
+            if (sub.empty() || !OpenClipboard(h)) return;
+            EmptyClipboard();
+            const SIZE_T bytes = (sub.size() + 1) * sizeof(wchar_t);
+            HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            if (hg) {
+                if (void* p = GlobalLock(hg)) {
+                    memcpy(p, sub.c_str(), bytes);
+                    GlobalUnlock(hg);
+                }
+                SetClipboardData(CF_UNICODETEXT, hg);
+            }
+            CloseClipboard();
+        }
+
+        void incolla(HWND h) {
+            if (!IsClipboardFormatAvailable(CF_UNICODETEXT) || !OpenClipboard(h)) return;
+            HANDLE hd = GetClipboardData(CF_UNICODETEXT);
+            std::wstring ins;
+            if (hd) {
+                if (const wchar_t* p = (const wchar_t*)GlobalLock(hd)) {
+                    for (const wchar_t* q = p; *q; ++q) {
+                        if (*q != L'\t' && *q != L'\r' && *q != L'\n') ins.push_back(*q);
+                    }
+                    GlobalUnlock(hd);
+                }
+            }
+            CloseClipboard();
+            if (!ins.empty()) {
+                eliminaSelezione();
+                testo.insert((size_t)caret, ins);
+                caret += (int)ins.size();
+                selIni = selFin = caret;
+                resetBlink(h);
+            }
+        }
+
+        void disegna() {
+            if (!v.inizia(0.82f)) return;
+            aggiornaFormati();
+            aggiornaSheen();
+
+            const float s = v.dpi;
+            const float rad = v.raggio();
+            if (sheen) {
+                v.rt->FillRoundedRectangle(
+                    D2D1::RoundedRect({ 0, 0, (float)v.W, (float)v.H }, rad, rad),
+                    sheen);
+            }
+
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, v.scuro ? 0.18f : 0.70f));
+            v.rt->DrawRoundedRectangle(
+                D2D1::RoundedRect({ 0.5f, 0.5f, (float)v.W - 0.5f, (float)v.H - 0.5f },
+                    std::max(0.0f, rad - 0.5f), std::max(0.0f, rad - 0.5f)),
+                v.pen, 1.0f);
+
+            const float pad = 18.0f * s;
+            v.testo(titolo, fTitolo, { pad, 16.0f * s, (float)v.W - pad, 38.0f * s }, v.inchiostro());
+            v.testo(sottotitolo, fSotto, { pad, 38.0f * s, (float)v.W - pad, 56.0f * s }, v.inchiostro(0.65f));
+
+            const D2D1_RECT_F ri = rectInput();
+            const float inRad = 10.0f * s;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.68f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(ri, inRad, inRad), v.pen);
+            v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.85f));
+            v.rt->DrawRoundedRectangle(D2D1::RoundedRect(ri, inRad, inRad), v.pen, 1.5f * s);
+
+            const float textX = ri.left + 11.0f * s;
+            const float textR = ri.right - 11.0f * s;
+            const float innerW = std::max(1.0f, textR - textX);
+            if (testo.empty()) {
+                v.testo(placeholder, fInput, { textX, ri.top, textR, ri.bottom }, v.inchiostro(0.45f));
+                if (caretVis) {
+                    v.pen->SetColor(v.inchiostro());
+                    v.rt->DrawLine({ textX, ri.top + 7.5f * s }, { textX, ri.bottom - 7.5f * s }, v.pen, 1.5f * s);
+                }
+            } else if (IDWriteTextLayout* layout = creaLayoutInput()) {
+                FLOAT cx = 0, cy = 0;
+                DWRITE_HIT_TEST_METRICS cm{};
+                layout->HitTestTextPosition((UINT32)caret, FALSE, &cx, &cy, &cm);
+
+                DWRITE_TEXT_METRICS tm{};
+                layout->GetMetrics(&tm);
+                if (tm.widthIncludingTrailingWhitespace <= innerW) {
+                    scrollX = 0.0f;
+                } else {
+                    if (cx - scrollX > innerW - 2.0f * s) scrollX = cx - (innerW - 2.0f * s);
+                    if (cx - scrollX < 0.0f) scrollX = cx;
+                    scrollX = std::clamp(scrollX, 0.0f, std::max(0.0f, tm.widthIncludingTrailingWhitespace - innerW + 2.0f * s));
+                }
+
+                v.rt->PushAxisAlignedClip({ textX - 1.0f, ri.top + 2.0f * s, textR + 1.0f, ri.bottom - 2.0f * s },
+                    D2D1_ANTIALIAS_MODE_ALIASED);
+
+                if (selIni != selFin) {
+                    const int lo = std::min(selIni, selFin);
+                    const int hi = std::max(selIni, selFin);
+                    FLOAT x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+                    DWRITE_HIT_TEST_METRICS m0{}, m1{};
+                    layout->HitTestTextPosition((UINT32)lo, FALSE, &x0, &y0, &m0);
+                    layout->HitTestTextPosition((UINT32)hi, FALSE, &x1, &y1, &m1);
+                    v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.34f));
+                    v.rt->FillRectangle({ textX + x0 - scrollX, ri.top + 7.0f * s, textX + x1 - scrollX, ri.bottom - 7.0f * s }, v.pen);
+                }
+
+                v.pen->SetColor(v.inchiostro());
+                v.rt->DrawTextLayout({ textX - scrollX, ri.top }, layout, v.pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+
+                if (caretVis) {
+                    const float kx = textX + cx - scrollX;
+                    v.pen->SetColor(v.inchiostro());
+                    v.rt->DrawLine({ kx, ri.top + 7.5f * s }, { kx, ri.bottom - 7.5f * s }, v.pen, 1.5f * s);
+                }
+
+                v.rt->PopAxisAlignedClip();
+                layout->Release();
+            }
+
+            const D2D1_RECT_F row = rectToggleRow();
+            const D2D1_RECT_F pill = rectTogglePill();
+            const float dim = adminDisabilitato ? 0.38f : 1.0f;
+            if (hovToggle && !adminDisabilitato) {
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                v.rt->FillRoundedRectangle(D2D1::RoundedRect({ row.left - 6.0f * s, row.top, row.right + 6.0f * s, row.bottom }, 8.0f * s, 8.0f * s), v.pen);
+            }
+            v.testo(testi::t(L"Esegui come amministratore", L"Run as administrator"), fRow,
+                { row.left, row.top, pill.left - 12.0f * s, row.bottom }, v.inchiostro(dim));
+
+            const float pr = (pill.bottom - pill.top) * 0.5f;
+            const bool acceso = comeAdmin && !adminDisabilitato;
+            if (acceso) {
+                v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.95f * dim));
+            } else {
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * dim) : D2D1::ColorF(0, 0, 0, 0.16f * dim));
+            }
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(pill, pr, pr), v.pen);
+            const float knobR = pr - 3.0f * s;
+            const float knobCx = acceso ? (pill.right - pr) : (pill.left + pr);
+            const float knobCy = (pill.top + pill.bottom) * 0.5f;
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, 0.96f * dim));
+            v.rt->FillEllipse({ { knobCx, knobCy }, knobR, knobR }, v.pen);
+
+            const D2D1_RECT_F rc = rectCancel();
+            const float btnRad = 9.0f * s;
+            v.pen->SetColor(v.scuro
+                ? D2D1::ColorF(1, 1, 1, hovCancel ? 0.18f : 0.10f)
+                : D2D1::ColorF(0, 0, 0, hovCancel ? 0.10f : 0.05f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(rc, btnRad, btnRad), v.pen);
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.16f) : D2D1::ColorF(0, 0, 0, 0.10f));
+            v.rt->DrawRoundedRectangle(D2D1::RoundedRect(rc, btnRad, btnRad), v.pen, 1.0f);
+            v.testo(testi::t(L"Annulla", L"Cancel"), fBtn, rc, v.inchiostro());
+
+            const D2D1_RECT_F rs = rectSave();
+            v.pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, hovSave ? 1.0f : 0.90f));
+            v.rt->FillRoundedRectangle(D2D1::RoundedRect(rs, btnRad, btnRad), v.pen);
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, 0.28f));
+            v.rt->DrawLine({ rs.left + btnRad, rs.top + 0.75f }, { rs.right - btnRad, rs.top + 0.75f }, v.pen, 1.0f);
+            v.testo(testi::t(L"Salva", L"Save"), fBtn, rs, D2D1::ColorF(1, 1, 1, 1.0f));
+
+            v.finisci();
+        }
+
+        bool messaggio(HWND h, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+            switch (m) {
+                case WM_PAINT:
+                    disegna();
+                    return true;
+                case WM_TIMER:
+                    if (w == 1) {
+                        caretVis = !caretVis;
+                        InvalidateRect(h, nullptr, FALSE);
+                        return true;
+                    }
+                    if (w == 2) {
+                        const double p = std::clamp((double)(GetTickCount64() - tFade) / 140.0, 0.0, 1.0);
+                        v.alfa(vetro::uscita(p));
+                        if (p >= 1.0) KillTimer(h, 2);
+                        return true;
+                    }
+                    return false;
+                case WM_CHAR: {
+                    if (w == 0x01) {
+                        selIni = 0;
+                        selFin = caret = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == 0x03) {
+                        copiaSelezione(h);
+                        return true;
+                    }
+                    if (w == 0x18) {
+                        copiaSelezione(h);
+                        eliminaSelezione();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == 0x16) {
+                        incolla(h);
+                        return true;
+                    }
+                    if (w == L'\b') {
+                        if (selIni != selFin) {
+                            eliminaSelezione();
+                        } else if (caret > 0) {
+                            testo.erase((size_t)(caret - 1), 1);
+                            caret--;
+                            selIni = selFin = caret;
+                        }
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w >= 32) {
+                        eliminaSelezione();
+                        testo.insert((size_t)caret, 1, (wchar_t)w);
+                        caret++;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_KEYDOWN:
+                    if (w == VK_RETURN) {
+                        confermato = true;
+                        finito = true;
+                        return true;
+                    }
+                    if (w == VK_ESCAPE) {
+                        finito = true;
+                        return true;
+                    }
+                    if (w == VK_LEFT) {
+                        if (selIni != selFin) caret = std::min(selIni, selFin);
+                        else if (caret > 0) caret--;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_RIGHT) {
+                        if (selIni != selFin) caret = std::max(selIni, selFin);
+                        else if (caret < (int)testo.size()) caret++;
+                        selIni = selFin = caret;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_HOME) {
+                        caret = selIni = selFin = 0;
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_END) {
+                        caret = selIni = selFin = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (w == VK_DELETE) {
+                        if (selIni != selFin) {
+                            eliminaSelezione();
+                        } else if (caret < (int)testo.size()) {
+                            testo.erase((size_t)caret, 1);
+                            selIni = selFin = caret;
+                        }
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                case WM_MOUSEMOVE: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (draggingSel) {
+                        caret = selFin = posDaPunto(mx);
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (!trackingMouse) {
+                        TRACKMOUSEEVENT tme{ sizeof(tme), TME_LEAVE, h, 0 };
+                        trackingMouse = TrackMouseEvent(&tme) != FALSE;
+                    }
+                    const bool hs = dentro(rectSave(), mx, my);
+                    const bool hc = dentro(rectCancel(), mx, my);
+                    const bool ht = !adminDisabilitato && dentro(rectToggleRow(), mx, my);
+                    if (hs != hovSave || hc != hovCancel || ht != hovToggle) {
+                        hovSave = hs;
+                        hovCancel = hc;
+                        hovToggle = ht;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                }
+                case WM_MOUSELEAVE:
+                    trackingMouse = false;
+                    if (hovSave || hovCancel || hovToggle) {
+                        hovSave = hovCancel = hovToggle = false;
+                        InvalidateRect(h, nullptr, FALSE);
+                    }
+                    return true;
+                case WM_LBUTTONDOWN: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (dentro(rectInput(), mx, my)) {
+                        caret = selIni = selFin = posDaPunto(mx);
+                        draggingSel = true;
+                        SetCapture(h);
+                        resetBlink(h);
+                        return true;
+                    }
+                    if (!adminDisabilitato && dentro(rectToggleRow(), mx, my)) {
+                        pressedBtn = 3;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (dentro(rectCancel(), mx, my)) {
+                        pressedBtn = 1;
+                        SetCapture(h);
+                        return true;
+                    }
+                    if (dentro(rectSave(), mx, my)) {
+                        pressedBtn = 2;
+                        SetCapture(h);
+                        return true;
+                    }
+                    ReleaseCapture();
+                    SendMessageW(h, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+                    return true;
+                }
+                case WM_LBUTTONUP: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (draggingSel) {
+                        draggingSel = false;
+                        ReleaseCapture();
+                        return true;
+                    }
+                    if (pressedBtn != 0) {
+                        const int btn = pressedBtn;
+                        pressedBtn = 0;
+                        ReleaseCapture();
+                        if (btn == 1 && dentro(rectCancel(), mx, my)) {
+                            finito = true;
+                        } else if (btn == 2 && dentro(rectSave(), mx, my)) {
+                            confermato = true;
+                            finito = true;
+                        } else if (btn == 3 && !adminDisabilitato && dentro(rectToggleRow(), mx, my)) {
+                            comeAdmin = !comeAdmin;
+                            InvalidateRect(h, nullptr, FALSE);
+                        }
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_LBUTTONDBLCLK: {
+                    const float mx = (float)(short)LOWORD(l);
+                    const float my = (float)(short)HIWORD(l);
+                    if (dentro(rectInput(), mx, my)) {
+                        selIni = 0;
+                        selFin = caret = (int)testo.size();
+                        resetBlink(h);
+                        return true;
+                    }
+                    return false;
+                }
+                case WM_CLOSE:
+                    finito = true;
+                    r = 0;
+                    return true;
+            }
+            return false;
+        }
+    } dlg;
+
+    dlg.titolo = testi::t(L"Proprietà gioco", L"Game properties");
+    dlg.sottotitolo = a.nome;
+    dlg.placeholder = testi::t(L"Argomenti di avvio (es. -novid -dx12)", L"Launch arguments (e.g. -novid -dx12)");
+    dlg.testo = a.argomentiExtra;
+    dlg.adminDisabilitato = a.avvio.find(L"://") != std::wstring::npos;
+    dlg.comeAdmin = dlg.adminDisabilitato ? false : a.comeAdmin;
+    dlg.selIni = dlg.selFin = dlg.caret = (int)dlg.testo.size();
+
+    const wchar_t* clsName = L"FluidWin.OpzioniGioco";
+    WNDCLASSW wc{};
+    if (!GetClassInfoW(GetModuleHandleW(nullptr), clsName, &wc)) {
+        wc.style = CS_DBLCLKS;
+        wc.lpfnWndProc = vetro::procedura<OpzioniGiocoDlg>;
+        wc.hInstance = GetModuleHandleW(nullptr);
+        wc.lpszClassName = clsName;
+        wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+        RegisterClassW(&wc);
+    }
+
+    if (dlg.v.crea(clsName, vetro::procedura<OpzioniGiocoDlg>, &dlg, true, 2, true, true)) {
+        const int W = (int)std::lround(430.0f * dpi);
+        const int H = (int)std::lround(226.0f * dpi);
+        RECT rl{};
+        GetWindowRect(launcher, &rl);
+        int wx = rl.left + ((rl.right - rl.left) - W) / 2;
+        int wy = rl.top + ((rl.bottom - rl.top) - H) / 2;
+        MONITORINFO mi{ sizeof(mi) };
+        if (GetMonitorInfoW(MonitorFromWindow(launcher, MONITOR_DEFAULTTONEAREST), &mi)) {
+            wx = std::clamp(wx, (int)mi.rcWork.left, std::max((int)mi.rcWork.left, (int)mi.rcWork.right - W));
+            wy = std::clamp(wy, (int)mi.rcWork.top, std::max((int)mi.rcWork.top, (int)mi.rcWork.bottom - H));
+        }
+
+        dlg.v.posiziona(wx, wy, W, H, HWND_TOPMOST, 0);
+        EnableWindow(launcher, FALSE);
+        dlg.tFade = GetTickCount64();
+        ShowWindow(dlg.v.fin, SW_SHOW);
+        SetForegroundWindow(dlg.v.fin);
+        SetFocus(dlg.v.fin);
+        SetTimer(dlg.v.fin, 1, 530, nullptr);
+        SetTimer(dlg.v.fin, 2, 16, nullptr);
+        InvalidateRect(dlg.v.fin, nullptr, FALSE);
+
+        MSG msg{};
+        while (!dlg.finito && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                break;
+            }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+
+        if (dlg.confermato) {
+            const std::wstring chiave = chiaveGioco(a);
+            const std::wstring args = OpzioniGiocoDlg::trim(dlg.testo);
+            const bool admin = dlg.adminDisabilitato ? false : dlg.comeAdmin;
+            auto opt = leggiOpzioniGiochi();
+            if (!admin && args.empty()) opt.erase(chiave);
+            else opt[chiave] = {admin, args};
+            salvaOpzioniGiochi(opt);
+            for (auto& g : tuttiGiochi) {
+                if (chiaveGioco(g) == chiave) {
+                    g.comeAdmin = admin;
+                    g.argomentiExtra = args;
+                }
+            }
+        }
+
+        KillTimer(dlg.v.fin, 1);
+        KillTimer(dlg.v.fin, 2);
+        EnableWindow(launcher, TRUE);
+    }
+
+    dlg.libera();
+    dlg.v.chiudi();
+
+    lDialogoAperto = false;
+    if (lAperto && !lChiusura) prendiFuoco(launcher);
 }
 
 inline auto Motore::impostaChiaveSteamGridDB() -> void {
@@ -3698,6 +4649,11 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         menu::titolo(a.nome),
         menu::voce(testi::t(L"Gioca", L"Play"), 1)
     };
+    if (a.pidInEsecuzione != 0)
+        vv.push_back(menu::voce(testi::t(L"Chiudi gioco", L"Close game"), 13));
+    vv.push_back(menu::voce(
+        a.preferito ? testi::t(L"Rimuovi dai preferiti", L"Remove from Favorites")
+                    : testi::t(L"Aggiungi ai preferiti", L"Pin to Favorites"), 11));
     if (isExe || isLnk || isUri)
         vv.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 2));
     if (hasCartella || hasFile)
@@ -3709,6 +4665,7 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     vv.push_back(menu::voce(testi::t(L"Rinomina…", L"Rename…"), 8));
     if (a.nomePers)
         vv.push_back(menu::voce(testi::t(L"Ripristina nome", L"Reset name"), 9));
+    vv.push_back(menu::voce(testi::t(L"Proprietà…", L"Properties…"), 12));
     vv.push_back(menu::separatore());
     if (a.manuale)
         vv.push_back(menu::voce(testi::t(L"Rimuovi dai giochi", L"Remove from Games"), 4));
@@ -3719,7 +4676,14 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
     if (cmd == 1) {
         primaDelLauncher = nullptr;
         chiudiLauncher();
-        ShellExecuteW(nullptr, L"open", a.avvio.c_str(), a.argomenti.empty() ? nullptr : a.argomenti.c_str(), a.cartella.empty() ? nullptr : a.cartella.c_str(), SW_SHOWNORMAL);
+        lanciaGioco(a);
+    } else if (cmd == 13) {
+        const bool forza = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        chiudiGiocoInEsecuzione(a, forza);
+    } else if (cmd == 11) {
+        alternaPreferitoGioco(a);
+    } else if (cmd == 12) {
+        opzioniGioco(a);
     } else if (cmd == 2) {
         if (isExe) {
             aggiungiAlDock(a.nome, a.avvio, L"", a.avvio, a.iconaFile, a.argomenti);
@@ -3769,6 +4733,12 @@ inline auto Motore::menuGioco(int i, POINT pt) -> void {
         salvaGiochiAggiunti(el);
         auto nm = leggiNomiGiochi();
         if (nm.erase(chiave) > 0) salvaNomiGiochi(nm);
+        auto pf = leggiGiochiPreferiti();
+        if (pf.erase(chiave) > 0) salvaGiochiPreferiti(pf);
+        auto rc = leggiGiochiRecenti();
+        if (rc.erase(chiave) > 0) salvaGiochiRecenti(rc);
+        auto op = leggiOpzioniGiochi();
+        if (op.erase(chiave) > 0) salvaOpzioniGiochi(op);
         leggiTuttiGiochi(true);
     } else if (cmd == 5) {
         auto n = leggiGiochiNascosti();
@@ -4003,8 +4973,18 @@ inline auto Motore::renderLauncher() -> bool {
             simboloEnergia(cx, cy);
         }
     }
+    if (lModoGiochi) {
+        const D2D1_RECT_F ro = rettOrdineGiochi();
+        const float pr = (ro.bottom - ro.top) * 0.5f;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, lSopraOrdine ? 0.18f : 0.10f) : D2D1::ColorF(1, 1, 1, lSopraOrdine ? 0.85f : 0.6f));
+        dc->FillRoundedRectangle({ro, pr, pr}, pennello);
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, lSopraOrdine ? 0.24f : 0.14f) : D2D1::ColorF(0, 0, 0, 0.08f));
+        dc->DrawRoundedRectangle({ro, pr, pr}, pennello, 1.0f);
+        pennello->SetColor(ink);
+        scrivi(lOrdineRecenti ? testi::t(L"Recenti", L"Recent") : L"A-Z", testo, ro);
+    }
     // campo di ricerca
-    const D2D1_RECT_F rc = {24 * dpi, 22 * dpi, rettEnergia().left - 10 * dpi, 62 * dpi};
+    const D2D1_RECT_F rc = {24 * dpi, 22 * dpi, (lModoGiochi ? rettOrdineGiochi().left : rettEnergia().left) - 10 * dpi, 62 * dpi};
     pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.6f));
     dc->FillRoundedRectangle({rc, 10 * dpi, 10 * dpi}, pennello);
     pennello->SetColor({ink.r, ink.g, ink.b, 0.55f});
@@ -4041,6 +5021,41 @@ inline auto Motore::renderLauncher() -> bool {
         const D2D1_RECT_F ri = {cx - lato / 2, r.top + 12 * dpi, cx + lato / 2, r.top + 12 * dpi + lato};
         if (a.icona) dc->DrawBitmap(a.icona, ri, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
         else { pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.5f)); dc->FillRoundedRectangle({ri, lato * 0.22f, lato * 0.22f}, pennello); }
+        if (lModoGiochi && a.preferito) {
+            const float sx = ri.left + 6 * dpi, sy = ri.top + 6 * dpi;
+            const float rOut = 6.2f * dpi, rIn = 2.7f * dpi;
+            pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.42f));
+            dc->FillEllipse({{sx, sy}, rOut + 1.4f * dpi, rOut + 1.4f * dpi}, pennello);
+            ID2D1PathGeometry* stella = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&stella)) && stella) {
+                ID2D1GeometrySink* sink = nullptr;
+                if (SUCCEEDED(stella->Open(&sink)) && sink) {
+                    const float pi = 3.14159265f;
+                    for (int k = 0; k < 10; k++) {
+                        const float ang = -pi * 0.5f + k * (pi / 5.0f);
+                        const float rad = (k % 2 == 0) ? rOut : rIn;
+                        const D2D1_POINT_2F pt = D2D1::Point2F(sx + std::cos(ang) * rad, sy + std::sin(ang) * rad);
+                        if (k == 0) sink->BeginFigure(pt, D2D1_FIGURE_BEGIN_FILLED);
+                        else sink->AddLine(pt);
+                    }
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                    sink->Release();
+                    pennello->SetColor(D2D1::ColorF(1.0f, 0.78f, 0.16f, 0.98f));
+                    dc->FillGeometry(stella, pennello);
+                }
+                stella->Release();
+            }
+        }
+        if (lModoGiochi && a.pidInEsecuzione != 0) {
+            const float rx = ri.right - 5 * dpi, ry = ri.top + 5 * dpi;
+            pennello->SetColor(D2D1::ColorF(0.18f, 0.85f, 0.40f, 0.34f));
+            dc->FillEllipse({{rx, ry}, 7.0f * dpi, 7.0f * dpi}, pennello);
+            pennello->SetColor(D2D1::ColorF(0.18f, 0.86f, 0.42f, 1.0f));
+            dc->FillEllipse({{rx, ry}, 4.5f * dpi, 4.5f * dpi}, pennello);
+            pennello->SetColor(scuro ? D2D1::ColorF(0.08f, 0.10f, 0.12f, 0.85f) : D2D1::ColorF(1, 1, 1, 0.92f));
+            dc->DrawEllipse({{rx, ry}, 4.5f * dpi, 4.5f * dpi}, pennello, 1.2f * dpi);
+        }
         pennello->SetColor(ink);
         scrivi(a.nome, fmtNome, {r.left + 6 * dpi, ri.bottom + 6 * dpi, r.right - 6 * dpi, ri.bottom + 24 * dpi});
     }
@@ -4109,9 +5124,12 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             const D2D1_RECT_F re = d->rettEnergia();
             const bool e = x >= re.left && x < re.right && y >= re.top && y < re.bottom;
             if (e != d->lSopraEnergia) { d->lSopraEnergia = e; d->lDirty = true; }
+            const D2D1_RECT_F ro = d->rettOrdineGiochi();
+            const bool o = d->lModoGiochi && x >= ro.left && x < ro.right && y >= ro.top && y < ro.bottom;
+            if (o != d->lSopraOrdine) { d->lSopraOrdine = o; d->lDirty = true; }
             return 0;
         }
-        case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraFile = -1; d->lSopraEnergia = false; d->lSopraBarra = false; d->lDirty = true; return 0;
+        case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraFile = -1; d->lSopraEnergia = false; d->lSopraOrdine = false; d->lSopraBarra = false; d->lDirty = true; return 0;
         case WM_TIMER:
             if (w == TIMER_FILE_L) { KillTimer(h, TIMER_FILE_L); d->cercaFileLauncher(); return 0; }
             break;
@@ -4119,6 +5137,17 @@ inline LRESULT CALLBACK Motore::procLauncher(HWND h, UINT m, WPARAM w, LPARAM l)
             if (d->lTrascinoBarra) { d->lTrascinoBarra = false; ReleaseCapture(); d->lDirty = true; return 0; }
             { const D2D1_RECT_F b = d->lRettBarra(); if (d->lScrollMax() > 0 && x >= b.left && x < b.right && y >= b.top && y < b.bottom) return 0; }
             if (y > d->LH) { d->chiudiLauncher(); return 0; }   // clic sotto (durante l'animazione): chiude
+            if (d->lModoGiochi) {
+                const D2D1_RECT_F ro = d->rettOrdineGiochi();
+                if (x >= ro.left && x < ro.right && y >= ro.top && y < ro.bottom) {
+                    d->lOrdineRecenti = !d->lOrdineRecenti;
+                    salvaOrdineRecenti(d->lOrdineRecenti);
+                    d->ordinaGiochi();
+                    d->filtra();
+                    d->lDirty = true;
+                    return 0;
+                }
+            }
             if (d->lSopraEnergia) {
                 if (d->lModoGiochi) { d->aggiungiGiocoDialogo(); return 0; }
                 POINT p{(LONG)x, (LONG)y}; ClientToScreen(h, &p); d->menuEnergia(p); return 0;
