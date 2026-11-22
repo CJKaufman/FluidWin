@@ -1214,6 +1214,15 @@ private:
         aggiornaApp();
     }
 
+    void scegliIconaOnlinePila(const std::wstring& cartella, const std::wstring& nome) {
+        std::wstring scelto;
+        if (!pila::scegliIconaOnlinePila(icone, nome, scelto) || scelto.empty()) return;
+        const std::wstring lc = minuscolo(cartella);
+        for (auto& ps : pilePers) if (minuscolo(ps.percorso) == lc) { ps.icona = scelto; break; }
+        salvaPilePers();
+        aggiornaApp();
+    }
+
     void cambiaIconaPila(const std::wstring& cartella) {
         wchar_t buf[32768] = L"";
         OPENFILENAMEW ofn{};
@@ -4458,6 +4467,7 @@ private:
                 menu::voce(testi::t(L"Apri la cartella", L"Open folder"), 1),
                 menu::voce(testi::t(L"Aggiungi elemento…", L"Add item…"), 2),
                 menu::voce(testi::t(L"Rinomina…", L"Rename…"), 3),
+                menu::voce(testi::t(L"Scegli icona online…", L"Fetch icon online…"), 7),
                 menu::voce(testi::t(L"Cambia icona…", L"Change icon…"), 5),
             };
             if (!v.iconaFile.empty()) vv.push_back(menu::voce(testi::t(L"Ripristina icona", L"Reset icon"), 6));
@@ -4485,6 +4495,8 @@ private:
                     salvaPilePers();
                     aggiornaApp();
                 }
+            } else if (s == 7) {
+                scegliIconaOnlinePila(cartella, v.nome);
             } else if (s == 5) {
                 cambiaIconaPila(cartella);
             } else if (s == 6) {

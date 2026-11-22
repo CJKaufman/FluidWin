@@ -10,12 +10,18 @@
 #include <shlobj.h>
 #include <shellapi.h>
 #include <windowsx.h>
+#include <winhttp.h>
+#include <wincodec.h>
 #include <vector>
 #include <string>
 #include <algorithm>
 #include <memory>
 #include <thread>
 #include <mutex>
+#include <atomic>
+#include <deque>
+#include <unordered_set>
+#include <cctype>
 #include <cwctype>
 
 namespace pila {
@@ -315,6 +321,1067 @@ inline bool chiediNomePila(HWND genitore, const std::wstring& titolo, const std:
     for (IDWriteTextFormat* f : {pr.fTitolo, pr.fInput, pr.fBtn}) if (f) f->Release();
     pr.v.chiudi();
     if (pr.confermato) { out = Prompt::trim(pr.testo); return !out.empty(); }
+    return false;
+}
+
+inline std::wstring cartellaIconePile() {
+    PWSTR p = nullptr;
+    std::wstring base;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &p)) && p) base = p;
+    CoTaskMemFree(p);
+    if (base.empty()) return L"";
+    const std::wstring rad = base + L"\\FluidWin";
+    CreateDirectoryW(rad.c_str(), nullptr);
+    const std::wstring dir = rad + L"\\IconePile";
+    CreateDirectoryW(dir.c_str(), nullptr);
+    return dir;
+}
+
+inline bool scriviAtomico(const std::wstring& dest, const void* dati, size_t n) {
+    if (dest.empty() || !dati || n == 0) return false;
+    const std::wstring tmp = dest + L".tmp";
+    HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool ok = true;
+    size_t scritti = 0;
+    while (scritti < n) {
+        const DWORD chunk = (DWORD)std::min<size_t>(n - scritti, 1u << 20);
+        DWORD w = 0;
+        if (!WriteFile(h, (const BYTE*)dati + scritti, chunk, &w, nullptr) || w == 0) { ok = false; break; }
+        scritti += w;
+    }
+    CloseHandle(h);
+    if (!ok) { DeleteFileW(tmp.c_str()); return false; }
+    if (!MoveFileExW(tmp.c_str(), dest.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+inline std::string httpPrendi(const std::wstring& url, size_t maxBytes = 4 * 1024 * 1024) {
+    URL_COMPONENTSW uc{};
+    uc.dwStructSize = sizeof(uc);
+    uc.dwHostNameLength = (DWORD)-1;
+    uc.dwUrlPathLength = (DWORD)-1;
+    uc.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(url.c_str(), (DWORD)url.size(), 0, &uc)) return {};
+    if (uc.nScheme != INTERNET_SCHEME_HTTPS || !uc.lpszHostName || !uc.dwHostNameLength) return {};
+    const std::wstring host(uc.lpszHostName, uc.dwHostNameLength);
+    std::wstring path = (uc.lpszUrlPath && uc.dwUrlPathLength)
+        ? std::wstring(uc.lpszUrlPath, uc.dwUrlPathLength) : L"/";
+    if (uc.lpszExtraInfo && uc.dwExtraInfoLength) path.append(uc.lpszExtraInfo, uc.dwExtraInfoLength);
+
+    struct HttpRaii {
+        HINTERNET s = nullptr, c = nullptr, r = nullptr;
+        ~HttpRaii() {
+            if (r) WinHttpCloseHandle(r);
+            if (c) WinHttpCloseHandle(c);
+            if (s) WinHttpCloseHandle(s);
+        }
+    } h;
+
+    h.s = WinHttpOpen(L"FluidWin/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, nullptr, nullptr, 0);
+    if (!h.s) return {};
+    WinHttpSetTimeouts(h.s, 5000, 5000, 8000, 12000);
+    h.c = WinHttpConnect(h.s, host.c_str(), uc.nPort, 0);
+    if (!h.c) return {};
+    h.r = WinHttpOpenRequest(h.c, L"GET", path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                             WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
+    if (!h.r) return {};
+    if (!WinHttpSendRequest(h.r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) ||
+        !WinHttpReceiveResponse(h.r, nullptr)) return {};
+
+    DWORD stato = 0, ls = sizeof(stato);
+    if (!WinHttpQueryHeaders(h.r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                             WINHTTP_HEADER_NAME_BY_INDEX, &stato, &ls, WINHTTP_NO_HEADER_INDEX) || stato != 200)
+        return {};
+
+    std::string out;
+    for (;;) {
+        DWORD avail = 0;
+        if (!WinHttpQueryDataAvailable(h.r, &avail)) return {};
+        if (avail == 0) break;
+        if (out.size() + avail > maxBytes) return {};
+        const size_t prev = out.size();
+        out.resize(prev + avail);
+        DWORD letti = 0;
+        if (!WinHttpReadData(h.r, out.data() + prev, avail, &letti)) return {};
+        out.resize(prev + letti);
+        if (letti == 0) break;
+    }
+    return out;
+}
+
+inline std::vector<std::string> caricaIndiceIcone() {
+    static std::mutex mx;
+    static std::vector<std::string> cache;
+    std::lock_guard<std::mutex> lk(mx);
+    if (!cache.empty()) return cache;
+
+    std::string json;
+    const std::wstring dir = cartellaIconePile();
+    const std::wstring treePath = dir.empty() ? L"" : (dir + L"\\tree.json");
+
+    if (!treePath.empty()) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (GetFileAttributesExW(treePath.c_str(), GetFileExInfoStandard, &fad) &&
+            !(fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            FILETIME nowFt{};
+            GetSystemTimeAsFileTime(&nowFt);
+            const ULONGLONG now = ((ULONGLONG)nowFt.dwHighDateTime << 32) | nowFt.dwLowDateTime;
+            const ULONGLONG mod = ((ULONGLONG)fad.ftLastWriteTime.dwHighDateTime << 32) | fad.ftLastWriteTime.dwLowDateTime;
+            constexpr ULONGLONG SETTE_GIORNI = 7ULL * 24 * 3600 * 10000000ULL;
+            if (now >= mod && (now - mod) < SETTE_GIORNI) {
+                HANDLE hf = CreateFileW(treePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+                if (hf != INVALID_HANDLE_VALUE) {
+                    LARGE_INTEGER sz{};
+                    if (GetFileSizeEx(hf, &sz) && sz.QuadPart > 0 && sz.QuadPart <= 8 * 1024 * 1024) {
+                        json.resize((size_t)sz.QuadPart);
+                        DWORD letti = 0;
+                        if (!ReadFile(hf, json.data(), (DWORD)json.size(), &letti, nullptr) || letti != json.size())
+                            json.clear();
+                    }
+                    CloseHandle(hf);
+                }
+            }
+        }
+    }
+
+    if (json.empty()) {
+        json = httpPrendi(L"https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/tree.json", 8 * 1024 * 1024);
+        if (!json.empty() && !treePath.empty()) scriviAtomico(treePath, json.data(), json.size());
+    }
+    if (json.empty()) return {};
+
+    const size_t key = json.find("\"png\"");
+    if (key == std::string::npos) return {};
+    size_t i = json.find(':', key + 5);
+    if (i == std::string::npos) return {};
+    i = json.find('[', i + 1);
+    if (i == std::string::npos) return {};
+    i++;
+
+    std::vector<std::string> ris;
+    ris.reserve(5000);
+    while (i < json.size()) {
+        while (i < json.size() && (json[i] == ' ' || json[i] == '\t' || json[i] == '\r' || json[i] == '\n' || json[i] == ',')) i++;
+        if (i >= json.size() || json[i] == ']') break;
+        if (json[i] != '"') { i++; continue; }
+        i++;
+        std::string item;
+        while (i < json.size() && json[i] != '"') {
+            if (json[i] == '\\' && i + 1 < json.size()) { i++; item.push_back(json[i++]); }
+            else item.push_back(json[i++]);
+        }
+        if (i < json.size() && json[i] == '"') i++;
+        if (item.size() > 4 && item.compare(item.size() - 4, 4, ".png") == 0 &&
+            item.find('/') == std::string::npos && item.find('\\') == std::string::npos &&
+            item.find("..") == std::string::npos) {
+            ris.push_back(std::move(item));
+        }
+    }
+    if (!ris.empty()) cache = ris;
+    return cache;
+}
+
+inline std::vector<std::string> cercaIconeDb(const std::wstring& query, int maxRis = 24) {
+    const std::vector<std::string> tutti = caricaIndiceIcone();
+    if (tutti.empty() || maxRis <= 0) return {};
+
+    std::unordered_set<std::string> stems;
+    stems.reserve(tutti.size());
+    for (const auto& f : tutti) stems.insert(f.substr(0, f.size() - 4));
+
+    std::string qNorm, qCompact;
+    std::vector<std::string> tokens;
+    {
+        std::string cur;
+        for (wchar_t wc : query) {
+            const char c = (wc >= 0 && wc < 128) ? (char)tolower((unsigned char)wc) : ' ';
+            if (isalnum((unsigned char)c)) {
+                cur.push_back(c);
+                qCompact.push_back(c);
+            } else if (!cur.empty()) {
+                if (!qNorm.empty()) qNorm.push_back('-');
+                qNorm += cur;
+                tokens.push_back(std::move(cur));
+                cur.clear();
+            }
+        }
+        if (!cur.empty()) {
+            if (!qNorm.empty()) qNorm.push_back('-');
+            qNorm += cur;
+            tokens.push_back(std::move(cur));
+        }
+    }
+
+    bool vuoleVariante = false;
+    for (const auto& t : tokens) if (t == "light" || t == "dark") { vuoleVariante = true; break; }
+
+    static const std::pair<const char*, std::initializer_list<const char*>> SINONIMI[] = {
+        {"dev", {"visual-studio-code", "github", "terminal", "docker", "git", "code", "powershell", "cursor"}},
+        {"coding", {"visual-studio-code", "github", "terminal", "docker", "git", "code", "powershell", "cursor"}},
+        {"code", {"visual-studio-code", "github", "terminal", "git", "cursor", "sublime-text", "neovim"}},
+        {"work", {"slack", "notion", "outlook", "microsoft-teams", "obsidian", "calendar", "trello", "folder"}},
+        {"office", {"slack", "notion", "outlook", "microsoft-teams", "obsidian", "calendar", "trello", "folder"}},
+        {"media", {"vlc", "plex", "spotify", "youtube", "music", "video", "jellyfin"}},
+        {"video", {"vlc", "plex", "youtube", "jellyfin", "obs-studio", "mpv", "video"}},
+        {"music", {"spotify", "music", "apple-music", "soundcloud", "vlc", "audacity", "tidal", "plexamp"}},
+        {"audio", {"spotify", "music", "audacity", "vlc", "soundcloud", "tidal", "plexamp"}},
+        {"games", {"steam", "epic-games", "discord", "xbox", "playstation", "retroarch"}},
+        {"gaming", {"steam", "epic-games", "discord", "xbox", "playstation", "retroarch"}},
+        {"ai", {"openai", "claude", "gemini", "ollama", "lm-studio", "perplexity"}},
+        {"cloud", {"google-drive", "onedrive", "dropbox", "nextcloud", "icloud"}},
+        {"tools", {"folder", "terminal", "1password", "bitwarden", "tailscale", "wireshark"}},
+        {"utils", {"folder", "terminal", "1password", "bitwarden", "tailscale", "wireshark"}},
+        {"social", {"discord", "slack", "telegram", "whatsapp", "signal", "microsoft-teams"}},
+        {"chat", {"discord", "slack", "telegram", "whatsapp", "signal", "microsoft-teams"}},
+        {"photos", {"figma", "adobe-photoshop", "blender", "gimp", "canva", "immich"}},
+        {"design", {"figma", "adobe-photoshop", "blender", "gimp", "canva", "inkscape"}},
+        {"finance", {"firefly-iii", "actual-budget", "paypal", "stripe", "ynab", "bitcoin"}},
+    };
+
+    std::vector<std::string> espansi;
+    std::unordered_set<std::string> espansiVisti;
+    for (const auto& tk : tokens) {
+        for (const auto& row : SINONIMI) {
+            if (tk == row.first) {
+                for (const char* s : row.second) {
+                    if (espansiVisti.insert(s).second) espansi.emplace_back(s);
+                }
+            }
+        }
+    }
+
+    struct Cand { int score; size_t len; std::string file; };
+    std::vector<Cand> cands;
+
+    if (!tokens.empty()) {
+        for (const auto& f : tutti) {
+            const std::string stem = f.substr(0, f.size() - 4);
+            if (!vuoleVariante) {
+                if (stem.size() > 6 && stem.compare(stem.size() - 6, 6, "-light") == 0 &&
+                    stems.count(stem.substr(0, stem.size() - 6))) continue;
+                if (stem.size() > 5 && stem.compare(stem.size() - 5, 5, "-dark") == 0 &&
+                    stems.count(stem.substr(0, stem.size() - 5))) continue;
+            }
+
+            int score = 0;
+            if (stem == qNorm || stem == qCompact) {
+                score = 1000;
+            } else if (!qNorm.empty() && stem.rfind(qNorm, 0) == 0) {
+                score = 720 - (int)std::min<size_t>(stem.size(), 100);
+            } else {
+                int matched = 0, prefMatched = 0;
+                for (const auto& tk : tokens) {
+                    const size_t p = stem.find(tk);
+                    if (p != std::string::npos) {
+                        matched++;
+                        if (p == 0 || stem[p - 1] == '-') prefMatched++;
+                    }
+                }
+                if (matched == (int)tokens.size()) {
+                    score = 520 + prefMatched * 30 - (int)std::min<size_t>(stem.size(), 100);
+                } else if (matched > 0) {
+                    score = 260 + matched * 45 + prefMatched * 20 - (int)std::min<size_t>(stem.size(), 100);
+                }
+            }
+
+            if (score == 0 && !espansi.empty()) {
+                for (size_t ei = 0; ei < espansi.size(); ei++) {
+                    if (stem == espansi[ei]) { score = 440 - (int)ei * 6; break; }
+                    if (stem.rfind(espansi[ei], 0) == 0) { score = std::max(score, 220 - (int)ei * 4); }
+                }
+            }
+
+            if (score > 0) cands.push_back({score, stem.size(), f});
+        }
+
+        std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) {
+            if (a.score != b.score) return a.score > b.score;
+            if (a.len != b.len) return a.len < b.len;
+            return a.file < b.file;
+        });
+    }
+
+    std::vector<std::string> out;
+    out.reserve((size_t)maxRis);
+    std::unordered_set<std::string> usati;
+    for (const auto& c : cands) {
+        if ((int)out.size() >= maxRis) break;
+        if (usati.insert(c.file).second) out.push_back(c.file);
+    }
+
+    if (tokens.empty() || out.size() < 4) {
+        static const char* const CURATI[] = {
+            "folder", "terminal", "code", "music", "video", "steam", "discord", "github",
+            "obsidian", "notion", "spotify", "google-drive", "docker", "openai", "1password", "vlc"
+        };
+        for (const char* nome : CURATI) {
+            if ((int)out.size() >= maxRis) break;
+            const std::string stem(nome);
+            if (stems.count(stem)) {
+                const std::string fn = stem + ".png";
+                if (usati.insert(fn).second) out.push_back(fn);
+                continue;
+            }
+            for (const auto& f : tutti) {
+                const std::string s = f.substr(0, f.size() - 4);
+                if (s.rfind(stem, 0) == 0 && usati.insert(f).second) { out.push_back(f); break; }
+            }
+        }
+    }
+    return out;
+}
+
+inline bool decodificaPngMemoria(const std::string& bytes, int lato, std::vector<BYTE>& out) {
+    if (bytes.empty() || lato <= 0) return false;
+    IWICImagingFactory* wic = nullptr;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic))) || !wic)
+        return false;
+    IWICStream* st = nullptr;
+    IWICBitmapDecoder* dec = nullptr;
+    IWICBitmapFrameDecode* fr = nullptr;
+    IWICBitmapClipper* cl = nullptr;
+    IWICBitmapScaler* sc = nullptr;
+    IWICFormatConverter* cv = nullptr;
+    bool ok = false;
+
+    HRESULT hr = wic->CreateStream(&st);
+    if (SUCCEEDED(hr)) hr = st->InitializeFromMemory((BYTE*)bytes.data(), (DWORD)bytes.size());
+    if (SUCCEEDED(hr)) hr = wic->CreateDecoderFromStream(st, nullptr, WICDecodeMetadataCacheOnDemand, &dec);
+    if (SUCCEEDED(hr)) hr = dec->GetFrame(0, &fr);
+    UINT iw = 0, ih = 0;
+    if (SUCCEEDED(hr)) hr = fr->GetSize(&iw, &ih);
+    if (SUCCEEDED(hr) && iw > 0 && ih > 0) {
+        IWICBitmapSource* src = fr;
+        if (iw != ih) {
+            const UINT side = std::min(iw, ih);
+            const WICRect rc{(INT)(iw - side) / 2, (INT)(ih - side) / 2, (INT)side, (INT)side};
+            hr = wic->CreateBitmapClipper(&cl);
+            if (SUCCEEDED(hr)) hr = cl->Initialize(fr, &rc);
+            if (SUCCEEDED(hr)) src = cl;
+        }
+        if (SUCCEEDED(hr)) hr = wic->CreateBitmapScaler(&sc);
+        if (SUCCEEDED(hr)) hr = sc->Initialize(src, (UINT)lato, (UINT)lato, WICBitmapInterpolationModeFant);
+        if (SUCCEEDED(hr)) hr = wic->CreateFormatConverter(&cv);
+        if (SUCCEEDED(hr)) hr = cv->Initialize(sc, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom);
+        if (SUCCEEDED(hr)) {
+            out.resize((size_t)lato * (size_t)lato * 4);
+            hr = cv->CopyPixels(nullptr, (UINT)(lato * 4), (UINT)out.size(), out.data());
+            ok = SUCCEEDED(hr);
+            if (!ok) out.clear();
+        }
+    }
+    for (IUnknown* u : {(IUnknown*)cv, (IUnknown*)sc, (IUnknown*)cl, (IUnknown*)fr, (IUnknown*)dec, (IUnknown*)st, (IUnknown*)wic})
+        if (u) u->Release();
+    return ok;
+}
+
+inline bool scegliIconaOnlinePila(HWND genitore, const std::wstring& nomePila, std::wstring& outPath) {
+    struct Risultato {
+        int gen = 0;
+        int idx = 0;
+        std::string file;
+        std::string rawPng;
+        std::vector<BYTE> bgra;
+        int lato = 0;
+    };
+
+    struct StatoWorker {
+        std::mutex mx;
+        std::atomic<bool> annulla{false};
+        std::atomic<int> gen{0};
+        HWND hwnd = nullptr;
+        int elencoGen = 0;
+        bool elencoPronto = false;
+        bool erroreRete = false;
+        std::vector<std::string> elenco;
+        std::deque<Risultato> coda;
+        int finitoGen = 0;
+    };
+
+    struct Tile {
+        std::string file;
+        std::wstring slug;
+        std::string rawPng;
+        std::vector<BYTE> bgra;
+        int lato = 0;
+        ID2D1Bitmap* bmp = nullptr;
+        bool caricato = false;
+    };
+
+    struct Picker {
+        vetro::Finestra v;
+        std::shared_ptr<StatoWorker> worker = std::make_shared<StatoWorker>();
+        std::wstring nomePila, query, scelto;
+        size_t pos = 0, sel = 0;
+        float scrollX = 0, scrollY = 0;
+        std::vector<Tile> tiles;
+        IDWriteTextFormat *fTitolo = nullptr, *fSub = nullptr, *fInput = nullptr, *fBtn = nullptr, *fLabel = nullptr, *fStato = nullptr;
+        int sopraTile = -1, premutoTile = -1;
+        int sopraBtn = 0, premutoBtn = 0;   // 1 = chiudi (X), 2 = annulla
+        bool dragSel = false, cursoreVis = true, chiuso = false, confermato = false;
+        bool dentroFin = false, caricamento = true, erroreRete = false;
+        ULONGLONG t0 = 0;
+        bool animApri = true;
+        unsigned giroBmp = 0;
+
+        const int COLONNE = 4;
+        const float TILE = 92.0f, GAP = 12.0f;
+
+        static std::wstring utf8ToWide(const std::string& s) {
+            if (s.empty()) return {};
+            const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+            if (n <= 0) return {};
+            std::wstring w((size_t)n, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+            return w;
+        }
+
+        static bool dentro(const D2D1_RECT_F& r, float x, float y) {
+            return x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+        }
+
+        D2D1_RECT_F rHeader() const { const float d = v.dpi; return {0, 0, (float)v.W, 54 * d}; }
+        D2D1_RECT_F rChiudi() const { const float d = v.dpi; return {v.W - 44 * d, 13 * d, v.W - 16 * d, 41 * d}; }
+        D2D1_RECT_F rSearch() const { const float d = v.dpi; return {20 * d, 58 * d, v.W - 20 * d, 94 * d}; }
+        D2D1_RECT_F rGrid() const { const float d = v.dpi; return {0, 102 * d, (float)v.W, v.H - 50 * d}; }
+        D2D1_RECT_F rAnnulla() const { const float d = v.dpi; return {v.W - 108 * d, v.H - 40 * d, v.W - 20 * d, v.H - 10 * d}; }
+
+        D2D1_RECT_F rTile(int i) const {
+            const float d = v.dpi;
+            const float gridW = (COLONNE * TILE + (COLONNE - 1) * GAP) * d;
+            const float x0 = ((float)v.W - gridW) * 0.5f;
+            const float y0 = 108 * d;
+            const float l = x0 + (i % COLONNE) * (TILE + GAP) * d;
+            const float t = y0 + (i / COLONNE) * (TILE + GAP) * d - scrollY;
+            return {l, t, l + TILE * d, t + TILE * d};
+        }
+
+        float scrollMax() const {
+            const float d = v.dpi;
+            const int righe = ((int)tiles.size() + COLONNE - 1) / COLONNE;
+            if (righe <= 0) return 0.0f;
+            const float contH = 6 * d + righe * TILE * d + std::max(0, righe - 1) * GAP * d + 8 * d;
+            const D2D1_RECT_F g = rGrid();
+            return std::max(0.0f, contH - (g.bottom - g.top));
+        }
+
+        int btnIn(float x, float y) const {
+            if (dentro(rChiudi(), x, y)) return 1;
+            if (dentro(rAnnulla(), x, y)) return 2;
+            return 0;
+        }
+
+        int tileIn(float x, float y) const {
+            const D2D1_RECT_F g = rGrid();
+            if (!dentro(g, x, y)) return -1;
+            for (int i = 0; i < (int)tiles.size(); i++) {
+                if (dentro(rTile(i), x, y)) return i;
+            }
+            return -1;
+        }
+
+        void liberaBitmap() {
+            for (auto& t : tiles) {
+                if (t.bmp) { t.bmp->Release(); t.bmp = nullptr; }
+            }
+        }
+
+        void ricreaBitmap() {
+            if (!v.rt) return;
+            for (auto& t : tiles) {
+                if (!t.bmp && !t.bgra.empty() && t.lato > 0) {
+                    v.rt->CreateBitmap(D2D1::SizeU((UINT)t.lato, (UINT)t.lato), t.bgra.data(), (UINT)(t.lato * 4),
+                                       D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
+                                       &t.bmp);
+                }
+            }
+        }
+
+        void liberaFormati() {
+            for (IDWriteTextFormat** f : {&fTitolo, &fSub, &fInput, &fBtn, &fLabel, &fStato}) {
+                if (*f) { (*f)->Release(); *f = nullptr; }
+            }
+        }
+
+        void fermaWorker() {
+            worker->annulla.store(true);
+            std::lock_guard<std::mutex> lk(worker->mx);
+            worker->hwnd = nullptr;
+        }
+
+        void eliminaSel() {
+            if (pos == sel) return;
+            const size_t a = std::min(pos, sel), b = std::max(pos, sel);
+            query.erase(a, b - a);
+            pos = sel = a;
+        }
+
+        void assicuraCursore() {
+            if (!fInput || !v.fdw) return;
+            const float d = v.dpi;
+            const D2D1_RECT_F ri = rSearch();
+            const float vw = (ri.right - ri.left) - 22 * d;
+            const float cx = v.larghezza(query.substr(0, pos), fInput);
+            if (cx - scrollX > vw) scrollX = cx - vw;
+            if (cx - scrollX < 0) scrollX = std::max(0.0f, cx - 8 * d);
+        }
+
+        size_t indiceDaX(float x) {
+            if (!fInput || !v.fdw || query.empty()) return 0;
+            const float d = v.dpi;
+            const D2D1_RECT_F ri = rSearch();
+            const float rx = x - (ri.left + 11 * d) + scrollX;
+            IDWriteTextLayout* lay = nullptr;
+            size_t idx = query.size();
+            if (SUCCEEDED(v.fdw->CreateTextLayout(query.c_str(), (UINT32)query.size(), fInput, 4000, 40 * d, &lay)) && lay) {
+                BOOL trailing = FALSE, inside = FALSE;
+                DWRITE_HIT_TEST_METRICS hm{};
+                if (SUCCEEDED(lay->HitTestPoint(std::max(0.0f, rx), 10 * d, &trailing, &inside, &hm)))
+                    idx = std::min<size_t>(query.size(), hm.textPosition + (trailing ? 1 : 0));
+                lay->Release();
+            }
+            return idx;
+        }
+
+        void copiaClipboard() {
+            if (pos == sel) return;
+            const size_t a = std::min(pos, sel), b = std::max(pos, sel);
+            const std::wstring s = query.substr(a, b - a);
+            if (!OpenClipboard(v.fin)) return;
+            EmptyClipboard();
+            if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (s.size() + 1) * sizeof(wchar_t))) {
+                if (wchar_t* p = (wchar_t*)GlobalLock(g)) { memcpy(p, s.c_str(), (s.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g); }
+                if (!SetClipboardData(CF_UNICODETEXT, g)) GlobalFree(g);
+            }
+            CloseClipboard();
+        }
+
+        void incollaClipboard() {
+            if (!OpenClipboard(v.fin)) return;
+            if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+                if (const wchar_t* p = (const wchar_t*)GlobalLock(h)) {
+                    std::wstring ins;
+                    for (; *p && ins.size() < 64; p++) {
+                        if (*p == L'\r' || *p == L'\n') break;
+                        if (*p >= 32) ins += *p;
+                    }
+                    GlobalUnlock(h);
+                    if (!ins.empty()) {
+                        eliminaSel();
+                        const size_t spazio = query.size() < 64 ? 64 - query.size() : 0;
+                        if (spazio > 0) {
+                            const std::wstring t = ins.substr(0, spazio);
+                            query.insert(pos, t);
+                            pos += t.size(); sel = pos;
+                        }
+                    }
+                }
+            }
+            CloseClipboard();
+        }
+
+        void programmaRicerca() {
+            KillTimer(v.fin, 3);
+            SetTimer(v.fin, 3, 220, nullptr);
+        }
+
+        void avviaRicerca() {
+            KillTimer(v.fin, 3);
+            const int g = worker->gen.fetch_add(1) + 1;
+            {
+                std::lock_guard<std::mutex> lk(worker->mx);
+                worker->elenco.clear();
+                worker->elencoPronto = false;
+                worker->erroreRete = false;
+                worker->coda.clear();
+            }
+            liberaBitmap();
+            tiles.clear();
+            scrollY = 0;
+            sopraTile = premutoTile = -1;
+            caricamento = true;
+            erroreRete = false;
+            disegna();
+
+            const std::wstring q = query;
+            std::shared_ptr<StatoWorker> st = worker;
+            std::thread([st, q, g] {
+                CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                auto notifica = [&] {
+                    HWND h = nullptr;
+                    { std::lock_guard<std::mutex> lk(st->mx); h = st->hwnd; }
+                    if (h) PostMessageW(h, WM_APP + 2, 0, 0);
+                };
+
+                const std::vector<std::string> elenco = cercaIconeDb(q, 24);
+                if (!st->annulla.load() && st->gen.load() == g) {
+                    {
+                        std::lock_guard<std::mutex> lk(st->mx);
+                        st->elenco = elenco;
+                        st->elencoGen = g;
+                        st->elencoPronto = true;
+                        st->erroreRete = elenco.empty();
+                    }
+                    notifica();
+
+                    for (int i = 0; i < (int)elenco.size(); i++) {
+                        if (st->annulla.load() || st->gen.load() != g) break;
+                        const std::wstring url = L"https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons/png/" + utf8ToWide(elenco[i]);
+                        std::string raw = httpPrendi(url, 4 * 1024 * 1024);
+                        if (st->annulla.load() || st->gen.load() != g) break;
+                        std::vector<BYTE> bgra;
+                        if (!raw.empty() && decodificaPngMemoria(raw, 96, bgra)) {
+                            Risultato r;
+                            r.gen = g;
+                            r.idx = i;
+                            r.file = elenco[i];
+                            r.rawPng = std::move(raw);
+                            r.bgra = std::move(bgra);
+                            r.lato = 96;
+                            {
+                                std::lock_guard<std::mutex> lk(st->mx);
+                                if (st->annulla.load() || st->gen.load() != g) break;
+                                st->coda.push_back(std::move(r));
+                            }
+                            notifica();
+                        }
+                    }
+                    if (!st->annulla.load() && st->gen.load() == g) {
+                        { std::lock_guard<std::mutex> lk(st->mx); st->finitoGen = g; }
+                        notifica();
+                    }
+                }
+                CoUninitialize();
+            }).detach();
+        }
+
+        void raccogliWorker() {
+            const int g = worker->gen.load();
+            bool haElenco = false, err = false, fin = false;
+            std::vector<std::string> nuovoElenco;
+            std::deque<Risultato> arrivi;
+            {
+                std::lock_guard<std::mutex> lk(worker->mx);
+                if (worker->elencoPronto && worker->elencoGen == g) {
+                    haElenco = true;
+                    err = worker->erroreRete;
+                    nuovoElenco.swap(worker->elenco);
+                    worker->elencoPronto = false;
+                }
+                arrivi.swap(worker->coda);
+                fin = (worker->finitoGen == g);
+            }
+            if (haElenco) {
+                liberaBitmap();
+                tiles.clear();
+                tiles.reserve(nuovoElenco.size());
+                for (const auto& f : nuovoElenco) {
+                    Tile t;
+                    t.file = f;
+                    const std::string slug = (f.size() > 4) ? f.substr(0, f.size() - 4) : f;
+                    t.slug = utf8ToWide(slug);
+                    tiles.push_back(std::move(t));
+                }
+                erroreRete = err;
+            }
+            for (auto& r : arrivi) {
+                if (r.gen != g || r.idx < 0 || r.idx >= (int)tiles.size()) continue;
+                Tile& t = tiles[r.idx];
+                t.rawPng = std::move(r.rawPng);
+                t.bgra = std::move(r.bgra);
+                t.lato = r.lato;
+                t.caricato = true;
+                if (t.bmp) { t.bmp->Release(); t.bmp = nullptr; }
+                if (v.rt && !t.bgra.empty() && t.lato > 0) {
+                    v.rt->CreateBitmap(D2D1::SizeU((UINT)t.lato, (UINT)t.lato), t.bgra.data(), (UINT)(t.lato * 4),
+                                       D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)),
+                                       &t.bmp);
+                }
+            }
+            if (fin) caricamento = false;
+            disegna();
+        }
+
+        bool salvaTile(int idx) {
+            if (idx < 0 || idx >= (int)tiles.size()) return false;
+            const Tile& t = tiles[idx];
+            if (!t.caricato || t.rawPng.empty()) return false;
+            const std::wstring dir = cartellaIconePile();
+            if (dir.empty()) return false;
+            std::wstring safe = t.slug;
+            for (auto& c : safe) if (wcschr(L"\\/:*?\"<>|", c)) c = L'_';
+            if (safe.empty()) safe = L"icon";
+            const std::wstring dest = dir + L"\\" + safe + L".png";
+            if (!scriviAtomico(dest, t.rawPng.data(), t.rawPng.size())) return false;
+            scelto = dest;
+            fermaWorker();
+            confermato = true;
+            chiuso = true;
+            return true;
+        }
+
+        void disegna() {
+            if (giroBmp != v.giroRt) {
+                giroBmp = v.giroRt;
+                liberaBitmap();
+                ricreaBitmap();
+            }
+            if (!v.inizia(1.0f)) return;
+            const float d = v.dpi;
+            const D2D1_COLOR_F ink = v.inchiostro();
+
+            ID2D1GradientStopCollection* stops = nullptr;
+            const D2D1_GRADIENT_STOP gs[2] = {
+                {0.0f, v.scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.36f)},
+                {1.0f, D2D1::ColorF(1, 1, 1, 0.0f)}
+            };
+            if (SUCCEEDED(v.rt->CreateGradientStopCollection(gs, 2, &stops)) && stops) {
+                ID2D1LinearGradientBrush* sheen = nullptr;
+                if (SUCCEEDED(v.rt->CreateLinearGradientBrush(D2D1::LinearGradientBrushProperties({0, 0}, {0, v.H * 0.32f}), stops, &sheen)) && sheen) {
+                    v.rt->FillRectangle({0, 0, (float)v.W, v.H * 0.32f}, sheen);
+                    sheen->Release();
+                }
+                stops->Release();
+            }
+
+            const float rr = v.raggio();
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.14f) : D2D1::ColorF(1, 1, 1, 0.65f));
+            v.rt->DrawRoundedRectangle({{0.5f, 0.5f, v.W - 0.5f, v.H - 0.5f}, rr, rr}, v.pen, 1.0f);
+
+            // Header
+            v.testo(testi::t(L"Scegli icona online", L"Choose icon online"), fTitolo,
+                    {20 * d, 10 * d, v.W - 54 * d, 32 * d}, ink);
+            v.testo(nomePila, fSub, {20 * d, 32 * d, v.W - 54 * d, 50 * d}, v.inchiostro(0.60f));
+
+            const D2D1_RECT_F rx = rChiudi();
+            const float rxR = (rx.right - rx.left) * 0.5f;
+            if (sopraBtn == 1 || premutoBtn == 1) {
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, premutoBtn == 1 ? 0.22f : 0.13f)
+                                        : D2D1::ColorF(0, 0, 0, premutoBtn == 1 ? 0.14f : 0.07f));
+                v.rt->FillRoundedRectangle({rx, rxR, rxR}, v.pen);
+            }
+            const float cx = (rx.left + rx.right) * 0.5f, cy = (rx.top + rx.bottom) * 0.5f, arm = 4.5f * d;
+            v.pen->SetColor(v.inchiostro(sopraBtn == 1 ? 0.95f : 0.68f));
+            v.rt->DrawLine({cx - arm, cy - arm}, {cx + arm, cy + arm}, v.pen, 1.5f * d);
+            v.rt->DrawLine({cx + arm, cy - arm}, {cx - arm, cy + arm}, v.pen, 1.5f * d);
+
+            // Search bar
+            const D2D1_RECT_F rs = rSearch();
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(0, 0, 0, 0.28f) : D2D1::ColorF(1, 1, 1, 0.72f));
+            v.rt->FillRoundedRectangle({rs, 9 * d, 9 * d}, v.pen);
+            v.pen->SetColor(D2D1::ColorF(0.20f, 0.54f, 1.0f, 0.78f));
+            v.rt->DrawRoundedRectangle({rs, 9 * d, 9 * d}, v.pen, 1.5f * d);
+
+            const D2D1_RECT_F clip = {rs.left + 9 * d, rs.top + 2 * d, rs.right - 9 * d, rs.bottom - 2 * d};
+            v.rt->PushAxisAlignedClip(clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            const float tx = rs.left + 11 * d - scrollX;
+            if (pos != sel) {
+                const size_t a = std::min(pos, sel), b = std::max(pos, sel);
+                const float x1 = tx + v.larghezza(query.substr(0, a), fInput);
+                const float x2 = tx + v.larghezza(query.substr(0, b), fInput);
+                v.pen->SetColor(D2D1::ColorF(0.20f, 0.54f, 1.0f, v.scuro ? 0.42f : 0.28f));
+                v.rt->FillRoundedRectangle({{x1, rs.top + 6 * d, x2, rs.bottom - 6 * d}, 3 * d, 3 * d}, v.pen);
+            }
+            if (query.empty()) {
+                v.testo(testi::t(L"Cerca oltre 4.700 icone…", L"Search 4,700+ icons…"), fInput,
+                        {rs.left + 11 * d, rs.top, rs.right - 11 * d, rs.bottom}, v.inchiostro(0.45f));
+            } else {
+                v.testo(query, fInput, {tx, rs.top, tx + 4000, rs.bottom}, ink);
+            }
+            if (cursoreVis) {
+                const float cpx = tx + v.larghezza(query.substr(0, pos), fInput);
+                v.pen->SetColor(ink);
+                v.rt->DrawLine({cpx, rs.top + 8 * d}, {cpx, rs.bottom - 8 * d}, v.pen, 1.4f * d);
+            }
+            v.rt->PopAxisAlignedClip();
+
+            // Grid viewport
+            const D2D1_RECT_F vp = rGrid();
+            v.rt->PushAxisAlignedClip(vp, D2D1_ANTIALIAS_MODE_ALIASED);
+            if (tiles.empty()) {
+                const wchar_t* msg = caricamento
+                    ? testi::t(L"Caricamento icone…", L"Loading icons…")
+                    : (erroreRete ? testi::t(L"Impossibile raggiungere il catalogo online", L"Could not reach online icon catalog")
+                                  : testi::t(L"Nessuna icona trovata", L"No icons found"));
+                v.testo(msg, fBtn, {24 * d, vp.top + 40 * d, v.W - 24 * d, vp.top + 90 * d}, v.inchiostro(0.60f));
+            } else {
+                for (int i = 0; i < (int)tiles.size(); i++) {
+                    const D2D1_RECT_F rt = rTile(i);
+                    if (rt.bottom < vp.top || rt.top > vp.bottom) continue;
+                    const bool hov = (i == sopraTile);
+                    const bool pre = (i == premutoTile);
+                    const float tr = 12 * d;
+
+                    if (v.scuro) {
+                        v.pen->SetColor(D2D1::ColorF(1, 1, 1, pre ? 0.22f : (hov ? 0.15f : 0.06f)));
+                    } else {
+                        v.pen->SetColor(pre ? D2D1::ColorF(0, 0, 0, 0.09f) : D2D1::ColorF(1, 1, 1, hov ? 0.76f : 0.42f));
+                    }
+                    v.rt->FillRoundedRectangle({rt, tr, tr}, v.pen);
+
+                    v.pen->SetColor(hov
+                        ? (v.scuro ? D2D1::ColorF(1, 1, 1, 0.34f) : D2D1::ColorF(0.04f, 0.52f, 1.0f, 0.55f))
+                        : (v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(0, 0, 0, 0.06f)));
+                    v.rt->DrawRoundedRectangle({rt, tr, tr}, v.pen, hov ? 1.25f * d : 1.0f);
+
+                    const Tile& t = tiles[i];
+                    const float iconS = hov ? 48 * d : 54 * d;
+                    const float icx = (rt.left + rt.right) * 0.5f;
+                    const float icy = hov ? (rt.top + 12 * d + iconS * 0.5f) : ((rt.top + rt.bottom) * 0.5f);
+                    if (t.bmp) {
+                        v.rt->DrawBitmap(t.bmp,
+                                         {icx - iconS * 0.5f, icy - iconS * 0.5f, icx + iconS * 0.5f, icy + iconS * 0.5f},
+                                         1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                    } else {
+                        const float ph = 38 * d;
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.07f) : D2D1::ColorF(0, 0, 0, 0.06f));
+                        v.rt->FillRoundedRectangle({{icx - ph * 0.5f, icy - ph * 0.5f, icx + ph * 0.5f, icy + ph * 0.5f}, 10 * d, 10 * d}, v.pen);
+                    }
+
+                    if (hov && !t.slug.empty()) {
+                        v.testo(t.slug, fLabel, {rt.left + 4 * d, rt.bottom - 22 * d, rt.right - 4 * d, rt.bottom - 4 * d}, ink);
+                    }
+                }
+            }
+            v.rt->PopAxisAlignedClip();
+
+            // Scrollbar thumb
+            const float sm = scrollMax();
+            if (sm > 0) {
+                const float vpH = vp.bottom - vp.top;
+                const float th = std::max(26 * d, vpH * vpH / (vpH + sm));
+                const float ty = vp.top + (vpH - th) * (scrollY / sm);
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.28f) : D2D1::ColorF(0, 0, 0, 0.22f));
+                v.rt->FillRoundedRectangle({{v.W - 8 * d, ty + 2 * d, v.W - 4 * d, ty + th - 2 * d}, 2 * d, 2 * d}, v.pen);
+            }
+
+            // Footer divider + status + Cancel pill
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.09f) : D2D1::ColorF(0, 0, 0, 0.07f));
+            v.rt->DrawLine({16 * d, vp.bottom}, {v.W - 16 * d, vp.bottom}, v.pen, 1.0f);
+
+            std::wstring statoTxt;
+            if (caricamento) {
+                int caricati = 0;
+                for (const auto& t : tiles) if (t.caricato) caricati++;
+                if (!tiles.empty())
+                    statoTxt = std::to_wstring(caricati) + L" / " + std::to_wstring(tiles.size()) + L" " + testi::t(L"caricate…", L"loaded…");
+                else
+                    statoTxt = testi::t(L"Ricerca…", L"Searching…");
+            } else if (sopraTile >= 0 && sopraTile < (int)tiles.size()) {
+                statoTxt = tiles[sopraTile].slug;
+            } else if (!tiles.empty()) {
+                statoTxt = std::to_wstring(tiles.size()) + L" " + testi::t(L"icone", L"icons");
+            }
+            if (!statoTxt.empty()) {
+                v.testo(statoTxt, fStato, {20 * d, v.H - 42 * d, v.W - 120 * d, v.H - 8 * d}, v.inchiostro(0.62f));
+            }
+
+            const D2D1_RECT_F ra = rAnnulla();
+            const float rPill = (ra.bottom - ra.top) * 0.5f;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, premutoBtn == 2 ? 0.18f : (sopraBtn == 2 ? 0.14f : 0.09f))
+                                    : D2D1::ColorF(0, 0, 0, premutoBtn == 2 ? 0.12f : (sopraBtn == 2 ? 0.08f : 0.05f)));
+            v.rt->FillRoundedRectangle({ra, rPill, rPill}, v.pen);
+            v.testo(testi::t(L"Annulla", L"Cancel"), fBtn, ra, ink);
+
+            v.finisci();
+        }
+
+        bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+            r = 0;
+            switch (m) {
+                case WM_TIMER:
+                    if (w == 1 && animApri) {
+                        const double k = std::min(1.0, (double)(vetro::ms() - t0) / 140.0);
+                        v.alfa(vetro::uscita(k));
+                        if (k >= 1.0) { animApri = false; vetro::fermaBattito(v.fin, 1); }
+                    } else if (w == 2) {
+                        cursoreVis = !cursoreVis;
+                        disegna();
+                    } else if (w == 3) {
+                        avviaRicerca();
+                    }
+                    return true;
+                case WM_APP + 2:
+                    raccogliWorker();
+                    return true;
+                case WM_PAINT:
+                    disegna();
+                    return true;
+                case WM_CLOSE:
+                    fermaWorker();
+                    chiuso = true;
+                    return true;
+                case WM_DESTROY:
+                    fermaWorker();
+                    vetro::fermaBattito(v.fin, 1);
+                    KillTimer(v.fin, 2);
+                    KillTimer(v.fin, 3);
+                    liberaBitmap();
+                    liberaFormati();
+                    return true;
+                case WM_CAPTURECHANGED:
+                    dragSel = false;
+                    return true;
+                case WM_NCHITTEST: {
+                    POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+                    ScreenToClient(v.fin, &pt);
+                    const float x = (float)pt.x, y = (float)pt.y;
+                    if (dentro(rHeader(), x, y) && !dentro(rChiudi(), x, y)) { r = HTCAPTION; return true; }
+                    r = HTCLIENT;
+                    return true;
+                }
+                case WM_MOUSEWHEEL: {
+                    const float sm = scrollMax();
+                    if (sm > 0) {
+                        const int delta = GET_WHEEL_DELTA_WPARAM(w);
+                        scrollY = std::clamp(scrollY - (delta / 120.0f) * (TILE + GAP) * 0.65f * v.dpi, 0.0f, sm);
+                        POINT pt; GetCursorPos(&pt); ScreenToClient(v.fin, &pt);
+                        sopraTile = tileIn((float)pt.x, (float)pt.y);
+                        disegna();
+                    }
+                    return true;
+                }
+                case WM_MOUSEMOVE: {
+                    if (!dentroFin) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentroFin = true; }
+                    const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                    if (dragSel) { pos = indiceDaX(x); assicuraCursore(); cursoreVis = true; disegna(); return true; }
+                    const int sb = btnIn(x, y);
+                    const int st = tileIn(x, y);
+                    if (sb != sopraBtn || st != sopraTile) { sopraBtn = sb; sopraTile = st; disegna(); }
+                    return true;
+                }
+                case WM_MOUSELEAVE:
+                    dentroFin = false;
+                    if (sopraBtn != 0 || sopraTile != -1) { sopraBtn = 0; sopraTile = -1; disegna(); }
+                    return true;
+                case WM_LBUTTONDBLCLK: {
+                    const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                    if (dentro(rSearch(), x, y)) { sel = 0; pos = query.size(); cursoreVis = true; disegna(); }
+                    return true;
+                }
+                case WM_LBUTTONDOWN: {
+                    const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                    SetCapture(v.fin);
+                    if (dentro(rSearch(), x, y)) {
+                        pos = indiceDaX(x);
+                        if (!(GetKeyState(VK_SHIFT) & 0x8000)) sel = pos;
+                        dragSel = true; cursoreVis = true; assicuraCursore(); disegna();
+                    } else {
+                        premutoBtn = btnIn(x, y);
+                        premutoTile = premutoBtn == 0 ? tileIn(x, y) : -1;
+                        disegna();
+                    }
+                    return true;
+                }
+                case WM_LBUTTONUP: {
+                    ReleaseCapture();
+                    const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                    dragSel = false;
+                    const int b = btnIn(x, y);
+                    const int t = tileIn(x, y);
+                    if ((premutoBtn == 1 && b == 1) || (premutoBtn == 2 && b == 2)) {
+                        fermaWorker();
+                        chiuso = true;
+                    } else if (premutoTile >= 0 && premutoTile == t) {
+                        salvaTile(t);
+                    }
+                    premutoBtn = 0;
+                    premutoTile = -1;
+                    if (!chiuso) disegna();
+                    return true;
+                }
+                case WM_KEYDOWN: {
+                    const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                    const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+                    cursoreVis = true;
+                    if (w == VK_ESCAPE) { fermaWorker(); chiuso = true; return true; }
+                    if (w == VK_RETURN) { avviaRicerca(); return true; }
+                    if (ctrl && w == 'A') { sel = 0; pos = query.size(); assicuraCursore(); disegna(); return true; }
+                    if (ctrl && w == 'C') { copiaClipboard(); return true; }
+                    if (ctrl && w == 'X') { copiaClipboard(); eliminaSel(); assicuraCursore(); programmaRicerca(); disegna(); return true; }
+                    if (ctrl && w == 'V') { incollaClipboard(); assicuraCursore(); programmaRicerca(); disegna(); return true; }
+                    if (w == VK_BACK) {
+                        if (pos != sel) eliminaSel();
+                        else if (pos > 0) { query.erase(pos - 1, 1); pos--; sel = pos; }
+                        assicuraCursore(); programmaRicerca(); disegna(); return true;
+                    }
+                    if (w == VK_DELETE) {
+                        if (pos != sel) eliminaSel();
+                        else if (pos < query.size()) query.erase(pos, 1);
+                        assicuraCursore(); programmaRicerca(); disegna(); return true;
+                    }
+                    if (w == VK_LEFT) { if (pos > 0) pos--; if (!shift) sel = pos; assicuraCursore(); disegna(); return true; }
+                    if (w == VK_RIGHT) { if (pos < query.size()) pos++; if (!shift) sel = pos; assicuraCursore(); disegna(); return true; }
+                    if (w == VK_HOME) { pos = 0; if (!shift) sel = pos; assicuraCursore(); disegna(); return true; }
+                    if (w == VK_END) { pos = query.size(); if (!shift) sel = pos; assicuraCursore(); disegna(); return true; }
+                    return true;
+                }
+                case WM_CHAR: {
+                    const wchar_t ch = (wchar_t)w;
+                    if (ch >= 32 && ch != 127) {
+                        eliminaSel();
+                        if (query.size() < 64) { query.insert(pos, 1, ch); pos++; sel = pos; }
+                        cursoreVis = true; assicuraCursore(); programmaRicerca(); disegna();
+                    }
+                    return true;
+                }
+            }
+            return false;
+        }
+    } pk;
+
+    pk.nomePila = nomePila;
+    pk.query = nomePila;
+    pk.sel = 0;
+    pk.pos = pk.query.size();
+    if (!pk.v.crea(L"FluidWin.ScegliIconaPila", vetro::procedura<Picker>, &pk, true)) return false;
+    {
+        std::lock_guard<std::mutex> lk(pk.worker->mx);
+        pk.worker->hwnd = pk.v.fin;
+    }
+    pk.v.aggiornaTema();
+    const HMONITOR mon = genitore ? MonitorFromWindow(genitore, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
+    pk.v.dpi = vetro::dpiMonitor(mon);
+    const float d = pk.v.dpi;
+    const int w = (int)std::lround(472 * d), h = (int)std::lround(476 * d);
+    const int x = mi.rcWork.left + (mi.rcWork.right - mi.rcWork.left - w) / 2;
+    const int y = mi.rcWork.top + (mi.rcWork.bottom - mi.rcWork.top - h) / 2;
+    pk.v.posiziona(x, y, w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
+    pk.v.alfa(0.0);
+    pk.fTitolo = pk.v.formato(15 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+    pk.fSub = pk.v.formato(11.5f * d, DWRITE_FONT_WEIGHT_NORMAL);
+    pk.fInput = pk.v.formato(13.5f * d, DWRITE_FONT_WEIGHT_NORMAL);
+    pk.fBtn = pk.v.formato(13 * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
+    pk.fLabel = pk.v.formato(10.5f * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
+    pk.fStato = pk.v.formato(12 * d, DWRITE_FONT_WEIGHT_NORMAL);
+    if (pk.fInput) { DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_NONE, 0, 0}; pk.fInput->SetTrimming(&tr, nullptr); }
+
+    pk.t0 = vetro::ms();
+    pk.animApri = true;
+    vetro::battito(pk.v.fin, 1);
+    SetTimer(pk.v.fin, 2, 530, nullptr);
+    SetForegroundWindow(pk.v.fin);
+    SetFocus(pk.v.fin);
+    pk.avviaRicerca();
+
+    MSG msg;
+    while (!pk.chiuso) {
+        const BOOL gm = GetMessageW(&msg, nullptr, 0, 0);
+        if (gm <= 0) { if (gm == 0) PostQuitMessage((int)msg.wParam); break; }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    pk.fermaWorker();
+    pk.v.chiudi();
+    pk.liberaBitmap();
+    pk.liberaFormati();
+    if (pk.confermato && !pk.scelto.empty()) { outPath = pk.scelto; return true; }
     return false;
 }
 
