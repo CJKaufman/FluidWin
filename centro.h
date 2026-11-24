@@ -1303,7 +1303,7 @@ inline auto Motore::altezzaAI() const -> float {
 }
 
 inline auto Motore::focusAgente(const ai::Agente& a) -> void {
-    HWND target = ai::trovaFinestraAgente(a);
+    HWND target = ai::trovaEAttivaFinestraAgente(a);
     if (target) {
         chiudiPannello();
         if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
