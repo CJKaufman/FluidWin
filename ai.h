@@ -606,6 +606,72 @@ inline std::wstring leafPath(const std::wstring& p) {
     return sl == std::wstring::npos ? p.substr(0, end) : p.substr(sl + 1, end - sl - 1);
 }
 
+struct ProcInfo {
+    DWORD parentPid = 0;
+    std::wstring exeLower;
+};
+
+inline std::unordered_map<DWORD, ProcInfo> mappaProcessi() {
+    std::unordered_map<DWORD, ProcInfo> res;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return res;
+    PROCESSENTRY32W pe{};
+    pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+        res[pe.th32ProcessID] = {pe.th32ParentProcessID, minuscolo(pe.szExeFile)};
+    }
+    CloseHandle(snap);
+    return res;
+}
+
+inline bool isShellWrapper(const std::wstring& exeLower) {
+    return exeLower == L"cmd.exe" || exeLower == L"powershell.exe" || exeLower == L"pwsh.exe" ||
+           exeLower == L"conhost.exe" || exeLower == L"sh.exe" || exeLower == L"bash.exe";
+}
+
+inline DWORD risolviPidPadreHook() {
+    const auto procs = mappaProcessi();
+    DWORD cur = GetCurrentProcessId();
+    DWORD firstParent = 0;
+    std::unordered_set<DWORD> seen;
+    for (int depth = 0; depth < 16; depth++) {
+        seen.insert(cur);
+        auto it = procs.find(cur);
+        if (it == procs.end()) break;
+        const DWORD parent = it->second.parentPid;
+        if (parent == 0 || parent == cur || seen.count(parent)) break;
+        if (firstParent == 0) firstParent = parent;
+        auto pit = procs.find(parent);
+        if (pit == procs.end()) break;
+        if (!isShellWrapper(pit->second.exeLower)) return parent;
+        cur = parent;
+    }
+    return firstParent;
+}
+
+inline bool finestraValida(HWND h) {
+    if (!IsWindowVisible(h)) return false;
+    if (GetWindow(h, GW_OWNER) != nullptr) return false;
+    if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return false;
+    if (GetWindowTextLengthW(h) <= 0) return false;
+    wchar_t cls[64] = L"";
+    if (GetClassNameW(h, cls, 64) > 0 && wcsncmp(cls, L"FluidWin.", 9) == 0) return false;
+
+    using PfnDwmGetWindowAttribute = HRESULT(WINAPI*)(HWND, DWORD, PVOID, DWORD);
+    static const PfnDwmGetWindowAttribute fnDwm = []() -> PfnDwmGetWindowAttribute {
+        HMODULE m = GetModuleHandleW(L"dwmapi.dll");
+        if (!m) m = LoadLibraryW(L"dwmapi.dll");
+        return m ? (PfnDwmGetWindowAttribute)(void*)GetProcAddress(m, "DwmGetWindowAttribute") : nullptr;
+    }();
+    if (fnDwm) {
+        DWORD cloaked = 0;
+        if (SUCCEEDED(fnDwm(h, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked))) && cloaked != 0 && !IsIconic(h)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace dettagli
 
 inline std::wstring cartellaHook() {
@@ -713,6 +779,7 @@ inline bool gestisciHookCli(int argc, wchar_t** argv) {
             }
 
             uint64_t pidVal = hasJson ? inJson.u64("pid") : 0;
+            if (pidVal == 0) pidVal = dettagli::risolviPidPadreHook();
             if (pidVal == 0 && hasPrev) pidVal = prev.u64("pid");
 
             dettagli::Json rec = dettagli::Json::makeObj();
@@ -1146,7 +1213,8 @@ private:
         (void)uuid;
     }
 
-    bool leggiAntigravity(double now, std::vector<Agente>& hookAgenti, std::vector<Agente>& out) {
+    bool leggiAntigravity(double now, const std::vector<DWORD>& agyPids,
+                          std::vector<Agente>& hookAgenti, std::vector<Agente>& out) {
         const std::wstring profile = dettagli::envDir(L"USERPROFILE");
         if (profile.empty()) return false;
         const std::wstring root = profile + L"\\.gemini\\antigravity-cli";
@@ -1156,6 +1224,22 @@ private:
         HANDLE h = FindFirstFileW((presDir + L"\\*.lock").c_str(), &fd);
         if (h == INVALID_HANDLE_VALUE) return false;
 
+        std::unordered_set<DWORD> usedPids;
+        for (const auto& ha : hookAgenti) {
+            if (ha.pid != 0) usedPids.insert(ha.pid);
+        }
+        std::vector<DWORD> freePids;
+        freePids.reserve(agyPids.size());
+        for (DWORD p : agyPids) {
+            if (!usedPids.count(p)) freePids.push_back(p);
+        }
+
+        struct PassiveAg {
+            double lockCreated = 0.0;
+            Agente a;
+        };
+        std::vector<PassiveAg> passivi;
+        std::vector<Agente*> hookSenzaPid;
         std::unordered_set<std::wstring> liveIds;
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
@@ -1210,6 +1294,7 @@ private:
                 if (hook->modello.empty() && !tc.model.empty()) hook->modello = dettagli::daUtf8(tc.model);
                 if (!annTitle.empty()) hook->titolo = annTitle;
                 if (hook->fonte == Fonte::Hook) { hook->fonte = Fonte::Antigravity; hook->nome = L"Antigravity"; }
+                if (hook->pid == 0) hookSenzaPid.push_back(hook);
                 continue;
             }
 
@@ -1225,9 +1310,29 @@ private:
             a.tokOut = tc.tokOut;
             a.tokCache = tc.tokCache;
             a.aggiornatoT = mtimeEpoch;
-            out.push_back(std::move(a));
+            passivi.push_back({dettagli::fileTimeAEpoch(fd.ftCreationTime), std::move(a)});
         } while (FindNextFileW(h, &fd));
         FindClose(h);
+
+        std::sort(passivi.begin(), passivi.end(), [](const PassiveAg& x, const PassiveAg& y) {
+            if (x.lockCreated != y.lockCreated) return x.lockCreated < y.lockCreated;
+            return x.a.id < y.a.id;
+        });
+
+        size_t freeIdx = 0;
+        size_t wrapIdx = 0;
+        auto prendiAgyPid = [&]() -> DWORD {
+            if (freeIdx < freePids.size()) return freePids[freeIdx++];
+            if (!agyPids.empty()) return agyPids[wrapIdx++ % agyPids.size()];
+            return 0;
+        };
+        for (Agente* hk : hookSenzaPid) {
+            if (hk->pid == 0) hk->pid = prendiAgyPid();
+        }
+        for (auto& p : passivi) {
+            if (p.a.pid == 0) p.a.pid = prendiAgyPid();
+            out.push_back(std::move(p.a));
+        }
 
         for (auto it = transcriptCache.begin(); it != transcriptCache.end();) {
             if (!liveIds.count(it->first)) it = transcriptCache.erase(it);
@@ -1602,16 +1707,34 @@ private:
         std::vector<Agente> hookAgenti;
         leggiDropbox(now, hookAgenti);
 
-        std::vector<Agente> tutti;
-        const bool agLive = leggiAntigravity(now, hookAgenti, tutti);
-        leggiClaude(now, hookAgenti, tutti);
-
-        for (auto& ha : hookAgenti) tutti.push_back(std::move(ha));
-
         std::vector<ProcSnap> procs;
         DWORD ollamaPid = 0, lmsPid = 0;
         double lmsCpu = 0.0;
         raccogliProcessi(now, procs, ollamaPid, lmsPid, lmsCpu);
+
+        std::vector<ProcSnap> agyProcs;
+        for (const auto& p : procs) {
+            if (p.exeLower == L"agy.exe") agyProcs.push_back(p);
+        }
+        std::sort(agyProcs.begin(), agyProcs.end(), [](const ProcSnap& x, const ProcSnap& y) {
+            if (x.primoAvvistamento != y.primoAvvistamento) return x.primoAvvistamento < y.primoAvvistamento;
+            return x.pid < y.pid;
+        });
+        std::vector<DWORD> agyPids;
+        agyPids.reserve(agyProcs.size());
+        for (const auto& p : agyProcs) agyPids.push_back(p.pid);
+
+        std::vector<Agente> tutti;
+        const bool agLive = leggiAntigravity(now, agyPids, hookAgenti, tutti);
+        leggiClaude(now, hookAgenti, tutti);
+
+        for (auto& ha : hookAgenti) {
+            if (ha.fonte == Fonte::Antigravity && ha.pid == 0 && !agyPids.empty()) {
+                ha.pid = agyPids.front();
+            }
+            tutti.push_back(std::move(ha));
+        }
+
         leggiOllama(ollamaPid, now, tutti);
         leggiLmStudio(lmsPid, lmsCpu, now, tutti);
         aggiungiProcessi(procs, agLive, tutti);
@@ -1662,5 +1785,126 @@ private:
         return 0;
     }
 };
+
+inline HWND trovaFinestraAgente(const Agente& a) {
+    const auto procMap = dettagli::mappaProcessi();
+
+    std::unordered_map<DWORD, int> ancestorDepth;
+    if (a.pid != 0) {
+        DWORD cur = a.pid;
+        for (int depth = 0; depth < 8 && cur != 0; depth++) {
+            if (ancestorDepth.count(cur)) break;
+            auto it = procMap.find(cur);
+            if (depth > 0 && it != procMap.end()) {
+                const std::wstring& ex = it->second.exeLower;
+                if (ex == L"explorer.exe" || ex == L"services.exe" || ex == L"svchost.exe" ||
+                    ex == L"wininit.exe" || ex == L"winlogon.exe") {
+                    break;
+                }
+            }
+            ancestorDepth[cur] = depth;
+            if (it == procMap.end()) break;
+            const DWORD parent = it->second.parentPid;
+            if (parent == cur) break;
+            cur = parent;
+        }
+    }
+
+    struct CandWin {
+        HWND hwnd = nullptr;
+        DWORD pid = 0;
+        std::wstring exeLower;
+        std::wstring titleLower;
+    };
+    struct EnumCtx {
+        const std::unordered_map<DWORD, dettagli::ProcInfo>* procs;
+        std::vector<CandWin> wins;
+    } ctx{&procMap, {}};
+
+    EnumWindows([](HWND h, LPARAM l) -> BOOL {
+        if (!dettagli::finestraValida(h)) return TRUE;
+        auto* c = (EnumCtx*)l;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(h, &pid);
+        const int len = GetWindowTextLengthW(h);
+        std::wstring title((size_t)len + 1, L'\0');
+        const int got = GetWindowTextW(h, title.data(), len + 1);
+        title.resize(got > 0 ? (size_t)got : 0);
+        std::wstring exeLower;
+        if (auto it = c->procs->find(pid); it != c->procs->end()) exeLower = it->second.exeLower;
+        c->wins.push_back({h, pid, std::move(exeLower), dettagli::minuscolo(title)});
+        return TRUE;
+    }, (LPARAM)&ctx);
+
+    if (ctx.wins.empty()) return nullptr;
+
+    const std::wstring titoloLower = dettagli::minuscolo(a.titolo);
+    std::wstring folderLower = dettagli::minuscolo(dettagli::leafPath(a.cwd));
+    if (folderLower.size() == 2 && folderLower[1] == L':') folderLower.clear();
+    const std::wstring nomeLower = dettagli::minuscolo(a.nome);
+
+    bool anyAncestorMatched = false;
+    for (const auto& w : ctx.wins) {
+        if (ancestorDepth.count(w.pid)) { anyAncestorMatched = true; break; }
+    }
+
+    auto appBonus = [&](const std::wstring& exe) -> int {
+        if (exe.empty()) return 0;
+        switch (a.fonte) {
+            case Fonte::Antigravity:
+                if (exe == L"antigravity.exe") return 35;
+                if (exe == L"windowsterminal.exe" || exe == L"wezterm-gui.exe" ||
+                    exe == L"alacritty.exe" || exe == L"code.exe") return 25;
+                return 0;
+            case Fonte::Claude:
+                if (exe == L"claude.exe" || exe == L"dia.exe") return 35;
+                if (exe == L"windowsterminal.exe" || exe == L"code.exe") return 25;
+                return 0;
+            case Fonte::Codex:
+                if (exe == L"windowsterminal.exe" || exe == L"code.exe") return 25;
+                return 0;
+            case Fonte::LmStudio:
+                if (exe == L"lm studio.exe") return 35;
+                return 0;
+            case Fonte::Ollama:
+                if (exe == L"ollama app.exe") return 35;
+                if (exe == L"windowsterminal.exe") return 20;
+                return 0;
+            case Fonte::Processo:
+            case Fonte::Hook: {
+                if (nomeLower.empty()) return 0;
+                if (exe == nomeLower) return 30;
+                std::wstring stem = exe;
+                if (stem.size() > 4 && stem.compare(stem.size() - 4, 4, L".exe") == 0) stem.resize(stem.size() - 4);
+                if (!stem.empty() && stem == nomeLower) return 30;
+                return 0;
+            }
+        }
+        return 0;
+    };
+
+    HWND bestHwnd = nullptr;
+    int bestScore = 0;
+    for (const auto& w : ctx.wins) {
+        int score = 0;
+        if (auto it = ancestorDepth.find(w.pid); it != ancestorDepth.end()) {
+            score += 100 - it->second * 4;
+        }
+        if (!titoloLower.empty() && w.titleLower.find(titoloLower) != std::wstring::npos) {
+            score += 60;
+        }
+        if (!folderLower.empty() && w.titleLower.find(folderLower) != std::wstring::npos) {
+            score += 40;
+        }
+        if (!anyAncestorMatched || ancestorDepth.count(w.pid)) {
+            score += appBonus(w.exeLower);
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            bestHwnd = w.hwnd;
+        }
+    }
+    return bestHwnd;
+}
 
 }  // namespace ai
