@@ -1303,22 +1303,10 @@ inline auto Motore::altezzaAI() const -> float {
 }
 
 inline auto Motore::focusAgente(const ai::Agente& a) -> void {
-    HWND target = nullptr;
-    if (a.pid != 0) {
-        struct Ctx { DWORD pid; HWND best; } ctx{a.pid, nullptr};
-        EnumWindows([](HWND h, LPARAM l) -> BOOL {
-            auto* c = (Ctx*)l;
-            if (!IsWindowVisible(h) || GetWindow(h, GW_OWNER) || GetWindowTextLengthW(h) == 0) return TRUE;
-            if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
-            DWORD pid = 0;
-            GetWindowThreadProcessId(h, &pid);
-            if (pid == c->pid) { c->best = h; return FALSE; }
-            return TRUE;
-        }, (LPARAM)&ctx);
-        target = ctx.best;
-    }
+    HWND target = ai::trovaFinestraAgente(a);
     if (target) {
         chiudiPannello();
+        if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
         portaDavanti(target);
         return;
     }
