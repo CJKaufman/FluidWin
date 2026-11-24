@@ -1,0 +1,1666 @@
+// Monitoraggio degli agenti AI locali (hook CLI, sessioni Antigravity/Claude Code, Ollama/LM Studio e processi).
+#pragma once
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#include <winhttp.h>
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cwctype>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
+
+namespace ai {
+
+enum class Stato { Inattivo, Occupato, InAttesa, Completato, Errore };
+enum class Fonte { Hook, Antigravity, Claude, Codex, Ollama, LmStudio, Processo };
+
+struct Agente {
+    std::wstring id, nome, titolo, modello, strumento, cwd;
+    Fonte fonte = Fonte::Processo;
+    Stato stato = Stato::Inattivo;
+    uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+    DWORD pid = 0;
+    double aggiornatoT = 0;
+    bool daHook = false;
+};
+
+struct Riepilogo {
+    Stato statoGlobale = Stato::Inattivo;
+    int attivi = 0, occupati = 0, inAttesa = 0, completati = 0;
+    uint64_t tokInTot = 0, tokOutTot = 0, tokCacheTot = 0;
+    std::vector<Agente> agenti;
+};
+
+inline std::wstring formattaToken(uint64_t n) {
+    wchar_t b[32];
+    if (n < 1000ULL) {
+        swprintf(b, 32, L"%llu", (unsigned long long)n);
+    } else if (n < 999950ULL) {
+        swprintf(b, 32, L"%.1fk", (double)n / 1000.0);
+    } else if (n < 999950000ULL) {
+        swprintf(b, 32, L"%.1fM", (double)n / 1000000.0);
+    } else {
+        swprintf(b, 32, L"%.1fB", (double)n / 1000000000.0);
+    }
+    return b;
+}
+
+namespace dettagli {
+
+inline std::wstring daUtf8(const std::string& s) {
+    if (s.empty()) return L"";
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), nullptr, 0);
+    if (n <= 0) return L"";
+    std::wstring w((size_t)n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), (int)s.size(), w.data(), n);
+    return w;
+}
+
+inline std::string inUtf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return "";
+    std::string s((size_t)n, '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), (int)w.size(), s.data(), n, nullptr, nullptr);
+    return s;
+}
+
+inline std::wstring minuscolo(std::wstring s) {
+    for (wchar_t& c : s) c = (wchar_t)towlower(c);
+    return s;
+}
+
+inline std::wstring envDir(const wchar_t* nome) {
+    wchar_t buf[32768];
+    const DWORD n = GetEnvironmentVariableW(nome, buf, 32768);
+    if (!n || n >= 32768) return L"";
+    std::wstring r(buf, n);
+    while (!r.empty() && (r.back() == L'\\' || r.back() == L'/')) r.pop_back();
+    return r;
+}
+
+inline void creaCartelle(const std::wstring& dir) {
+    if (dir.empty()) return;
+    for (size_t i = 0; i < dir.size(); i++) {
+        if ((dir[i] == L'\\' || dir[i] == L'/') && i > 2) {
+            CreateDirectoryW(dir.substr(0, i).c_str(), nullptr);
+        }
+    }
+    CreateDirectoryW(dir.c_str(), nullptr);
+}
+
+inline double fileTimeAEpoch(FILETIME ft) {
+    ULARGE_INTEGER u{};
+    u.LowPart = ft.dwLowDateTime;
+    u.HighPart = ft.dwHighDateTime;
+    if (u.QuadPart < 116444736000000000ULL) return 0.0;
+    return (double)(u.QuadPart - 116444736000000000ULL) / 1e7;
+}
+
+inline double adessoEpoch() {
+    FILETIME ft{};
+    GetSystemTimeAsFileTime(&ft);
+    return fileTimeAEpoch(ft);
+}
+
+inline std::wstring percorsoExe() {
+    std::wstring buf(MAX_PATH, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), (DWORD)buf.size());
+        if (!n) return L"";
+        if (n < buf.size() - 1) {
+            buf.resize(n);
+            return buf;
+        }
+        if (buf.size() >= 32768) return L"";
+        buf.resize(buf.size() * 2);
+    }
+}
+
+inline bool leggiFile(const std::wstring& path, std::string& out, size_t maxBytes = 1024 * 1024) {
+    out.clear();
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                           nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER sz{};
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart <= 0) {
+        CloseHandle(f);
+        return sz.QuadPart == 0;
+    }
+    const size_t n = (size_t)std::min<LONGLONG>(sz.QuadPart, (LONGLONG)maxBytes);
+    out.resize(n);
+    DWORD letti = 0, tot = 0;
+    while (tot < n && ReadFile(f, out.data() + tot, (DWORD)(n - tot), &letti, nullptr) && letti > 0) {
+        tot += letti;
+    }
+    out.resize(tot);
+    CloseHandle(f);
+    return true;
+}
+
+inline bool scriviAtomico(const std::wstring& path, const std::string& dati) {
+    const size_t sl = path.find_last_of(L"\\/");
+    if (sl != std::wstring::npos) creaCartelle(path.substr(0, sl));
+    const std::wstring tmp = path + L".tmp." + std::to_wstring(GetCurrentProcessId());
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return false;
+    DWORD tot = 0;
+    bool ok = true;
+    while (tot < dati.size()) {
+        DWORD wr = 0;
+        if (!WriteFile(f, dati.data() + tot, (DWORD)(dati.size() - tot), &wr, nullptr) || !wr) {
+            ok = false;
+            break;
+        }
+        tot += wr;
+    }
+    if (ok) FlushFileBuffers(f);
+    CloseHandle(f);
+    if (!ok || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        DeleteFileW(tmp.c_str());
+        return false;
+    }
+    return true;
+}
+
+inline std::wstring sanificaId(const std::wstring& s, const wchar_t* ripiego) {
+    std::wstring out;
+    out.reserve(std::min<size_t>(s.size(), 64));
+    for (wchar_t c : s) {
+        if (out.size() >= 64) break;
+        if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') || c == L'-' || c == L'_') {
+            out.push_back(c);
+        } else {
+            out.push_back(L'_');
+        }
+    }
+    while (!out.empty() && out.back() == L'_') out.pop_back();
+    return out.empty() ? std::wstring(ripiego) : out;
+}
+
+// ---- parser e serializzatore JSON minimale ----
+
+struct Json {
+    enum Tipo { Null, Bool, Num, Str, Arr, Obj };
+    Tipo tipo = Null;
+    bool b = false;
+    double n = 0;
+    std::string s;
+    std::vector<Json> arr;
+    std::vector<std::pair<std::string, Json>> obj;
+
+    static Json makeNull() { return Json{}; }
+    static Json makeBool(bool v) { Json j; j.tipo = Bool; j.b = v; return j; }
+    static Json makeNum(double v) { Json j; j.tipo = Num; j.n = v; return j; }
+    static Json makeStr(std::string v) { Json j; j.tipo = Str; j.s = std::move(v); return j; }
+    static Json makeArr() { Json j; j.tipo = Arr; return j; }
+    static Json makeObj() { Json j; j.tipo = Obj; return j; }
+
+    const Json* trova(const char* k) const {
+        if (tipo != Obj) return nullptr;
+        for (const auto& [kk, vv] : obj) if (kk == k) return &vv;
+        return nullptr;
+    }
+    Json* trovaMut(const char* k) {
+        if (tipo != Obj) return nullptr;
+        for (auto& [kk, vv] : obj) if (kk == k) return &vv;
+        return nullptr;
+    }
+    std::string str(const char* k, const char* def = "") const {
+        const Json* v = trova(k);
+        return (v && v->tipo == Str) ? v->s : std::string(def);
+    }
+    double num(const char* k, double def = 0.0) const {
+        const Json* v = trova(k);
+        return (v && v->tipo == Num) ? v->n : def;
+    }
+    uint64_t u64(const char* k, uint64_t def = 0) const {
+        const Json* v = trova(k);
+        return (v && v->tipo == Num && v->n >= 0) ? (uint64_t)v->n : def;
+    }
+    void imposta(const std::string& k, Json v) {
+        if (tipo != Obj) { tipo = Obj; obj.clear(); }
+        for (auto& [kk, vv] : obj) {
+            if (kk == k) { vv = std::move(v); return; }
+        }
+        obj.emplace_back(k, std::move(v));
+    }
+    void rimuovi(const std::string& k) {
+        if (tipo != Obj) return;
+        obj.erase(std::remove_if(obj.begin(), obj.end(), [&](const auto& p) { return p.first == k; }), obj.end());
+    }
+};
+
+inline void aggiungiUtf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back((char)cp);
+    } else if (cp < 0x800) {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0x10FFFF) {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+inline bool hex4(const std::string& in, size_t p, uint32_t& out) {
+    if (p + 4 > in.size()) return false;
+    uint32_t v = 0;
+    for (size_t i = 0; i < 4; i++) {
+        const char c = in[p + i];
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') v |= (uint32_t)(c - 'a' + 10);
+        else if (c >= 'A' && c <= 'F') v |= (uint32_t)(c - 'A' + 10);
+        else return false;
+    }
+    out = v;
+    return true;
+}
+
+inline void saltaSpazi(const std::string& in, size_t& p) {
+    while (p < in.size() && (in[p] == ' ' || in[p] == '\t' || in[p] == '\r' || in[p] == '\n')) p++;
+}
+
+inline bool parseStr(const std::string& in, size_t& p, std::string& out) {
+    out.clear();
+    if (p >= in.size() || in[p] != '"') return false;
+    p++;
+    while (p < in.size()) {
+        const char c = in[p++];
+        if (c == '"') return true;
+        if (c != '\\') {
+            out.push_back(c);
+            continue;
+        }
+        if (p >= in.size()) return false;
+        const char e = in[p++];
+        switch (e) {
+            case '"': out.push_back('"'); break;
+            case '\\': out.push_back('\\'); break;
+            case '/': out.push_back('/'); break;
+            case 'b': out.push_back('\b'); break;
+            case 'f': out.push_back('\f'); break;
+            case 'n': out.push_back('\n'); break;
+            case 'r': out.push_back('\r'); break;
+            case 't': out.push_back('\t'); break;
+            case 'u': {
+                uint32_t u = 0;
+                if (!hex4(in, p, u)) return false;
+                p += 4;
+                if (u >= 0xD800 && u <= 0xDBFF && p + 6 <= in.size() && in[p] == '\\' && in[p + 1] == 'u') {
+                    uint32_t lo = 0;
+                    if (hex4(in, p + 2, lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+                        p += 6;
+                        u = 0x10000 + (((u - 0xD800) << 10) | (lo - 0xDC00));
+                    }
+                }
+                aggiungiUtf8(out, u);
+                break;
+            }
+            default: out.push_back(e); break;
+        }
+    }
+    return false;
+}
+
+inline bool parseVal(const std::string& in, size_t& p, Json& out, int depth) {
+    if (depth > 64) return false;
+    saltaSpazi(in, p);
+    if (p >= in.size()) return false;
+    const char c = in[p];
+    if (c == '"') {
+        out = Json::makeStr("");
+        return parseStr(in, p, out.s);
+    }
+    if (c == '{') {
+        p++;
+        out = Json::makeObj();
+        saltaSpazi(in, p);
+        if (p < in.size() && in[p] == '}') { p++; return true; }
+        for (;;) {
+            saltaSpazi(in, p);
+            std::string k;
+            if (!parseStr(in, p, k)) return false;
+            saltaSpazi(in, p);
+            if (p >= in.size() || in[p] != ':') return false;
+            p++;
+            Json v;
+            if (!parseVal(in, p, v, depth + 1)) return false;
+            out.obj.emplace_back(std::move(k), std::move(v));
+            saltaSpazi(in, p);
+            if (p >= in.size()) return false;
+            if (in[p] == '}') { p++; return true; }
+            if (in[p] != ',') return false;
+            p++;
+        }
+    }
+    if (c == '[') {
+        p++;
+        out = Json::makeArr();
+        saltaSpazi(in, p);
+        if (p < in.size() && in[p] == ']') { p++; return true; }
+        for (;;) {
+            Json v;
+            if (!parseVal(in, p, v, depth + 1)) return false;
+            out.arr.push_back(std::move(v));
+            saltaSpazi(in, p);
+            if (p >= in.size()) return false;
+            if (in[p] == ']') { p++; return true; }
+            if (in[p] != ',') return false;
+            p++;
+        }
+    }
+    if (in.compare(p, 4, "true") == 0) { p += 4; out = Json::makeBool(true); return true; }
+    if (in.compare(p, 5, "false") == 0) { p += 5; out = Json::makeBool(false); return true; }
+    if (in.compare(p, 4, "null") == 0) { p += 4; out = Json::makeNull(); return true; }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        const char* start = in.c_str() + p;
+        char* end = nullptr;
+        const double v = strtod(start, &end);
+        if (end == start) return false;
+        p = (size_t)(end - in.c_str());
+        out = Json::makeNum(v);
+        return true;
+    }
+    return false;
+}
+
+inline bool parseJson(const std::string& in, Json& out) {
+    size_t p = 0;
+    if (in.size() >= 3 && (unsigned char)in[0] == 0xEF && (unsigned char)in[1] == 0xBB && (unsigned char)in[2] == 0xBF) p = 3;
+    if (!parseVal(in, p, out, 0)) return false;
+    saltaSpazi(in, p);
+    return p == in.size();
+}
+
+inline void escapeJsonStr(const std::string& s, std::string& out) {
+    out.push_back('"');
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char b[8];
+                    snprintf(b, 8, "\\u%04x", (unsigned)c);
+                    out += b;
+                } else {
+                    out.push_back((char)c);
+                }
+        }
+    }
+    out.push_back('"');
+}
+
+inline void dumpJsonImpl(const Json& v, std::string& out, bool pretty, int indent) {
+    auto nl = [&](int ind) {
+        out.push_back('\n');
+        out.append((size_t)ind * 2, ' ');
+    };
+    switch (v.tipo) {
+        case Json::Null: out += "null"; break;
+        case Json::Bool: out += (v.b ? "true" : "false"); break;
+        case Json::Num: {
+            char b[64];
+            if (std::isfinite(v.n) && std::floor(v.n) == v.n && std::abs(v.n) < 9e15) {
+                snprintf(b, 64, "%.0f", v.n);
+            } else {
+                snprintf(b, 64, "%.15g", v.n);
+            }
+            out += b;
+            break;
+        }
+        case Json::Str: escapeJsonStr(v.s, out); break;
+        case Json::Arr:
+            out.push_back('[');
+            if (!v.arr.empty()) {
+                for (size_t i = 0; i < v.arr.size(); i++) {
+                    if (i > 0) out.push_back(',');
+                    if (pretty) nl(indent + 1);
+                    dumpJsonImpl(v.arr[i], out, pretty, indent + 1);
+                }
+                if (pretty) nl(indent);
+            }
+            out.push_back(']');
+            break;
+        case Json::Obj:
+            out.push_back('{');
+            if (!v.obj.empty()) {
+                for (size_t i = 0; i < v.obj.size(); i++) {
+                    if (i > 0) out.push_back(',');
+                    if (pretty) nl(indent + 1);
+                    escapeJsonStr(v.obj[i].first, out);
+                    out += (pretty ? ": " : ":");
+                    dumpJsonImpl(v.obj[i].second, out, pretty, indent + 1);
+                }
+                if (pretty) nl(indent);
+            }
+            out.push_back('}');
+            break;
+    }
+}
+
+inline std::string dumpJson(const Json& v, bool pretty) {
+    std::string out;
+    dumpJsonImpl(v, out, pretty, 0);
+    if (pretty) out.push_back('\n');
+    return out;
+}
+
+inline int prioritaStato(Stato s) {
+    switch (s) {
+        case Stato::Occupato:   return 0;
+        case Stato::InAttesa:   return 1;
+        case Stato::Errore:     return 2;
+        case Stato::Completato: return 3;
+        case Stato::Inattivo:   return 4;
+    }
+    return 5;
+}
+
+inline Fonte fonteDaStringa(const std::string& s) {
+    std::string l = s;
+    for (char& c : l) if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    if (l == "antigravity") return Fonte::Antigravity;
+    if (l == "claude") return Fonte::Claude;
+    if (l == "codex") return Fonte::Codex;
+    if (l == "ollama") return Fonte::Ollama;
+    if (l == "lmstudio") return Fonte::LmStudio;
+    return Fonte::Hook;
+}
+
+inline std::wstring nomeFonte(Fonte f) {
+    switch (f) {
+        case Fonte::Hook:        return L"Hook";
+        case Fonte::Antigravity: return L"Antigravity";
+        case Fonte::Claude:      return L"Claude";
+        case Fonte::Codex:       return L"Codex";
+        case Fonte::Ollama:      return L"Ollama";
+        case Fonte::LmStudio:    return L"LM Studio";
+        case Fonte::Processo:    return L"Process";
+    }
+    return L"Agent";
+}
+
+inline Stato statoDaStringa(const std::string& s) {
+    if (s == "busy") return Stato::Occupato;
+    if (s == "waiting") return Stato::InAttesa;
+    if (s == "done") return Stato::Completato;
+    if (s == "error") return Stato::Errore;
+    return Stato::Inattivo;
+}
+
+inline const char* stringaDaStato(Stato s) {
+    switch (s) {
+        case Stato::Occupato:   return "busy";
+        case Stato::InAttesa:   return "waiting";
+        case Stato::Completato: return "done";
+        case Stato::Errore:     return "error";
+        case Stato::Inattivo:   return "idle";
+    }
+    return "idle";
+}
+
+inline bool processoVivo(DWORD pid) {
+    if (pid == 0) return false;
+    HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    if (!p) return GetLastError() == ERROR_ACCESS_DENIED;
+    const DWORD w = WaitForSingleObject(p, 0);
+    CloseHandle(p);
+    return w == WAIT_TIMEOUT;
+}
+
+inline std::wstring leggiTitoloPbtxt(const std::wstring& path) {
+    std::string txt;
+    if (!leggiFile(path, txt, 65536) || txt.empty()) return L"";
+    const size_t pos = txt.find("title:");
+    if (pos == std::string::npos) return L"";
+    size_t p = pos + 6;
+    while (p < txt.size() && (txt[p] == ' ' || txt[p] == '\t')) p++;
+    if (p >= txt.size() || txt[p] != '"') return L"";
+    p++;
+    std::string utf8;
+    while (p < txt.size()) {
+        const char c = txt[p++];
+        if (c == '"') break;
+        if (c != '\\') { utf8.push_back(c); continue; }
+        if (p >= txt.size()) break;
+        const char e = txt[p++];
+        if (e >= '0' && e <= '7') {
+            unsigned v = (unsigned)(e - '0');
+            for (int k = 0; k < 2 && p < txt.size() && txt[p] >= '0' && txt[p] <= '7'; k++) {
+                v = v * 8 + (unsigned)(txt[p++] - '0');
+            }
+            utf8.push_back((char)v);
+        } else if (e == 'n') utf8.push_back('\n');
+        else if (e == 't') utf8.push_back('\t');
+        else if (e == 'r') {}
+        else utf8.push_back(e);
+    }
+    return daUtf8(utf8);
+}
+
+inline bool httpGetLocale(INTERNET_PORT porta, const wchar_t* percorso, std::string& out) {
+    out.clear();
+    HINTERNET s = WinHttpOpen(L"FluidWin-AI", WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!s) return false;
+    WinHttpSetTimeouts(s, 250, 250, 250, 250);
+    HINTERNET c = WinHttpConnect(s, L"127.0.0.1", porta, 0);
+    HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", percorso, nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0) : nullptr;
+    bool ok = false;
+    if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr)) {
+        DWORD status = 0, szStatus = sizeof(status);
+        if (WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &status, &szStatus, WINHTTP_NO_HEADER_INDEX) && status == 200) {
+            DWORD avail = 0;
+            while (WinHttpQueryDataAvailable(r, &avail) && avail > 0 && out.size() + avail <= 512 * 1024) {
+                const size_t base = out.size();
+                out.resize(base + avail);
+                DWORD rd = 0;
+                if (!WinHttpReadData(r, out.data() + base, avail, &rd) || rd == 0) {
+                    out.resize(base);
+                    break;
+                }
+                out.resize(base + rd);
+            }
+            ok = true;
+        }
+    }
+    if (r) WinHttpCloseHandle(r);
+    if (c) WinHttpCloseHandle(c);
+    WinHttpCloseHandle(s);
+    return ok;
+}
+
+inline std::wstring leafPath(const std::wstring& p) {
+    if (p.empty()) return L"";
+    size_t end = p.size();
+    while (end > 0 && (p[end - 1] == L'\\' || p[end - 1] == L'/')) end--;
+    if (end == 0) return L"";
+    const size_t sl = p.find_last_of(L"\\/", end - 1);
+    return sl == std::wstring::npos ? p.substr(0, end) : p.substr(sl + 1, end - sl - 1);
+}
+
+}  // namespace dettagli
+
+inline std::wstring cartellaHook() {
+    const std::wstring base = dettagli::envDir(L"LOCALAPPDATA");
+    if (base.empty()) return L"";
+    return base + L"\\FluidWin\\ai-agents";
+}
+
+inline bool gestisciHookCli(int argc, wchar_t** argv) {
+    if (!argv || argc < 3 || wcscmp(argv[1], L"--ai-hook") != 0) return false;
+
+    const std::wstring sourceW = argv[2] ? argv[2] : L"";
+    const std::wstring eventArg = (argc >= 4 && argv[3]) ? argv[3] : L"";
+
+    std::string stdinData;
+    const HANDLE hIn = GetStdHandle(STD_INPUT_HANDLE);
+    if (hIn && hIn != INVALID_HANDLE_VALUE) {
+        const DWORD ft = GetFileType(hIn);
+        if (ft != FILE_TYPE_CHAR && ft != FILE_TYPE_UNKNOWN) {
+            constexpr size_t MAX_IN = 256 * 1024;
+            char buf[4096];
+            DWORD nr = 0;
+            while (stdinData.size() < MAX_IN && ReadFile(hIn, buf, (DWORD)std::min<size_t>(sizeof(buf), MAX_IN - stdinData.size()), &nr, nullptr) && nr > 0) {
+                stdinData.append(buf, nr);
+            }
+        }
+    }
+
+    dettagli::Json inJson;
+    const bool hasJson = !stdinData.empty() && dettagli::parseJson(stdinData, inJson) && inJson.tipo == dettagli::Json::Obj;
+
+    std::string id = hasJson ? inJson.str("conversationId") : "";
+    if (id.empty() && hasJson) id = inJson.str("session_id");
+    if (id.empty() && hasJson) id = inJson.str("sessionId");
+    if (id.empty() && hasJson) id = inJson.str("id");
+    if (id.empty()) id = "default";
+
+    std::string ev = hasJson ? inJson.str("hookEventName") : "";
+    if (ev.empty() && hasJson) ev = inJson.str("hook_event_name");
+    if (ev.empty()) ev = dettagli::inUtf8(eventArg);
+
+    const std::wstring dir = cartellaHook();
+    if (!dir.empty()) {
+        const std::wstring fileName = dettagli::sanificaId(sourceW, L"hook") + L"-" +
+                                      dettagli::sanificaId(dettagli::daUtf8(id), L"default") + L".json";
+        const std::wstring dst = dir + L"\\" + fileName;
+
+        if (ev == "SessionEnd") {
+            DeleteFileW(dst.c_str());
+        } else {
+            dettagli::Json prev;
+            std::string prevRaw;
+            const bool hasPrev = dettagli::leggiFile(dst, prevRaw, 128 * 1024) &&
+                                 dettagli::parseJson(prevRaw, prev) && prev.tipo == dettagli::Json::Obj;
+
+            std::string model = hasJson ? inJson.str("modelName") : "";
+            if (model.empty() && hasJson) model = inJson.str("model");
+            if (model.empty() && hasPrev) model = prev.str("model");
+
+            std::string cwd = hasJson ? inJson.str("cwd") : "";
+            if (cwd.empty() && hasPrev) cwd = prev.str("cwd");
+
+            std::string title = hasJson ? inJson.str("lastUserInput") : "";
+            if (title.empty() && hasJson) title = inJson.str("prompt");
+            if (title.size() > 120) {
+                title.resize(117);
+                title += "...";
+            }
+            if (title.empty() && hasPrev) title = prev.str("title");
+
+            std::string tool;
+            if (hasJson) {
+                if (const auto* tc = inJson.trova("toolCall"); tc && tc->tipo == dettagli::Json::Obj) tool = tc->str("name");
+                if (tool.empty()) tool = inJson.str("tool_name");
+            }
+            if (tool.empty() && hasPrev && ev != "PostToolUse" && ev != "PostInvocation" &&
+                ev != "PreInvocation" && ev != "UserPromptSubmit" && ev != "Stop" && ev != "SessionStart") {
+                tool = prev.str("tool");
+            }
+
+            std::string termReason = hasJson ? inJson.str("terminationReason") : "";
+            std::string errMsg;
+            if (hasJson) {
+                if (const auto* ep = inJson.trova("error")) {
+                    if (ep->tipo == dettagli::Json::Str) errMsg = ep->s;
+                    else if (ep->tipo == dettagli::Json::Bool && ep->b) errMsg = "error";
+                    else if (ep->tipo == dettagli::Json::Obj && !ep->obj.empty()) errMsg = "error";
+                }
+            }
+
+            Stato st = hasPrev ? dettagli::statoDaStringa(prev.str("status")) : Stato::Inattivo;
+            if (ev == "SessionStart") {
+                st = Stato::Inattivo;
+                tool.clear();
+            } else if (ev == "PreInvocation" || ev == "UserPromptSubmit" || ev == "PreToolUse") {
+                st = Stato::Occupato;
+            } else if (ev == "PostToolUse" || ev == "PostInvocation") {
+                st = Stato::Occupato;
+                tool.clear();
+            } else if (ev == "Notification") {
+                st = Stato::InAttesa;
+            } else if (ev == "Stop") {
+                st = (!errMsg.empty() || termReason == "ERROR") ? Stato::Errore : Stato::Completato;
+                tool.clear();
+            }
+
+            uint64_t pidVal = hasJson ? inJson.u64("pid") : 0;
+            if (pidVal == 0 && hasPrev) pidVal = prev.u64("pid");
+
+            dettagli::Json rec = dettagli::Json::makeObj();
+            rec.imposta("id", dettagli::Json::makeStr(id));
+            rec.imposta("source", dettagli::Json::makeStr(dettagli::inUtf8(sourceW)));
+            rec.imposta("status", dettagli::Json::makeStr(dettagli::stringaDaStato(st)));
+            if (!ev.empty()) rec.imposta("event", dettagli::Json::makeStr(ev));
+            if (!title.empty()) rec.imposta("title", dettagli::Json::makeStr(title));
+            if (!model.empty()) rec.imposta("model", dettagli::Json::makeStr(model));
+            if (!tool.empty()) rec.imposta("tool", dettagli::Json::makeStr(tool));
+            if (!cwd.empty()) rec.imposta("cwd", dettagli::Json::makeStr(cwd));
+            if (pidVal > 0) rec.imposta("pid", dettagli::Json::makeNum((double)pidVal));
+            rec.imposta("updatedAt", dettagli::Json::makeNum(dettagli::adessoEpoch()));
+
+            dettagli::scriviAtomico(dst, dettagli::dumpJson(rec, false));
+        }
+    }
+
+    const HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut && hOut != INVALID_HANDLE_VALUE && GetFileType(hOut) != FILE_TYPE_UNKNOWN) {
+        DWORD wr = 0;
+        WriteFile(hOut, "{}\n", 3, &wr, nullptr);
+    }
+    return true;
+}
+
+// ---- installazione opt-in degli hook CLI ----
+
+inline bool hookAntigravityInstallati() {
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    if (profile.empty()) return false;
+    std::string raw;
+    if (!dettagli::leggiFile(profile + L"\\.gemini\\config\\hooks.json", raw, 512 * 1024) || raw.empty()) return false;
+    dettagli::Json root;
+    if (!dettagli::parseJson(raw, root) || root.tipo != dettagli::Json::Obj) return false;
+    const auto* entry = root.trova("fluidwin-ai-monitor");
+    if (!entry || entry->tipo != dettagli::Json::Obj) return false;
+    if (const auto* en = entry->trova("enabled"); en && en->tipo == dettagli::Json::Bool && !en->b) return false;
+    return true;
+}
+
+inline bool installaHookAntigravity(bool abilita) {
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    if (profile.empty()) return false;
+    const std::wstring path = profile + L"\\.gemini\\config\\hooks.json";
+    dettagli::Json root = dettagli::Json::makeObj();
+    std::string raw;
+    if (dettagli::leggiFile(path, raw, 512 * 1024) && !raw.empty()) {
+        if (!dettagli::parseJson(raw, root) || root.tipo != dettagli::Json::Obj) return false;
+    }
+
+    if (!abilita) {
+        root.rimuovi("fluidwin-ai-monitor");
+        return dettagli::scriviAtomico(path, dettagli::dumpJson(root, true));
+    }
+
+    const std::string exe = dettagli::inUtf8(dettagli::percorsoExe());
+    if (exe.empty()) return false;
+    auto handler = [&](const char* ev) {
+        dettagli::Json h = dettagli::Json::makeObj();
+        h.imposta("type", dettagli::Json::makeStr("command"));
+        h.imposta("command", dettagli::Json::makeStr("\"" + exe + "\" --ai-hook antigravity " + ev));
+        h.imposta("timeout", dettagli::Json::makeNum(5));
+        return h;
+    };
+    auto flatArr = [&](const char* ev) {
+        dettagli::Json a = dettagli::Json::makeArr();
+        a.arr.push_back(handler(ev));
+        return a;
+    };
+    auto groupedArr = [&](const char* ev) {
+        dettagli::Json grp = dettagli::Json::makeObj();
+        grp.imposta("matcher", dettagli::Json::makeStr("*"));
+        grp.imposta("hooks", flatArr(ev));
+        dettagli::Json a = dettagli::Json::makeArr();
+        a.arr.push_back(std::move(grp));
+        return a;
+    };
+
+    dettagli::Json spec = dettagli::Json::makeObj();
+    spec.imposta("SessionStart", flatArr("SessionStart"));
+    spec.imposta("PreInvocation", flatArr("PreInvocation"));
+    spec.imposta("PostInvocation", flatArr("PostInvocation"));
+    spec.imposta("PostToolUse", groupedArr("PostToolUse"));
+    spec.imposta("Stop", flatArr("Stop"));
+    root.imposta("fluidwin-ai-monitor", std::move(spec));
+    return dettagli::scriviAtomico(path, dettagli::dumpJson(root, true));
+}
+
+inline bool hookClaudeInstallati() {
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    if (profile.empty()) return false;
+    std::string raw;
+    if (!dettagli::leggiFile(profile + L"\\.claude\\settings.json", raw, 512 * 1024) || raw.empty()) return false;
+    dettagli::Json root;
+    if (!dettagli::parseJson(raw, root) || root.tipo != dettagli::Json::Obj) return false;
+    const auto* hooks = root.trova("hooks");
+    if (!hooks || hooks->tipo != dettagli::Json::Obj) return false;
+    for (const auto& [ev, arr] : hooks->obj) {
+        (void)ev;
+        if (arr.tipo != dettagli::Json::Arr) continue;
+        for (const auto& grp : arr.arr) {
+            if (grp.tipo != dettagli::Json::Obj) continue;
+            const auto* hs = grp.trova("hooks");
+            if (!hs || hs->tipo != dettagli::Json::Arr) continue;
+            for (const auto& h : hs->arr) {
+                if (h.tipo == dettagli::Json::Obj && h.str("command").find("--ai-hook claude") != std::string::npos) return true;
+            }
+        }
+    }
+    return false;
+}
+
+inline bool installaHookClaude(bool abilita) {
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    if (profile.empty()) return false;
+    const std::wstring path = profile + L"\\.claude\\settings.json";
+    dettagli::Json root = dettagli::Json::makeObj();
+    std::string raw;
+    if (dettagli::leggiFile(path, raw, 512 * 1024) && !raw.empty()) {
+        if (!dettagli::parseJson(raw, root) || root.tipo != dettagli::Json::Obj) return false;
+    }
+
+    if (auto* hooks = root.trovaMut("hooks"); hooks && hooks->tipo == dettagli::Json::Obj) {
+        for (auto itEv = hooks->obj.begin(); itEv != hooks->obj.end();) {
+            auto& arr = itEv->second;
+            if (arr.tipo == dettagli::Json::Arr) {
+                for (auto itGrp = arr.arr.begin(); itGrp != arr.arr.end();) {
+                    if (auto* hs = itGrp->trovaMut("hooks"); hs && hs->tipo == dettagli::Json::Arr) {
+                        hs->arr.erase(std::remove_if(hs->arr.begin(), hs->arr.end(), [](const dettagli::Json& h) {
+                            return h.tipo == dettagli::Json::Obj && h.str("command").find("--ai-hook claude") != std::string::npos;
+                        }), hs->arr.end());
+                        if (hs->arr.empty()) { itGrp = arr.arr.erase(itGrp); continue; }
+                    }
+                    ++itGrp;
+                }
+            }
+            if (arr.tipo == dettagli::Json::Arr && arr.arr.empty()) itEv = hooks->obj.erase(itEv);
+            else ++itEv;
+        }
+        if (hooks->obj.empty()) root.rimuovi("hooks");
+    }
+
+    if (!abilita) {
+        return dettagli::scriviAtomico(path, dettagli::dumpJson(root, true));
+    }
+
+    const std::string exe = dettagli::inUtf8(dettagli::percorsoExe());
+    if (exe.empty()) return false;
+    auto* hooks = root.trovaMut("hooks");
+    if (!hooks || hooks->tipo != dettagli::Json::Obj) {
+        root.imposta("hooks", dettagli::Json::makeObj());
+        hooks = root.trovaMut("hooks");
+    }
+
+    const char* eventi[] = {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"};
+    for (const char* ev : eventi) {
+        auto* arr = hooks->trovaMut(ev);
+        if (!arr || arr->tipo != dettagli::Json::Arr) {
+            hooks->imposta(ev, dettagli::Json::makeArr());
+            arr = hooks->trovaMut(ev);
+        }
+        dettagli::Json h = dettagli::Json::makeObj();
+        h.imposta("type", dettagli::Json::makeStr("command"));
+        h.imposta("command", dettagli::Json::makeStr("\"" + exe + "\" --ai-hook claude " + ev));
+        h.imposta("timeout", dettagli::Json::makeNum(5));
+
+        dettagli::Json grp = dettagli::Json::makeObj();
+        if (strcmp(ev, "PreToolUse") == 0 || strcmp(ev, "PostToolUse") == 0) {
+            grp.imposta("matcher", dettagli::Json::makeStr("*"));
+        }
+        dettagli::Json hs = dettagli::Json::makeArr();
+        hs.arr.push_back(std::move(h));
+        grp.imposta("hooks", std::move(hs));
+        arr->arr.push_back(std::move(grp));
+    }
+    return dettagli::scriviAtomico(path, dettagli::dumpJson(root, true));
+}
+
+// ---- monitor in sottofondo ----
+
+class Monitor {
+public:
+    std::atomic<uint64_t> versione{0};
+
+    Monitor() { InitializeSRWLock(&lock); }
+    Monitor(const Monitor&) = delete;
+    Monitor& operator=(const Monitor&) = delete;
+    ~Monitor() { ferma(); }
+
+    void avvia(HWND hwndNotifica = nullptr, UINT msgNotifica = 0) {
+        if (thread) return;
+        notificaHwnd = hwndNotifica;
+        notificaMsg = msgNotifica;
+        stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!stopEvent) return;
+        thread = CreateThread(nullptr, 0, threadProc, this, 0, nullptr);
+        if (thread) SetThreadPriority(thread, THREAD_PRIORITY_BELOW_NORMAL);
+    }
+
+    bool ferma(DWORD ms = 2000) {
+        if (!thread) {
+            if (stopEvent) { CloseHandle(stopEvent); stopEvent = nullptr; }
+            return true;
+        }
+        if (stopEvent) SetEvent(stopEvent);
+        const bool ok = WaitForSingleObject(thread, ms) == WAIT_OBJECT_0;
+        if (ok) {
+            CloseHandle(thread);
+            thread = nullptr;
+            if (stopEvent) { CloseHandle(stopEvent); stopEvent = nullptr; }
+        }
+        return ok;
+    }
+
+    Riepilogo copia() const {
+        AcquireSRWLockShared(&lock);
+        Riepilogo r = stato;
+        ReleaseSRWLockShared(&lock);
+        return r;
+    }
+
+    void pulisciCompletati() {
+        const std::wstring dir = cartellaHook();
+        if (!dir.empty()) {
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((dir + L"\\*.json").c_str(), &fd);
+            if (h != INVALID_HANDLE_VALUE) {
+                do {
+                    if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+                    const std::wstring p = dir + L"\\" + fd.cFileName;
+                    std::string raw;
+                    dettagli::Json j;
+                    if (dettagli::leggiFile(p, raw, 128 * 1024) && dettagli::parseJson(raw, j) && j.tipo == dettagli::Json::Obj) {
+                        const std::string st = j.str("status");
+                        if (st == "done" || st == "error") DeleteFileW(p.c_str());
+                    }
+                } while (FindNextFileW(h, &fd));
+                FindClose(h);
+            }
+        }
+
+        AcquireSRWLockExclusive(&lock);
+        const double now = dettagli::adessoEpoch();
+        for (const auto& a : stato.agenti) {
+            if (!a.daHook && (a.stato == Stato::Completato || a.stato == Stato::Errore)) {
+                completatiRimossi[a.id] = std::max(a.aggiornatoT, now);
+            }
+        }
+        stato.agenti.erase(std::remove_if(stato.agenti.begin(), stato.agenti.end(), [](const Agente& a) {
+            return a.daHook && (a.stato == Stato::Completato || a.stato == Stato::Errore);
+        }), stato.agenti.end());
+        for (auto& a : stato.agenti) {
+            if (!a.daHook && (a.stato == Stato::Completato || a.stato == Stato::Errore)) a.stato = Stato::Inattivo;
+        }
+        ricalcolaRiepilogo(stato);
+        ReleaseSRWLockExclusive(&lock);
+        versione.fetch_add(1, std::memory_order_relaxed);
+    }
+
+private:
+    struct TranscriptCache {
+        uint64_t size = 0;
+        FILETIME mtime{};
+        uint64_t offset = 0;
+        uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+        std::string model, lastType, lastTool;
+        bool lastHasToolCalls = false;
+    };
+
+    struct CpuSample {
+        uint64_t procTime = 0;
+        double cpuPct = 0.0;
+        double primoAvvistamento = 0.0;
+    };
+
+    mutable SRWLOCK lock = SRWLOCK_INIT;
+    Riepilogo stato;
+    HANDLE thread = nullptr;
+    HANDLE stopEvent = nullptr;
+    HWND notificaHwnd = nullptr;
+    UINT notificaMsg = 0;
+
+    std::unordered_map<std::wstring, TranscriptCache> transcriptCache;
+    std::unordered_map<std::wstring, double> completatiRimossi;
+    std::unordered_map<DWORD, CpuSample> cpuSamples;
+    uint64_t lastCpuWall100ns = 0;
+
+    static void ricalcolaRiepilogo(Riepilogo& r) {
+        std::sort(r.agenti.begin(), r.agenti.end(), [](const Agente& a, const Agente& b) {
+            const int pa = dettagli::prioritaStato(a.stato), pb = dettagli::prioritaStato(b.stato);
+            if (pa != pb) return pa < pb;
+            if (a.aggiornatoT != b.aggiornatoT) return a.aggiornatoT > b.aggiornatoT;
+            return a.id < b.id;
+        });
+
+        r.statoGlobale = Stato::Inattivo;
+        r.attivi = (int)r.agenti.size();
+        r.occupati = 0;
+        r.inAttesa = 0;
+        r.completati = 0;
+        r.tokInTot = 0;
+        r.tokOutTot = 0;
+        r.tokCacheTot = 0;
+        for (const auto& a : r.agenti) {
+            if (dettagli::prioritaStato(a.stato) < dettagli::prioritaStato(r.statoGlobale)) r.statoGlobale = a.stato;
+            if (a.stato == Stato::Occupato) r.occupati++;
+            else if (a.stato == Stato::InAttesa) r.inAttesa++;
+            else if (a.stato == Stato::Completato) r.completati++;
+            r.tokInTot += a.tokIn;
+            r.tokOutTot += a.tokOut;
+            r.tokCacheTot += a.tokCache;
+        }
+    }
+
+    static bool ugualeRiepilogo(const Riepilogo& a, const Riepilogo& b) {
+        if (a.statoGlobale != b.statoGlobale || a.attivi != b.attivi || a.occupati != b.occupati ||
+            a.inAttesa != b.inAttesa || a.completati != b.completati ||
+            a.tokInTot != b.tokInTot || a.tokOutTot != b.tokOutTot || a.tokCacheTot != b.tokCacheTot ||
+            a.agenti.size() != b.agenti.size()) return false;
+        for (size_t i = 0; i < a.agenti.size(); i++) {
+            const Agente& x = a.agenti[i], & y = b.agenti[i];
+            if (x.id != y.id || x.nome != y.nome || x.titolo != y.titolo || x.modello != y.modello ||
+                x.strumento != y.strumento || x.cwd != y.cwd || x.fonte != y.fonte || x.stato != y.stato ||
+                x.tokIn != y.tokIn || x.tokOut != y.tokOut || x.tokCache != y.tokCache ||
+                x.pid != y.pid || x.daHook != y.daHook) return false;
+        }
+        return true;
+    }
+
+    static void leggiDropbox(double now, std::vector<Agente>& out) {
+        const std::wstring dir = cartellaHook();
+        if (dir.empty()) return;
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((dir + L"\\*.json").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::wstring p = dir + L"\\" + fd.cFileName;
+            std::string raw;
+            dettagli::Json j;
+            if (!dettagli::leggiFile(p, raw, 128 * 1024) || !dettagli::parseJson(raw, j) || j.tipo != dettagli::Json::Obj) continue;
+
+            const double updated = j.num("updatedAt", dettagli::fileTimeAEpoch(fd.ftLastWriteTime));
+            const DWORD pid = (DWORD)j.u64("pid", 0);
+            if ((updated > 0 && now - updated > 15.0 * 60.0) || (pid > 0 && !dettagli::processoVivo(pid))) {
+                DeleteFileW(p.c_str());
+                continue;
+            }
+
+            Agente a;
+            a.daHook = true;
+            a.id = dettagli::daUtf8(j.str("id"));
+            if (a.id.empty()) a.id = fd.cFileName;
+            a.fonte = dettagli::fonteDaStringa(j.str("source"));
+            a.nome = dettagli::nomeFonte(a.fonte);
+            a.titolo = dettagli::daUtf8(j.str("title"));
+            a.modello = dettagli::daUtf8(j.str("model"));
+            a.strumento = dettagli::daUtf8(j.str("tool"));
+            a.cwd = dettagli::daUtf8(j.str("cwd"));
+            a.stato = dettagli::statoDaStringa(j.str("status"));
+            a.pid = pid;
+            a.aggiornatoT = updated;
+            out.push_back(std::move(a));
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    void aggiornaTranscriptAntigravity(const std::wstring& uuid, const std::wstring& path, TranscriptCache& tc, double& mtimeEpoch) {
+        WIN32_FILE_ATTRIBUTE_DATA fad{};
+        if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &fad)) return;
+        const uint64_t fsize = ((uint64_t)fad.nFileSizeHigh << 32) | fad.nFileSizeLow;
+        mtimeEpoch = dettagli::fileTimeAEpoch(fad.ftLastWriteTime);
+        if (fsize == tc.size && CompareFileTime(&fad.ftLastWriteTime, &tc.mtime) == 0) return;
+
+        if (fsize < tc.offset) tc = TranscriptCache{};
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return;
+
+        LARGE_INTEGER off{};
+        off.QuadPart = (LONGLONG)tc.offset;
+        if (SetFilePointerEx(f, off, nullptr, FILE_BEGIN)) {
+            const uint64_t daLeggere = fsize > tc.offset ? std::min<uint64_t>(fsize - tc.offset, 16ULL * 1024 * 1024) : 0;
+            if (daLeggere > 0) {
+                std::string chunk((size_t)daLeggere, '\0');
+                DWORD nr = 0, tot = 0;
+                while (tot < daLeggere && ReadFile(f, chunk.data() + tot, (DWORD)(daLeggere - tot), &nr, nullptr) && nr > 0) {
+                    tot += nr;
+                }
+                chunk.resize(tot);
+                const size_t lastNl = chunk.rfind('\n');
+                if (lastNl != std::string::npos) {
+                    tc.offset += lastNl + 1;
+                    size_t pos = 0;
+                    while (pos <= lastNl) {
+                        const size_t nl = chunk.find('\n', pos);
+                        const size_t len = (nl == std::string::npos) ? (lastNl - pos) : (nl - pos);
+                        std::string line = chunk.substr(pos, len);
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        pos = (nl == std::string::npos) ? lastNl + 1 : nl + 1;
+                        if (line.empty()) continue;
+
+                        dettagli::Json obj;
+                        if (!dettagli::parseJson(line, obj) || obj.tipo != dettagli::Json::Obj) continue;
+                        const std::string tp = obj.str("type");
+                        if (!tp.empty()) tc.lastType = tp;
+                        if (tp == "PLANNER_RESPONSE") {
+                            const std::string m = obj.str("model");
+                            if (!m.empty()) tc.model = m;
+                            tc.tokIn += obj.u64("input_tokens");
+                            tc.tokCache += obj.u64("cache_read_tokens");
+                            tc.tokOut += obj.u64("output_tokens");
+                            if (const auto* calls = obj.trova("tool_calls"); calls && calls->tipo == dettagli::Json::Arr && !calls->arr.empty()) {
+                                tc.lastHasToolCalls = true;
+                                tc.lastTool = calls->arr.back().str("name");
+                            } else {
+                                tc.lastHasToolCalls = false;
+                                tc.lastTool.clear();
+                            }
+                        } else if (tp != "USER_INPUT") {
+                            tc.lastHasToolCalls = false;
+                        }
+                    }
+                }
+            }
+        }
+        CloseHandle(f);
+        tc.size = fsize;
+        tc.mtime = fad.ftLastWriteTime;
+        (void)uuid;
+    }
+
+    bool leggiAntigravity(double now, std::vector<Agente>& hookAgenti, std::vector<Agente>& out) {
+        const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+        if (profile.empty()) return false;
+        const std::wstring root = profile + L"\\.gemini\\antigravity-cli";
+        const std::wstring presDir = root + L"\\presence";
+
+        WIN32_FIND_DATAW fd{};
+        HANDLE h = FindFirstFileW((presDir + L"\\*.lock").c_str(), &fd);
+        if (h == INVALID_HANDLE_VALUE) return false;
+
+        std::unordered_set<std::wstring> liveIds;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            const std::wstring lockPath = presDir + L"\\" + fd.cFileName;
+            HANDLE lk = CreateFileW(lockPath.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (lk != INVALID_HANDLE_VALUE) {
+                CloseHandle(lk);
+                continue;
+            }
+            if (GetLastError() != ERROR_SHARING_VIOLATION) continue;
+
+            std::wstring uuid = fd.cFileName;
+            if (uuid.size() > 5) uuid.resize(uuid.size() - 5);
+            liveIds.insert(uuid);
+
+            const std::wstring annTitle = dettagli::leggiTitoloPbtxt(root + L"\\annotations\\" + uuid + L".pbtxt");
+            const std::wstring trPath = root + L"\\brain\\" + uuid + L"\\.system_generated\\logs\\transcript.jsonl";
+            double mtimeEpoch = dettagli::fileTimeAEpoch(fd.ftLastWriteTime);
+            TranscriptCache& tc = transcriptCache[uuid];
+            aggiornaTranscriptAntigravity(uuid, trPath, tc, mtimeEpoch);
+
+            const double age = std::max(0.0, now - mtimeEpoch);
+            Stato st = Stato::Inattivo;
+            if (tc.lastType == "PLANNER_RESPONSE" && !tc.lastHasToolCalls && age >= 2.5) {
+                st = age < 120.0 ? Stato::Completato : Stato::Inattivo;
+            } else if ((tc.lastType == "PLANNER_RESPONSE" && tc.lastHasToolCalls) ||
+                       tc.lastType == "GENERIC" || tc.lastType == "SYSTEM_MESSAGE" ||
+                       tc.lastType == "USER_INPUT" || age < 3.5) {
+                st = Stato::Occupato;
+            }
+
+            if (st == Stato::Occupato) {
+                AcquireSRWLockExclusive(&lock);
+                completatiRimossi.erase(uuid);
+                ReleaseSRWLockExclusive(&lock);
+            } else if (st == Stato::Completato) {
+                AcquireSRWLockShared(&lock);
+                auto it = completatiRimossi.find(uuid);
+                const bool nascosto = (it != completatiRimossi.end() && mtimeEpoch <= it->second);
+                ReleaseSRWLockShared(&lock);
+                if (nascosto) st = Stato::Inattivo;
+            }
+
+            Agente* hook = nullptr;
+            for (auto& ha : hookAgenti) {
+                if (ha.id == uuid) { hook = &ha; break; }
+            }
+            if (hook) {
+                hook->tokIn = std::max(hook->tokIn, tc.tokIn);
+                hook->tokOut = std::max(hook->tokOut, tc.tokOut);
+                hook->tokCache = std::max(hook->tokCache, tc.tokCache);
+                if (hook->modello.empty() && !tc.model.empty()) hook->modello = dettagli::daUtf8(tc.model);
+                if (!annTitle.empty()) hook->titolo = annTitle;
+                if (hook->fonte == Fonte::Hook) { hook->fonte = Fonte::Antigravity; hook->nome = L"Antigravity"; }
+                continue;
+            }
+
+            Agente a;
+            a.id = uuid;
+            a.fonte = Fonte::Antigravity;
+            a.nome = L"Antigravity";
+            a.titolo = !annTitle.empty() ? annTitle : uuid.substr(0, std::min<size_t>(uuid.size(), 8));
+            a.modello = dettagli::daUtf8(tc.model);
+            if (st == Stato::Occupato && !tc.lastTool.empty()) a.strumento = dettagli::daUtf8(tc.lastTool);
+            a.stato = st;
+            a.tokIn = tc.tokIn;
+            a.tokOut = tc.tokOut;
+            a.tokCache = tc.tokCache;
+            a.aggiornatoT = mtimeEpoch;
+            out.push_back(std::move(a));
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+
+        for (auto it = transcriptCache.begin(); it != transcriptCache.end();) {
+            if (!liveIds.count(it->first)) it = transcriptCache.erase(it);
+            else ++it;
+        }
+        return !liveIds.empty();
+    }
+
+    void leggiClaudeJsonl(const std::wstring& path, const std::wstring& stem, double mtimeEpoch, double now,
+                          std::vector<Agente>& hookAgenti, std::vector<Agente>& out) {
+        HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                               nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (f == INVALID_HANDLE_VALUE) return;
+        LARGE_INTEGER fsz{};
+        if (!GetFileSizeEx(f, &fsz) || fsz.QuadPart <= 0) { CloseHandle(f); return; }
+
+        constexpr uint64_t TAIL_MAX = 65536;
+        const bool partial = (uint64_t)fsz.QuadPart > TAIL_MAX;
+        if (partial) {
+            LARGE_INTEGER off{};
+            off.QuadPart = fsz.QuadPart - (LONGLONG)TAIL_MAX;
+            SetFilePointerEx(f, off, nullptr, FILE_BEGIN);
+        }
+        const size_t toRead = (size_t)std::min<LONGLONG>(fsz.QuadPart, (LONGLONG)TAIL_MAX);
+        std::string tail(toRead, '\0');
+        DWORD nr = 0, tot = 0;
+        while (tot < toRead && ReadFile(f, tail.data() + tot, (DWORD)(toRead - tot), &nr, nullptr) && nr > 0) tot += nr;
+        tail.resize(tot);
+        CloseHandle(f);
+
+        size_t pos = 0;
+        if (partial) {
+            const size_t firstNl = tail.find('\n');
+            if (firstNl == std::string::npos) return;
+            pos = firstNl + 1;
+        }
+
+        struct UsageRec { uint64_t in = 0, out = 0, cache = 0; };
+        std::vector<std::pair<std::string, UsageRec>> usages;
+        std::string sessionId, cwd, model, title, lastType, lastStopReason, lastTool;
+        bool lastHasToolUse = false;
+
+        while (pos < tail.size()) {
+            const size_t nl = tail.find('\n', pos);
+            const size_t len = (nl == std::string::npos) ? (tail.size() - pos) : (nl - pos);
+            std::string line = tail.substr(pos, len);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            pos = (nl == std::string::npos) ? tail.size() : nl + 1;
+            if (line.empty()) continue;
+
+            dettagli::Json obj;
+            if (!dettagli::parseJson(line, obj) || obj.tipo != dettagli::Json::Obj) continue;
+            if (sessionId.empty()) sessionId = obj.str("sessionId");
+            if (const std::string c = obj.str("cwd"); !c.empty()) cwd = c;
+            if (const std::string sl = obj.str("slug"); !sl.empty()) title = sl;
+            if (const std::string sm = obj.str("summary"); !sm.empty()) title = sm;
+
+            const std::string tp = obj.str("type");
+            if (!tp.empty()) lastType = tp;
+            if (const auto* msg = obj.trova("message"); msg && msg->tipo == dettagli::Json::Obj) {
+                const std::string m = msg->str("model");
+                if (!m.empty()) model = m;
+                lastStopReason = msg->str("stop_reason");
+                lastHasToolUse = (lastStopReason == "tool_use");
+                lastTool.clear();
+                if (const auto* content = msg->trova("content"); content && content->tipo == dettagli::Json::Arr) {
+                    for (const auto& blk : content->arr) {
+                        if (blk.tipo == dettagli::Json::Obj && blk.str("type") == "tool_use") {
+                            lastHasToolUse = true;
+                            lastTool = blk.str("name");
+                        }
+                    }
+                }
+                if (const auto* u = msg->trova("usage"); u && u->tipo == dettagli::Json::Obj) {
+                    UsageRec ur;
+                    ur.in = u->u64("input_tokens");
+                    ur.out = u->u64("output_tokens");
+                    ur.cache = u->u64("cache_read_input_tokens") + u->u64("cache_creation_input_tokens");
+                    std::string mid = msg->str("id");
+                    if (mid.empty()) mid = std::to_string(usages.size());
+                    auto it = std::find_if(usages.begin(), usages.end(), [&](const auto& p) { return p.first == mid; });
+                    if (it != usages.end()) it->second = ur;
+                    else usages.emplace_back(mid, ur);
+                }
+            }
+        }
+
+        if (sessionId.empty()) sessionId = dettagli::inUtf8(stem);
+        uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+        for (const auto& [k, u] : usages) {
+            (void)k;
+            tokIn += u.in;
+            tokOut += u.out;
+            tokCache += u.cache;
+        }
+
+        const double age = std::max(0.0, now - mtimeEpoch);
+        Stato st = Stato::Inattivo;
+        if (age < 4.0 || (lastType == "assistant" && lastHasToolUse) || lastType == "user") {
+            st = Stato::Occupato;
+        } else if (lastType == "assistant") {
+            st = age < 120.0 ? Stato::Completato : Stato::Inattivo;
+        }
+
+        const std::wstring idW = dettagli::daUtf8(sessionId);
+        if (st == Stato::Occupato) {
+            AcquireSRWLockExclusive(&lock);
+            completatiRimossi.erase(idW);
+            ReleaseSRWLockExclusive(&lock);
+        } else if (st == Stato::Completato) {
+            AcquireSRWLockShared(&lock);
+            auto it = completatiRimossi.find(idW);
+            const bool nascosto = (it != completatiRimossi.end() && mtimeEpoch <= it->second);
+            ReleaseSRWLockShared(&lock);
+            if (nascosto) st = Stato::Inattivo;
+        }
+
+        const std::wstring cwdW = dettagli::daUtf8(cwd);
+        const std::wstring titoloW = !title.empty() ? dettagli::daUtf8(title)
+                                   : !cwdW.empty() ? dettagli::leafPath(cwdW)
+                                   : idW.substr(0, std::min<size_t>(idW.size(), 8));
+
+        for (auto& ha : hookAgenti) {
+            if (ha.id == idW) {
+                ha.tokIn = std::max(ha.tokIn, tokIn);
+                ha.tokOut = std::max(ha.tokOut, tokOut);
+                ha.tokCache = std::max(ha.tokCache, tokCache);
+                if (ha.modello.empty() && !model.empty()) ha.modello = dettagli::daUtf8(model);
+                if (ha.titolo.empty() && !titoloW.empty()) ha.titolo = titoloW;
+                if (ha.cwd.empty() && !cwdW.empty()) ha.cwd = cwdW;
+                if (ha.fonte == Fonte::Hook) { ha.fonte = Fonte::Claude; ha.nome = L"Claude"; }
+                return;
+            }
+        }
+
+        Agente a;
+        a.id = idW;
+        a.fonte = Fonte::Claude;
+        a.nome = L"Claude";
+        a.titolo = titoloW;
+        a.modello = dettagli::daUtf8(model);
+        if (st == Stato::Occupato && !lastTool.empty()) a.strumento = dettagli::daUtf8(lastTool);
+        a.cwd = cwdW;
+        a.stato = st;
+        a.tokIn = tokIn;
+        a.tokOut = tokOut;
+        a.tokCache = tokCache;
+        a.aggiornatoT = mtimeEpoch;
+        out.push_back(std::move(a));
+    }
+
+    void leggiClaude(double now, std::vector<Agente>& hookAgenti, std::vector<Agente>& out) {
+        const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+        if (profile.empty()) return;
+        const std::wstring base = profile + L"\\.claude\\projects";
+
+        auto scanDir = [&](const std::wstring& dir, int depth, auto& self) -> void {
+            WIN32_FIND_DATAW fd{};
+            HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) return;
+            do {
+                if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
+                const std::wstring full = dir + L"\\" + fd.cFileName;
+                if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    if (depth < 2) self(full, depth + 1, self);
+                    continue;
+                }
+                const std::wstring fn = fd.cFileName;
+                if (fn.size() <= 6 || dettagli::minuscolo(fn.substr(fn.size() - 6)) != L".jsonl") continue;
+                const double mt = dettagli::fileTimeAEpoch(fd.ftLastWriteTime);
+                if (now - mt > 600.0) continue;
+                leggiClaudeJsonl(full, fn.substr(0, fn.size() - 6), mt, now, hookAgenti, out);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        };
+        scanDir(base, 1, scanDir);
+    }
+
+    struct ProcSnap {
+        DWORD pid = 0;
+        std::wstring exeLower;
+        double cpuPct = 0.0;
+        double primoAvvistamento = 0.0;
+        bool hasWindow = false;
+    };
+
+    void raccogliProcessi(double now, std::vector<ProcSnap>& procs, DWORD& ollamaPid, DWORD& lmsPid, double& lmsCpu) {
+        ollamaPid = 0;
+        lmsPid = 0;
+        lmsCpu = 0.0;
+
+        FILETIME ftNow{};
+        GetSystemTimeAsFileTime(&ftNow);
+        const uint64_t now100ns = ((uint64_t)ftNow.dwHighDateTime << 32) | ftNow.dwLowDateTime;
+        const uint64_t dt100ns = (lastCpuWall100ns > 0 && now100ns > lastCpuWall100ns) ? (now100ns - lastCpuWall100ns) : 0;
+        lastCpuWall100ns = now100ns;
+
+        HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == INVALID_HANDLE_VALUE) return;
+
+        std::unordered_map<DWORD, CpuSample> nextSamples;
+        std::unordered_set<DWORD> candPids;
+
+        PROCESSENTRY32W pe{};
+        pe.dwSize = sizeof(pe);
+        for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+            const std::wstring exe = dettagli::minuscolo(pe.szExeFile);
+            const bool isOllama = (exe == L"ollama.exe");
+            const bool isLms = (exe == L"lm studio.exe" || exe == L"lms.exe");
+            const bool isAi = (exe == L"claude.exe" || exe == L"antigravity.exe" || exe == L"agy.exe" ||
+                               exe == L"codex.exe" || exe == L"gemini.exe" || exe == L"cursor.exe" || exe == L"windsurf.exe");
+            if (!isOllama && !isLms && !isAi) continue;
+
+            double cpu = 0.0;
+            double firstSeen = now;
+            if (HANDLE ph = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe.th32ProcessID)) {
+                FILETIME ct{}, et{}, kt{}, ut{};
+                if (GetProcessTimes(ph, &ct, &et, &kt, &ut)) {
+                    const uint64_t pt = (((uint64_t)kt.dwHighDateTime << 32) | kt.dwLowDateTime) +
+                                        (((uint64_t)ut.dwHighDateTime << 32) | ut.dwLowDateTime);
+                    auto it = cpuSamples.find(pe.th32ProcessID);
+                    if (it != cpuSamples.end()) {
+                        firstSeen = it->second.primoAvvistamento;
+                        if (dt100ns > 0 && pt >= it->second.procTime) {
+                            cpu = 100.0 * (double)(pt - it->second.procTime) / (double)dt100ns;
+                        }
+                    } else {
+                        const double ctEp = dettagli::fileTimeAEpoch(ct);
+                        if (ctEp > 0) firstSeen = ctEp;
+                    }
+                    nextSamples[pe.th32ProcessID] = {pt, cpu, firstSeen};
+                }
+                CloseHandle(ph);
+            }
+
+            if (isOllama && !ollamaPid) ollamaPid = pe.th32ProcessID;
+            if (isLms) {
+                if (!lmsPid || cpu > lmsCpu) { lmsPid = pe.th32ProcessID; lmsCpu = cpu; }
+            }
+            if (isAi) {
+                candPids.insert(pe.th32ProcessID);
+                procs.push_back({pe.th32ProcessID, exe, cpu, firstSeen, false});
+            }
+        }
+        CloseHandle(snap);
+        cpuSamples = std::move(nextSamples);
+
+        if (!candPids.empty()) {
+            struct Ctx {
+                const std::unordered_set<DWORD>* pids;
+                std::unordered_set<DWORD> winPids;
+            } ctx{&candPids, {}};
+            EnumWindows([](HWND hw, LPARAM l) -> BOOL {
+                auto* c = (Ctx*)l;
+                if (!IsWindowVisible(hw) || GetWindow(hw, GW_OWNER) || GetWindowTextLengthW(hw) == 0) return TRUE;
+                DWORD pid = 0;
+                GetWindowThreadProcessId(hw, &pid);
+                if (c->pids->count(pid)) c->winPids.insert(pid);
+                return TRUE;
+            }, (LPARAM)&ctx);
+            for (auto& p : procs) p.hasWindow = ctx.winPids.count(p.pid) != 0;
+        }
+    }
+
+    static void leggiOllama(DWORD pid, double now, std::vector<Agente>& out) {
+        if (!pid) return;
+        std::string body;
+        if (!dettagli::httpGetLocale(11434, L"/api/ps", body) || body.empty()) return;
+        dettagli::Json j;
+        if (!dettagli::parseJson(body, j) || j.tipo != dettagli::Json::Obj) return;
+        const auto* models = j.trova("models");
+        if (!models || models->tipo != dettagli::Json::Arr) return;
+        for (const auto& m : models->arr) {
+            if (m.tipo != dettagli::Json::Obj) continue;
+            std::string name = m.str("name");
+            if (name.empty()) name = m.str("model");
+            if (name.empty()) continue;
+            Agente a;
+            a.id = L"ollama:" + dettagli::daUtf8(name);
+            a.fonte = Fonte::Ollama;
+            a.nome = L"Ollama";
+            a.titolo = dettagli::daUtf8(name);
+            a.modello = a.titolo;
+            a.stato = Stato::Occupato;
+            a.pid = pid;
+            a.aggiornatoT = now;
+            out.push_back(std::move(a));
+        }
+    }
+
+    static void leggiLmStudio(DWORD pid, double cpuPct, double now, std::vector<Agente>& out) {
+        if (!pid) return;
+        std::string body;
+        if (!dettagli::httpGetLocale(1234, L"/v1/models", body) || body.empty()) return;
+        dettagli::Json j;
+        if (!dettagli::parseJson(body, j) || j.tipo != dettagli::Json::Obj) return;
+        const auto* data = j.trova("data");
+        if (!data || data->tipo != dettagli::Json::Arr) return;
+        for (const auto& m : data->arr) {
+            if (m.tipo != dettagli::Json::Obj) continue;
+            const std::string id = m.str("id");
+            if (id.empty()) continue;
+            Agente a;
+            a.id = L"lmstudio:" + dettagli::daUtf8(id);
+            a.fonte = Fonte::LmStudio;
+            a.nome = L"LM Studio";
+            a.titolo = dettagli::daUtf8(id);
+            a.modello = a.titolo;
+            a.stato = cpuPct > 1.5 ? Stato::Occupato : Stato::Inattivo;
+            a.pid = pid;
+            a.aggiornatoT = now;
+            out.push_back(std::move(a));
+        }
+    }
+
+    static void aggiungiProcessi(const std::vector<ProcSnap>& procs, bool antigravityLive, std::vector<Agente>& out) {
+        struct Gruppo {
+            std::wstring exeLower, nome;
+            Fonte fonte = Fonte::Processo;
+            DWORD bestPid = 0;
+            bool bestHasWin = false;
+            double bestCpu = -1.0;
+            double maxCpu = 0.0;
+            double firstSeen = 0.0;
+        };
+        std::vector<Gruppo> gruppi;
+        for (const auto& p : procs) {
+            if (antigravityLive && p.exeLower == L"agy.exe") continue;
+            auto it = std::find_if(gruppi.begin(), gruppi.end(), [&](const Gruppo& g) { return g.exeLower == p.exeLower; });
+            if (it == gruppi.end()) {
+                Gruppo g;
+                g.exeLower = p.exeLower;
+                if (p.exeLower == L"claude.exe") { g.fonte = Fonte::Claude; g.nome = L"Claude"; }
+                else if (p.exeLower == L"antigravity.exe") { g.fonte = Fonte::Antigravity; g.nome = L"Antigravity"; }
+                else if (p.exeLower == L"agy.exe") { g.fonte = Fonte::Antigravity; g.nome = L"Antigravity CLI"; }
+                else if (p.exeLower == L"codex.exe") { g.fonte = Fonte::Codex; g.nome = L"Codex"; }
+                else if (p.exeLower == L"gemini.exe") { g.fonte = Fonte::Processo; g.nome = L"Gemini CLI"; }
+                else if (p.exeLower == L"cursor.exe") { g.fonte = Fonte::Processo; g.nome = L"Cursor"; }
+                else if (p.exeLower == L"windsurf.exe") { g.fonte = Fonte::Processo; g.nome = L"Windsurf"; }
+                else { g.fonte = Fonte::Processo; g.nome = p.exeLower; }
+                g.bestPid = p.pid;
+                g.bestHasWin = p.hasWindow;
+                g.bestCpu = p.cpuPct;
+                g.maxCpu = p.cpuPct;
+                g.firstSeen = p.primoAvvistamento;
+                gruppi.push_back(std::move(g));
+            } else {
+                it->maxCpu = std::max(it->maxCpu, p.cpuPct);
+                it->firstSeen = std::min(it->firstSeen, p.primoAvvistamento);
+                if ((p.hasWindow && !it->bestHasWin) || (p.hasWindow == it->bestHasWin && p.cpuPct > it->bestCpu)) {
+                    it->bestPid = p.pid;
+                    it->bestHasWin = p.hasWindow;
+                    it->bestCpu = p.cpuPct;
+                }
+            }
+        }
+        for (const auto& g : gruppi) {
+            Agente a;
+            a.id = L"proc:" + g.exeLower;
+            a.fonte = g.fonte;
+            a.nome = g.nome;
+            a.titolo = g.nome;
+            a.stato = g.maxCpu > 1.5 ? Stato::Occupato : Stato::Inattivo;
+            a.pid = g.bestPid;
+            a.aggiornatoT = g.firstSeen;
+            out.push_back(std::move(a));
+        }
+    }
+
+    void scansiona() {
+        const double now = dettagli::adessoEpoch();
+        std::vector<Agente> hookAgenti;
+        leggiDropbox(now, hookAgenti);
+
+        std::vector<Agente> tutti;
+        const bool agLive = leggiAntigravity(now, hookAgenti, tutti);
+        leggiClaude(now, hookAgenti, tutti);
+
+        for (auto& ha : hookAgenti) tutti.push_back(std::move(ha));
+
+        std::vector<ProcSnap> procs;
+        DWORD ollamaPid = 0, lmsPid = 0;
+        double lmsCpu = 0.0;
+        raccogliProcessi(now, procs, ollamaPid, lmsPid, lmsCpu);
+        leggiOllama(ollamaPid, now, tutti);
+        leggiLmStudio(lmsPid, lmsCpu, now, tutti);
+        aggiungiProcessi(procs, agLive, tutti);
+
+        Riepilogo nuovo;
+        nuovo.agenti = std::move(tutti);
+        ricalcolaRiepilogo(nuovo);
+
+        bool cambiato = false;
+        AcquireSRWLockExclusive(&lock);
+        if (!ugualeRiepilogo(stato, nuovo)) {
+            stato = std::move(nuovo);
+            cambiato = true;
+        }
+        ReleaseSRWLockExclusive(&lock);
+
+        if (cambiato) {
+            versione.fetch_add(1, std::memory_order_relaxed);
+            if (notificaHwnd && notificaMsg) PostMessageW(notificaHwnd, notificaMsg, 0, 0);
+        }
+    }
+
+    static DWORD WINAPI threadProc(LPVOID p) {
+        Monitor* self = (Monitor*)p;
+        const std::wstring dir = cartellaHook();
+        if (!dir.empty()) dettagli::creaCartelle(dir);
+
+        HANDLE hDir = !dir.empty()
+            ? FindFirstChangeNotificationW(dir.c_str(), FALSE, FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE)
+            : INVALID_HANDLE_VALUE;
+
+        self->scansiona();
+
+        for (;;) {
+            HANDLE waits[2] = {self->stopEvent, hDir};
+            const DWORD count = (hDir != INVALID_HANDLE_VALUE && hDir != nullptr) ? 2 : 1;
+            const DWORD w = WaitForMultipleObjects(count, waits, FALSE, 1500);
+            if (w == WAIT_OBJECT_0 || w == WAIT_FAILED) break;
+            if (w == WAIT_OBJECT_0 + 1) {
+                WaitForSingleObject(self->stopEvent, 40);
+                if (WaitForSingleObject(self->stopEvent, 0) == WAIT_OBJECT_0) break;
+                FindNextChangeNotification(hDir);
+            }
+            self->scansiona();
+        }
+
+        if (hDir != INVALID_HANDLE_VALUE && hDir != nullptr) FindCloseChangeNotification(hDir);
+        return 0;
+    }
+};
+
+}  // namespace ai

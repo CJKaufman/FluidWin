@@ -69,6 +69,7 @@
 #include "mixer.h"
 #include "pila.h"
 #include "appunti.h"
+#include "ai.h"
 #include <ole2.h>
 #include <commdlg.h>
 #include <knownfolders.h>
@@ -112,8 +113,9 @@ static const wchar_t* const AVVIO_PILA_PREF = L"*pila:";
 static bool ePilaPers(const std::wstring& a) { return a.rfind(AVVIO_PILA_PREF, 0) == 0; }
 static std::wstring percorsoPilaPers(const std::wstring& a) { return ePilaPers(a) ? a.substr(6) : L""; }
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
+static const wchar_t* const AVVIO_AI = L"*ai";                 // monitor AI (tra cestino e centro di controllo)
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -366,6 +368,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
+    ~Motore() { aiMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -481,6 +484,7 @@ public:
         dirty = true;
         // comandi delle app (jump list): il thread li legge subito, cosi' sono pronti al primo tasto destro
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
+        aiMon.avvia(icone, WM_AI_AGGIORNATO);
         return true;
     }
 
@@ -493,7 +497,8 @@ public:
         const bool a = widD.ferma(ms);
         const bool b = jumpList.ferma(ms);
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
-        return a && b && c;
+        const bool d = aiMon.ferma(ms);
+        return a && b && c && d;
     }
 
     void chiudi() {
@@ -653,6 +658,7 @@ public:
             versioneSensoriCentro = sensori::Sensori::io().versione; versioneTempoCentro = sensori::Sensori::io().versioneTempo; pDirty = true;
             if (!pChiusura) riadattaControllo();   // la batteria puo' comparire o sparire (ripresa dalla sospensione)
         }
+        sincronizzaAI();
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
         if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
@@ -864,6 +870,17 @@ public:
         if (!si && lAperto && lModoGiochi) chiudiLauncher();
         if (lAperto && !lModoGiochi) filtra();
         if (attivo) aggiornaApp();
+    }
+    void impostaAI(bool si) {
+        if (si == mostraAI) return;
+        mostraAI = si;
+        if (!si) {
+            usa(0);
+            if (pannelloTipo == P_AI) chiudiPannello();
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
     }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
     // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
@@ -1265,6 +1282,7 @@ private:
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
     bool mostraGiochi = true;
+    bool mostraAI = true;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
     // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
     // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
@@ -1895,6 +1913,7 @@ private:
         }
         { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
+        if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); nuove.push_back(std::move(c)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
@@ -1913,7 +1932,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -2172,7 +2191,8 @@ private:
         if (!nuovo || nessunaScheda() || pChiusura || adesso() - pT0 < 0.15) return;
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
-        const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
+        const RECT is = rettIsolaSchermo(), ia = rettAISchermo();
+        if (PtInRect(&is, pt) || PtInRect(&ia, pt)) return;   // l'icona del centro o AI: decide il suo clic
         HWND hw = WindowFromPoint(pt);
         if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
         if (pMenuTray) { pMenuTray = false; return; }
@@ -2443,6 +2463,10 @@ private:
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
             else if (v.avvio == AVVIO_GIOCHI) disegnaIconaGiochi(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
+            else if (v.avvio == AVVIO_AI) {
+                disegnaIconaAI(r, alfa, scuro);
+                if (aiStato.statoGlobale == ai::Stato::Occupato) movimento = true;
+            }
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
@@ -2460,8 +2484,9 @@ private:
             }
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
-            // (uno anche sotto App e il centro di controllo mentre sono aperti)
-            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
+            // (uno anche sotto App, Giochi, Monitor AI e centro di controllo mentre sono attivi/aperti)
+            const bool aiAttivo = v.avvio == AVVIO_AI && ((pannelloTipo == P_AI && !pChiusura) || aiStato.occupati > 0);
+            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda() && pannelloTipo != P_AI) || aiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -3302,7 +3327,18 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI };
+    static const UINT WM_AI_AGGIORNATO = WM_APP + 33;
+    ai::Monitor aiMon;
+    ai::Riepilogo aiStato;
+    uint64_t aiVer = 0;
+    bool aiLetto = false;
+    float aiScroll = 0;
+    float aiScrollMax = 0;
+    void sincronizzaAI();
+    float altezzaAI() const;
+    void disegnaAI(bool scuro, D2D1_COLOR_F ink);
+    void focusAgente(const ai::Agente& a);
     // reti Wi-Fi (vista P_WIFI, wifi.h): ultima copia del thread, per il disegno
     wifi::Wifi wlan;
     std::vector<wifi::Rete> wlReti;
@@ -3327,7 +3363,8 @@ private:
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_FISSA, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
                   A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
-                  A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY };
+                  A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
+                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -3979,7 +4016,9 @@ public:
     std::vector<std::pair<std::wstring, std::wstring>> elencoApp();
 
     D2D1_RECT_F rettCentro() const;
+    D2D1_RECT_F rettAI() const;
     RECT rettIsolaSchermo() const;
+    RECT rettAISchermo() const;
     bool isolaVisibile() const;
 
     void apriPannelloIsola(int tipo);
@@ -4124,6 +4163,94 @@ private:
         }
     }
 
+    void disegnaIconaAI(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const ai::Stato st = aiStato.statoGlobale;
+        const bool busy = st == ai::Stato::Occupato;
+
+        if (busy && d > 8.0f) {
+            const float ra = d * 0.34f;
+            const float sw = std::max(1.4f, d * 0.055f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * alfa) : D2D1::ColorF(0.15f, 0.35f, 0.90f, 0.12f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+
+            const float a0 = (float)std::fmod(ultimoT * 2.8, 2.0 * M_PI);
+            const float sweep = (float)(1.35 * M_PI);
+            const float a1 = a0 + sweep;
+            const float pulse = 0.5f + 0.5f * std::sin((float)ultimoT * 3.8f);
+            const D2D1_COLOR_F colArc = D2D1::ColorF(0.16f + 0.38f * pulse, 0.78f - 0.30f * pulse, 1.0f, (0.78f + 0.22f * pulse) * alfa);
+            ID2D1PathGeometry* gArc = nullptr;
+            ID2D1GeometrySink* sArc = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+                sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+                sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
+                                              D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+                sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(sArc->Close())) {
+                    pennello->SetColor(colArc);
+                    dc->DrawGeometry(gArc, pennello, sw, tratto);
+                }
+            }
+            if (sArc) sArc->Release();
+            if (gArc) gArc->Release();
+        }
+
+        const float rs = d * (busy ? 0.21f : 0.25f);
+        const float k = rs * 0.17f;
+        D2D1_COLOR_F colSpark = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.85f * alfa);
+        if (busy) colSpark = scuro ? D2D1::ColorF(0.48f, 0.85f, 1.0f, alfa) : D2D1::ColorF(0.22f, 0.42f, 0.98f, alfa);
+        else if (st == ai::Stato::InAttesa) colSpark = D2D1::ColorF(0.96f, 0.62f, 0.10f, alfa);
+        else if (st == ai::Stato::Errore) colSpark = D2D1::ColorF(0.95f, 0.28f, 0.24f, alfa);
+        else if (st == ai::Stato::Completato && !aiLetto) colSpark = D2D1::ColorF(0.20f, 0.78f, 0.36f, alfa);
+
+        ID2D1PathGeometry* g = nullptr;
+        ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            s->BeginFigure({cx, cy - rs}, D2D1_FIGURE_BEGIN_FILLED);
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy - k}, {cx + rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy + k}, {cx, cy + rs}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy + k}, {cx - rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy - k}, {cx, cy - rs}));
+            s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(s->Close())) {
+                pennello->SetColor(colSpark);
+                dc->FillGeometry(g, pennello);
+            }
+        }
+        if (s) s->Release();
+        if (g) g->Release();
+
+        const bool mostraDot = busy || st == ai::Stato::InAttesa || st == ai::Stato::Errore || (st == ai::Stato::Completato && !aiLetto);
+        if (mostraDot && d > 8.0f) {
+            const float dotR = std::max(2.0f, d * 0.08f);
+            const float dotX = r.right - d * 0.18f, dotY = r.top + d * 0.18f;
+            D2D1_COLOR_F dotCol = D2D1::ColorF(0.22f, 0.80f, 1.0f, alfa);
+            if (st == ai::Stato::InAttesa) dotCol = D2D1::ColorF(1.0f, 0.68f, 0.12f, alfa);
+            else if (st == ai::Stato::Errore) dotCol = D2D1::ColorF(0.96f, 0.27f, 0.24f, alfa);
+            else if (st == ai::Stato::Completato) dotCol = D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa);
+            pennello->SetColor(dotCol);
+            dc->FillEllipse({{dotX, dotY}, dotR, dotR}, pennello);
+        }
+
+        if (aiStato.occupati > 1 && d > 10.0f) {
+            wchar_t b[12];
+            swprintf(b, 12, L"%d", aiStato.occupati);
+            const float rb = std::max(6.5f * dpi, d * 0.14f);
+            const float lb = std::max(rb * 2.0f, larghezzaTesto(b, fmtNome) + 6.0f * dpi);
+            const float bx = r.right - lb - d * 0.05f, by = r.bottom - 2.0f * rb - d * 0.05f;
+            pennello->SetColor(D2D1::ColorF(0.25f, 0.48f, 0.98f, 0.94f * alfa));
+            dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2.0f * rb}, rb, rb}, pennello);
+            pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
+            scrivi(b, fmtNome, {bx, by, bx + lb, by + 2.0f * rb});
+        }
+    }
+
     bool renderLauncher();
 
     static LRESULT CALLBACK procLauncher(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -4186,6 +4313,7 @@ private:
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(false); return; }
         if (v.avvio == AVVIO_GIOCHI) { apriLauncher(true); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
+        if (v.avvio == AVVIO_AI) { aiLetto = true; dirty = true; apriCentro(P_AI); return; }
         if (v.avvio == AVVIO_PILA || ePilaPers(v.avvio)) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
@@ -4363,7 +4491,7 @@ private:
         const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
-                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO;
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI;
         if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
         if (ant.aperta()) {
             ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
@@ -4548,6 +4676,44 @@ private:
                 if (pilaDownload.apertaPer(cartella)) pilaDownload.chiudi();
                 salvaPilePers();
                 aggiornaApp();
+            }
+            return;
+        }
+        if (v.avvio == AVVIO_AI) {
+            std::vector<menu::Voce> vv = {
+                menu::titolo(testi::t(L"Monitor AI", L"AI Monitor")),
+                menu::voce(testi::t(L"Apri Monitor AI", L"Open AI Monitor"), 1),
+            };
+            const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
+                return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
+            });
+            auto pc = menu::voce(testi::t(L"Pulisci completati", L"Clear completed"), 2);
+            pc.disattivata = !haCompletati;
+            vv.push_back(pc);
+            vv.push_back(menu::separatore());
+            auto ha = menu::voce(testi::t(L"Hook Antigravity CLI", L"Antigravity CLI hooks"), 3);
+            ha.spuntata = ai::hookAntigravityInstallati();
+            vv.push_back(ha);
+            auto hc = menu::voce(testi::t(L"Hook Claude Code", L"Claude Code hooks"), 4);
+            hc.spuntata = ai::hookClaudeInstallati();
+            vv.push_back(hc);
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 5));
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) { aiLetto = true; dirty = true; apriCentro(P_AI); }
+            else if (s == 2) {
+                aiMon.pulisciCompletati();
+                sincronizzaAI();
+            }
+            else if (s == 3) ai::installaHookAntigravity(!ai::hookAntigravityInstallati());
+            else if (s == 4) ai::installaHookClaude(!ai::hookClaudeInstallati());
+            else if (s == 5) {
+                const std::wstring dir = ai::cartellaHook();
+                if (!dir.empty()) {
+                    ai::dettagli::creaCartelle(dir);
+                    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
             }
             return;
         }
@@ -4798,6 +4964,7 @@ private:
             case WM_CLOSE: return 0;   // (le finestre del dock restano)
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
+            case WM_AI_AGGIORNATO: d->sincronizzaAI(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;

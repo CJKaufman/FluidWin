@@ -47,6 +47,7 @@ struct Valori {
     bool dockGiochi = true;       // pulsante Giochi nel dock accanto a quello delle app
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     int stileVetro = 0;           // stile del vetro (vetro::Stile: acrilico, liquido, mica, trasparente)
+    bool dockAI = true;           // icona Monitor AI nel dock
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -141,6 +142,7 @@ inline void carica() {
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.stileVetro = std::clamp((int)leggiDword(L"StileVetro", 0), 0, vetro::N_STILI - 1);
     vetro::stile() = v.stileVetro;
+    v.dockAI = leggiDword(L"DockAI", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -162,7 +164,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockGioco", v.dockGioco); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -448,6 +450,8 @@ private:
          L"Accanto al pulsante delle app, apre la raccolta dei giochi", L"Next to the apps button, opens your games library", &Valori::dockGiochi, S_DOCK},
         {L"Anteprime delle finestre", L"Window previews",
          L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
+        {L"Monitor AI nel dock", L"AI Monitor in the dock",
+         L"Stato e token degli agenti AI accanto al centro di controllo", L"AI agent status and tokens next to Control Center", &Valori::dockAI, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
