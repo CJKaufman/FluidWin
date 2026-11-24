@@ -11,6 +11,9 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shlobj.h>
+#include <shellapi.h>
+#include <commdlg.h>
+#include <wincodec.h>
 #include <wincrypt.h>
 #include <string>
 #include <vector>
@@ -28,12 +31,71 @@
 
 namespace appunti {
 
+inline std::wstring trimSpazi(const std::wstring& s) {
+    size_t ini = 0;
+    while (ini < s.size() && iswspace(s[ini])) ini++;
+    size_t fin = s.size();
+    while (fin > ini && iswspace(s[fin - 1])) fin--;
+    return s.substr(ini, fin - ini);
+}
+
+inline bool estraiColoreHex(const std::wstring& s, D2D1_COLOR_F& out) {
+    const std::wstring t = trimSpazi(s);
+    if (t.empty() || t[0] != L'#') return false;
+    const size_t n = t.size();
+    if (n != 4 && n != 7 && n != 9) return false;
+    auto hex = [](wchar_t c) -> int {
+        if (c >= L'0' && c <= L'9') return c - L'0';
+        if (c >= L'a' && c <= L'f') return 10 + (c - L'a');
+        if (c >= L'A' && c <= L'F') return 10 + (c - L'A');
+        return -1;
+    };
+    int r = 0, g = 0, b = 0, a = 255;
+    if (n == 4) {
+        const int h1 = hex(t[1]), h2 = hex(t[2]), h3 = hex(t[3]);
+        if (h1 < 0 || h2 < 0 || h3 < 0) return false;
+        r = h1 * 17;
+        g = h2 * 17;
+        b = h3 * 17;
+    } else {
+        auto coppia = [&](size_t i) -> int {
+            const int hi = hex(t[i]), lo = hex(t[i + 1]);
+            return (hi < 0 || lo < 0) ? -1 : (hi * 16 + lo);
+        };
+        r = coppia(1);
+        g = coppia(3);
+        b = coppia(5);
+        if (n == 9) a = coppia(7);
+        if (r < 0 || g < 0 || b < 0 || a < 0) return false;
+    }
+    out = D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, a / 255.0f);
+    return true;
+}
+
+inline bool eUrl(const std::wstring& s) {
+    const std::wstring t = trimSpazi(s);
+    if (t.size() <= 10) return false;
+    for (wchar_t c : t) {
+        if (iswspace(c)) return false;
+    }
+    auto iniziaCon = [&](const wchar_t* pref, size_t len) -> bool {
+        if (t.size() < len) return false;
+        for (size_t i = 0; i < len; i++) {
+            if (towlower(t[i]) != pref[i]) return false;
+        }
+        return true;
+    };
+    return iniziaCon(L"https://", 8) || iniziaCon(L"http://", 7);
+}
+
 struct Voce {
     UINT id = 0;
     bool immagine = false;
+    bool eFile = false;
     bool fissata = false;
     std::wstring testo;            // testo intero (al massimo 256 KB)
     std::wstring anteprimaTesto;   // testo normalizzato su una riga/due per la scheda
+    std::vector<std::wstring> filePercorsi;
     std::vector<BYTE> dib;         // immagine: CF_DIB originale per incollare senza perdita
     int w = 0, h = 0;              // misure reali dell'immagine
     std::vector<UINT> anteprima;   // pixel BGRA premoltiplicati aw x ah (al massimo 320 px di larghezza)
@@ -133,7 +195,35 @@ public:
 
         Voce v;
         bool ok = false;
-        if (!vietato && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
+        if (!vietato && IsClipboardFormatAvailable(CF_HDROP)) {
+            if (HANDLE hf = GetClipboardData(CF_HDROP)) {
+                if (HDROP hd = static_cast<HDROP>(GlobalLock(hf))) {
+                    const UINT tot = DragQueryFileW(hd, 0xFFFFFFFFu, nullptr, 0);
+                    const UINT lim = std::min<UINT>(tot, MAX_FILE_PERCORSI);
+                    v.filePercorsi.reserve(lim);
+                    for (UINT i = 0; i < lim; i++) {
+                        const UINT len = DragQueryFileW(hd, i, nullptr, 0);
+                        if (len > 0 && len <= (MAX_FILE_PATH_BYTES / sizeof(wchar_t))) {
+                            std::wstring p(len, L'\0');
+                            if (DragQueryFileW(hd, i, &p[0], len + 1) == len) {
+                                v.filePercorsi.push_back(std::move(p));
+                            }
+                        }
+                    }
+                    GlobalUnlock(hf);
+                }
+            }
+            if (!v.filePercorsi.empty()) {
+                v.eFile = true;
+                for (size_t i = 0; i < v.filePercorsi.size(); i++) {
+                    if (i > 0) v.testo.push_back(L'\n');
+                    v.testo += v.filePercorsi[i];
+                }
+                v.anteprimaTesto = anteprimaFile(v.filePercorsi);
+                ok = true;
+            }
+        }
+        if (!vietato && !ok && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
             if (HANDLE ht = GetClipboardData(CF_UNICODETEXT)) {
                 if (const wchar_t* p = (const wchar_t*)GlobalLock(ht)) {
                     constexpr size_t MAX_CARATTERI = (256 * 1024) / sizeof(wchar_t);
@@ -144,7 +234,7 @@ public:
             }
             ok = std::any_of(v.testo.begin(), v.testo.end(), [](wchar_t ch) { return !iswspace(ch); });
             if (ok) v.anteprimaTesto = normalizzaAnteprima(v.testo);
-        } else if (!vietato && IsClipboardFormatAvailable(CF_DIB)) {
+        } else if (!vietato && !ok && IsClipboardFormatAvailable(CF_DIB)) {
             if (HANDLE hd = GetClipboardData(CF_DIB)) {
                 constexpr SIZE_T MAX_DIB = 16 * 1024 * 1024;
                 const SIZE_T n = GlobalSize(hd);
@@ -169,7 +259,11 @@ public:
 
         bool eraFissata = false;
         for (size_t i = 0; i < voci.size(); i++) {
-            if (voci[i].immagine == v.immagine && (v.immagine ? voci[i].dib == v.dib : voci[i].testo == v.testo)) {
+            const bool stesso = (voci[i].immagine == v.immagine) && (voci[i].eFile == v.eFile) &&
+                (v.immagine ? (voci[i].dib == v.dib)
+                            : (v.eFile ? (voci[i].filePercorsi == v.filePercorsi)
+                                       : (voci[i].testo == v.testo)));
+            if (stesso) {
                 eraFissata = voci[i].fissata;
                 voci.erase(voci.begin() + (ptrdiff_t)i);
                 break;
@@ -188,17 +282,45 @@ public:
     bool ricopia(UINT id, bool spostaInCima = true) {
         auto it = std::find_if(voci.begin(), voci.end(), [id](const Voce& v) { return v.id == id; });
         if (it == voci.end()) return false;
-        const void* dati = it->immagine ? (const void*)it->dib.data() : (const void*)it->testo.c_str();
-        const size_t n = it->immagine ? it->dib.size() : (it->testo.size() + 1) * sizeof(wchar_t);
-        HGLOBAL g = n ? GlobalAlloc(GMEM_MOVEABLE, n) : nullptr;
-        if (!g) return false;
-        void* p = GlobalLock(g);
-        if (!p) { GlobalFree(g); return false; }
-        memcpy(p, dati, n);
-        GlobalUnlock(g);
+
+        HGLOBAL g = nullptr;
+        UINT fmt = CF_UNICODETEXT;
+        if (it->eFile && !it->filePercorsi.empty()) {
+            size_t totalChars = 1;
+            for (const auto& path : it->filePercorsi) totalChars += path.size() + 1;
+            const size_t n = sizeof(DROPFILES) + totalChars * sizeof(wchar_t);
+            g = GlobalAlloc(GMEM_MOVEABLE, n);
+            if (!g) return false;
+            void* p = GlobalLock(g);
+            if (!p) { GlobalFree(g); return false; }
+            DROPFILES* df = static_cast<DROPFILES*>(p);
+            df->pFiles = sizeof(DROPFILES);
+            df->pt = {0, 0};
+            df->fNC = FALSE;
+            df->fWide = TRUE;
+            wchar_t* dst = reinterpret_cast<wchar_t*>(static_cast<BYTE*>(p) + sizeof(DROPFILES));
+            for (const auto& path : it->filePercorsi) {
+                memcpy(dst, path.c_str(), (path.size() + 1) * sizeof(wchar_t));
+                dst += path.size() + 1;
+            }
+            *dst = L'\0';
+            GlobalUnlock(g);
+            fmt = CF_HDROP;
+        } else {
+            const void* dati = it->immagine ? (const void*)it->dib.data() : (const void*)it->testo.c_str();
+            const size_t n = it->immagine ? it->dib.size() : (it->testo.size() + 1) * sizeof(wchar_t);
+            g = n ? GlobalAlloc(GMEM_MOVEABLE, n) : nullptr;
+            if (!g) return false;
+            void* p = GlobalLock(g);
+            if (!p) { GlobalFree(g); return false; }
+            memcpy(p, dati, n);
+            GlobalUnlock(g);
+            fmt = it->immagine ? CF_DIB : CF_UNICODETEXT;
+        }
+
         if (!apri()) { GlobalFree(g); return false; }
         bool ok = false;
-        if (EmptyClipboard()) ok = SetClipboardData(it->immagine ? CF_DIB : CF_UNICODETEXT, g) != nullptr;
+        if (EmptyClipboard()) ok = SetClipboardData(fmt, g) != nullptr;
         if (!ok) GlobalFree(g);
         CloseClipboard();
         if (ok) {
@@ -216,6 +338,26 @@ public:
                 versione++;
                 if (eraFissata) salvaFissati();
             }
+        }
+        return ok;
+    }
+
+    bool copiaTestoSemplice(const std::wstring& t) {
+        const size_t n = (t.size() + 1) * sizeof(wchar_t);
+        HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, n);
+        if (!g) return false;
+        void* p = GlobalLock(g);
+        if (!p) { GlobalFree(g); return false; }
+        memcpy(p, t.c_str(), n);
+        GlobalUnlock(g);
+        if (!apri()) { GlobalFree(g); return false; }
+        bool ok = false;
+        if (EmptyClipboard()) ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr;
+        if (!ok) GlobalFree(g);
+        CloseClipboard();
+        if (ok) {
+            ultimaSequenzaInterna = GetClipboardSequenceNumber();
+            haSequenzaInterna = true;
         }
         return ok;
     }
@@ -244,12 +386,14 @@ public:
     }
 
 private:
-    static constexpr uint32_t VERSIONE_FISSATI = 1;
+    static constexpr uint32_t VERSIONE_FISSATI = 2;
     static constexpr uint32_t MAX_FISSATI = 50;
     static constexpr uint32_t MAX_SORG_BYTES = 4096;
     static constexpr uint32_t MAX_TESTO_BYTES = 512 * 1024;
     static constexpr uint32_t MAX_DIB_BYTES = 16 * 1024 * 1024;
     static constexpr uint32_t MAX_ANT_BYTES = 4 * 1024 * 1024;
+    static constexpr uint32_t MAX_FILE_PERCORSI = 64;
+    static constexpr uint32_t MAX_FILE_PATH_BYTES = 4096;
     static constexpr size_t MAX_FILE_FISSATI = 64 * 1024 * 1024;
 
     using FnCryptProtectData = BOOL (WINAPI*)(
@@ -392,7 +536,7 @@ private:
         if (!readBytes(data, len, pos, magic, 4) || !readVal(data, len, pos, ver) || !readVal(data, len, pos, count)) {
             return false;
         }
-        if (memcmp(magic, "FWCB", 4) != 0 || ver != VERSIONE_FISSATI || count > MAX_FISSATI) {
+        if (memcmp(magic, "FWCB", 4) != 0 || (ver != 1u && ver != VERSIONE_FISSATI) || count > MAX_FISSATI) {
             return false;
         }
 
@@ -402,19 +546,21 @@ private:
         const ULONGLONG oraTick = GetTickCount64();
 
         caricate.reserve(count);
+        const uint8_t maxTipo = (ver >= 2u) ? 2u : 1u;
         for (uint32_t i = 0; i < count; i++) {
-            uint8_t img = 0;
+            uint8_t tipo = 0;
             uint64_t quando = 0;
             uint32_t sorgLen = 0;
-            if (!readVal(data, len, pos, img) || !readVal(data, len, pos, quando) || !readVal(data, len, pos, sorgLen)) {
+            if (!readVal(data, len, pos, tipo) || !readVal(data, len, pos, quando) || !readVal(data, len, pos, sorgLen)) {
                 return false;
             }
-            if (img > 1u || sorgLen > MAX_SORG_BYTES || (sorgLen % sizeof(wchar_t)) != 0) {
+            if (tipo > maxTipo || sorgLen > MAX_SORG_BYTES || (sorgLen % sizeof(wchar_t)) != 0) {
                 return false;
             }
 
             Voce v;
-            v.immagine = (img != 0);
+            v.immagine = (tipo == 1u);
+            v.eFile = (tipo == 2u);
             v.fissata = true;
             v.quando = (INT64)quando;
             const ULONGLONG diffMs = (oraFt > v.quando && v.quando > 0) ? (ULONGLONG)((oraFt - v.quando) / 10000LL) : 0ULL;
@@ -425,7 +571,7 @@ private:
                 if (!readBytes(data, len, pos, &v.sorgente[0], sorgLen)) return false;
             }
 
-            if (!v.immagine) {
+            if (tipo == 0u) {
                 uint32_t testoLen = 0;
                 if (!readVal(data, len, pos, testoLen) || testoLen > MAX_TESTO_BYTES || (testoLen % sizeof(wchar_t)) != 0) {
                     return false;
@@ -435,7 +581,7 @@ private:
                     if (!readBytes(data, len, pos, &v.testo[0], testoLen)) return false;
                 }
                 v.anteprimaTesto = normalizzaAnteprima(v.testo);
-            } else {
+            } else if (tipo == 1u) {
                 int32_t w = 0, hImg = 0, aw = 0, ah = 0;
                 uint32_t dibLen = 0, antLen = 0;
                 if (!readVal(data, len, pos, w) || !readVal(data, len, pos, hImg)
@@ -461,6 +607,26 @@ private:
                 v.h = (int)hImg;
                 v.aw = (int)aw;
                 v.ah = (int)ah;
+            } else {
+                uint32_t fileCount = 0;
+                if (!readVal(data, len, pos, fileCount) || fileCount == 0 || fileCount > MAX_FILE_PERCORSI) {
+                    return false;
+                }
+                v.filePercorsi.reserve(fileCount);
+                for (uint32_t j = 0; j < fileCount; j++) {
+                    uint32_t pathLen = 0;
+                    if (!readVal(data, len, pos, pathLen) || pathLen == 0 || pathLen > MAX_FILE_PATH_BYTES || (pathLen % sizeof(wchar_t)) != 0) {
+                        return false;
+                    }
+                    std::wstring p(pathLen / sizeof(wchar_t), L'\0');
+                    if (!readBytes(data, len, pos, &p[0], pathLen)) return false;
+                    v.filePercorsi.push_back(std::move(p));
+                }
+                for (size_t j = 0; j < v.filePercorsi.size(); j++) {
+                    if (j > 0) v.testo.push_back(L'\n');
+                    v.testo += v.filePercorsi[j];
+                }
+                v.anteprimaTesto = anteprimaFile(v.filePercorsi);
             }
 
             caricate.push_back(std::move(v));
@@ -492,19 +658,19 @@ private:
 
         for (uint32_t i = 0; i < count; i++) {
             const Voce& v = *fissate[i];
-            const uint8_t img = v.immagine ? 1u : 0u;
+            const uint8_t tipo = v.immagine ? 1u : ((v.eFile && !v.filePercorsi.empty()) ? 2u : 0u);
             const uint64_t quando = (uint64_t)v.quando;
             const uint32_t sorgLen = (uint32_t)std::min<size_t>(v.sorgente.size() * sizeof(wchar_t), MAX_SORG_BYTES);
-            appendVal(plain, img);
+            appendVal(plain, tipo);
             appendVal(plain, quando);
             appendVal(plain, sorgLen);
             if (sorgLen > 0) appendBytes(plain, v.sorgente.data(), sorgLen);
 
-            if (!v.immagine) {
+            if (tipo == 0u) {
                 const uint32_t testoLen = (uint32_t)std::min<size_t>(v.testo.size() * sizeof(wchar_t), MAX_TESTO_BYTES);
                 appendVal(plain, testoLen);
                 if (testoLen > 0) appendBytes(plain, v.testo.data(), testoLen);
-            } else {
+            } else if (tipo == 1u) {
                 const int32_t w = (int32_t)v.w;
                 const int32_t hImg = (int32_t)v.h;
                 const int32_t aw = (int32_t)v.aw;
@@ -519,6 +685,14 @@ private:
                 if (dibLen > 0) appendBytes(plain, v.dib.data(), dibLen);
                 appendVal(plain, antLen);
                 if (antLen > 0) appendBytes(plain, v.anteprima.data(), antLen);
+            } else {
+                const uint32_t fileCount = (uint32_t)std::min<size_t>(v.filePercorsi.size(), MAX_FILE_PERCORSI);
+                appendVal(plain, fileCount);
+                for (uint32_t j = 0; j < fileCount; j++) {
+                    const uint32_t pathLen = (uint32_t)std::min<size_t>(v.filePercorsi[j].size() * sizeof(wchar_t), MAX_FILE_PATH_BYTES);
+                    appendVal(plain, pathLen);
+                    if (pathLen > 0) appendBytes(plain, v.filePercorsi[j].data(), pathLen);
+                }
             }
         }
 
@@ -611,6 +785,27 @@ private:
         }
     }
 
+    static std::wstring nomeBaseFile(const std::wstring& path) {
+        size_t pos = path.find_last_of(L"\\/");
+        if (pos == std::wstring::npos || pos + 1 >= path.size()) return path;
+        return path.substr(pos + 1);
+    }
+
+    static std::wstring anteprimaFile(const std::vector<std::wstring>& percorsi) {
+        if (percorsi.empty()) return {};
+        if (percorsi.size() == 1) return nomeBaseFile(percorsi[0]);
+        wchar_t buf[64]{};
+        swprintf(buf, 64, testi::t(L"%zu file: ", L"%zu files: "), percorsi.size());
+        std::wstring out = buf;
+        const size_t mostra = std::min<size_t>(percorsi.size(), 3);
+        for (size_t i = 0; i < mostra; i++) {
+            if (i > 0) out += L", ";
+            out += nomeBaseFile(percorsi[i]);
+        }
+        if (percorsi.size() > mostra) out += L"…";
+        return out;
+    }
+
     static std::wstring normalizzaAnteprima(const std::wstring& s) {
         std::wstring out;
         out.reserve(std::min<size_t>(s.size(), 260));
@@ -694,6 +889,108 @@ private:
     }
 };
 
+inline bool salvaDibComePng(const std::vector<BYTE>& dib, const std::wstring& path) {
+    if (dib.empty() || path.empty()) return false;
+    const size_t off = Cronologia::inizioPixelDib(dib.data(), dib.size());
+    if (!off) return false;
+    BITMAPINFOHEADER bh{};
+    memcpy(&bh, dib.data(), sizeof(bh));
+    const int w = bh.biWidth;
+    const int h = std::abs(bh.biHeight);
+    if (w <= 0 || h <= 0 || (uint64_t)w * (uint64_t)h > 64ULL * 1024 * 1024) return false;
+
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    std::vector<UINT> bgra;
+    bool dibOk = false;
+    HDC scr = GetDC(nullptr);
+    HDC mem = scr ? CreateCompatibleDC(scr) : nullptr;
+    void* bits = nullptr;
+    HBITMAP bmp = (scr && mem) ? CreateDIBSection(scr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+    if (bmp && bits) {
+        HGDIOBJ vec = SelectObject(mem, bmp);
+        dibOk = StretchDIBits(mem, 0, 0, w, h, 0, 0, w, h,
+                              dib.data() + off, reinterpret_cast<const BITMAPINFO*>(dib.data()),
+                              DIB_RGB_COLORS, SRCCOPY) > 0;
+        GdiFlush();
+        if (dibOk) {
+            const size_t count = (size_t)w * (size_t)h;
+            bgra.assign(static_cast<const UINT*>(bits), static_cast<const UINT*>(bits) + count);
+        }
+        SelectObject(mem, vec);
+    }
+    if (bmp) DeleteObject(bmp);
+    if (mem) DeleteDC(mem);
+    if (scr) ReleaseDC(nullptr, scr);
+    if (!dibOk || bgra.empty()) return false;
+
+    bool haAlfa = false;
+    for (UINT px : bgra) {
+        if ((px & 0xFF000000u) != 0) {
+            haAlfa = true;
+            break;
+        }
+    }
+
+    IWICImagingFactory* wic = nullptr;
+    IWICStream* stream = nullptr;
+    IWICBitmapEncoder* enc = nullptr;
+    IWICBitmapFrameEncode* frame = nullptr;
+    IPropertyBag2* props = nullptr;
+
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+    if (SUCCEEDED(hr)) hr = wic->CreateStream(&stream);
+    if (SUCCEEDED(hr)) hr = stream->InitializeFromFilename(path.c_str(), GENERIC_WRITE);
+    if (SUCCEEDED(hr)) hr = wic->CreateEncoder(GUID_ContainerFormatPng, nullptr, &enc);
+    if (SUCCEEDED(hr)) hr = enc->Initialize(stream, WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = enc->CreateNewFrame(&frame, &props);
+    if (SUCCEEDED(hr)) hr = frame->Initialize(props);
+    if (SUCCEEDED(hr)) hr = frame->SetSize((UINT)w, (UINT)h);
+
+    WICPixelFormatGUID fmt = haAlfa ? GUID_WICPixelFormat32bppBGRA : GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
+
+    if (SUCCEEDED(hr)) {
+        if (IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR)) {
+            const UINT stride = (UINT)w * 3u;
+            std::vector<BYTE> bgr((size_t)stride * (size_t)h);
+            BYTE* dst = bgr.data();
+            for (UINT px : bgra) {
+                dst[0] = (BYTE)(px & 0xFFu);
+                dst[1] = (BYTE)((px >> 8) & 0xFFu);
+                dst[2] = (BYTE)((px >> 16) & 0xFFu);
+                dst += 3;
+            }
+            hr = frame->WritePixels((UINT)h, stride, (UINT)bgr.size(), bgr.data());
+        } else if (IsEqualGUID(fmt, GUID_WICPixelFormat32bppBGRA)) {
+            if (!haAlfa) {
+                for (UINT& px : bgra) px |= 0xFF000000u;
+            }
+            const UINT stride = (UINT)w * 4u;
+            hr = frame->WritePixels((UINT)h, stride, (UINT)(bgra.size() * sizeof(UINT)),
+                                    reinterpret_cast<BYTE*>(bgra.data()));
+        } else {
+            hr = E_FAIL;
+        }
+    }
+
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = enc->Commit();
+
+    if (props) props->Release();
+    if (frame) frame->Release();
+    if (enc) enc->Release();
+    if (stream) stream->Release();
+    if (wic) wic->Release();
+    return SUCCEEDED(hr);
+}
+
 // ---- Finestra di vetro degli appunti (Win+V) ----
 class Appunti {
 public:
@@ -747,6 +1044,8 @@ public:
         destY = std::clamp(y, minY, maxY);
 
         ricerca.clear();
+        filtro = F_TUTTI;
+        sopraFiltro = -1;
         scrollY = 0;
         sel = 0;
         sopra = -1;
@@ -887,10 +1186,11 @@ public:
             }
 
             case WM_MOUSELEAVE:
-                if (sopra != -1 || sopraAzione != 0 || sopraSvuota) {
+                if (sopra != -1 || sopraAzione != 0 || sopraSvuota || sopraFiltro != -1) {
                     sopra = -1;
                     sopraAzione = 0;
                     sopraSvuota = false;
+                    sopraFiltro = -1;
                     disegna();
                 }
                 return true;
@@ -904,6 +1204,17 @@ public:
                     aggiornaFiltro();
                     disegna();
                     return true;
+                }
+                for (int i = 0; i < 4; i++) {
+                    if (puntoIn(rettFiltro(i), mx, my)) {
+                        if (filtro != i) {
+                            filtro = i;
+                            scrollY = 0.0f;
+                            aggiornaFiltro();
+                            disegna();
+                        }
+                        return true;
+                    }
                 }
                 int idx = -1, az = 0;
                 if (colpisceLista(mx, my, idx, az) && idx >= 0 && idx < (int)filtrate.size()) {
@@ -938,13 +1249,23 @@ public:
 
                 POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)};
                 ClientToScreen(hw, &pt);
-                const std::vector<menu::Voce> vociMenu = {
+                std::vector<menu::Voce> vociMenu = {
                     menu::voce(testi::t(L"Incolla", L"Paste"), 1),
                     menu::voce(testi::t(L"Copia soltanto", L"Copy only"), 2),
                     menu::voce(voce->fissata ? testi::t(L"Sblocca", L"Unpin") : testi::t(L"Fissa", L"Pin"), 3),
-                    menu::separatore(),
-                    menu::voce(testi::t(L"Elimina", L"Delete"), 4),
                 };
+                if (!voce->immagine && !voce->eFile && eUrl(voce->testo)) {
+                    vociMenu.push_back(menu::voce(testi::t(L"Apri nel browser", L"Open in browser"), 5));
+                }
+                if (voce->immagine) {
+                    vociMenu.push_back(menu::voce(testi::t(L"Salva come PNG…", L"Save as PNG…"), 6));
+                }
+                if (voce->eFile && !voce->filePercorsi.empty()) {
+                    vociMenu.push_back(menu::voce(testi::t(L"Copia percorso", L"Copy path"), 7));
+                    vociMenu.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 8));
+                }
+                vociMenu.push_back(menu::separatore());
+                vociMenu.push_back(menu::voce(testi::t(L"Elimina", L"Delete"), 4));
 
                 menuAperto = true;
                 const UINT scelta = menu::mostra(vociMenu, pt, hw);
@@ -964,6 +1285,47 @@ public:
                     aggiornaFiltro();
                     SetForegroundWindow(hw);
                     disegna();
+                } else if (scelta == 5) {
+                    const Voce* vCur = trovaVoce(id);
+                    if (vCur && !vCur->immagine && !vCur->eFile && eUrl(vCur->testo)) {
+                        const std::wstring url = trimSpazi(vCur->testo);
+                        chiudi(false);
+                        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    }
+                } else if (scelta == 6) {
+                    const Voce* vCur = trovaVoce(id);
+                    if (vCur && vCur->immagine && !vCur->dib.empty()) {
+                        std::vector<BYTE> dibCopia = vCur->dib;
+                        wchar_t filePath[MAX_PATH] = L"clipboard.png";
+                        OPENFILENAMEW ofn{};
+                        ofn.lStructSize = sizeof(ofn);
+                        ofn.hwndOwner = hw;
+                        ofn.lpstrFilter = L"PNG (*.png)\0*.png\0";
+                        ofn.lpstrFile = filePath;
+                        ofn.nMaxFile = MAX_PATH;
+                        ofn.lpstrDefExt = L"png";
+                        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+                        menuAperto = true;
+                        const BOOL okSalva = GetSaveFileNameW(&ofn);
+                        menuAperto = false;
+                        if (okSalva) salvaDibComePng(dibCopia, filePath);
+                    }
+                    if (aperta() && GetForegroundWindow() != hw) {
+                        chiudi(true);
+                    }
+                } else if (scelta == 7) {
+                    const Voce* vCur = trovaVoce(id);
+                    if (vCur && vCur->eFile && !vCur->testo.empty()) {
+                        Cronologia::io().copiaTestoSemplice(vCur->testo);
+                        chiudi(false);
+                    }
+                } else if (scelta == 8) {
+                    const Voce* vCur = trovaVoce(id);
+                    if (vCur && vCur->eFile && !vCur->filePercorsi.empty()) {
+                        const std::wstring arg = L"/select,\"" + vCur->filePercorsi[0] + L"\"";
+                        chiudi(false);
+                        ShellExecuteW(nullptr, L"open", L"explorer.exe", arg.c_str(), nullptr, SW_SHOWNORMAL);
+                    }
                 } else if (aperta() && GetForegroundWindow() != hw) {
                     chiudi(true);
                 }
@@ -974,6 +1336,8 @@ public:
     }
 
 private:
+    enum Filtro { F_TUTTI = 0, F_FISSATI = 1, F_IMMAGINI = 2, F_LINK = 3 };
+
     static constexpr UINT TIMER_INCOLLA = 2;
     static constexpr double DURATA_APRI_MS = 160.0;
     static constexpr double DURATA_CHIUDI_MS = 120.0;
@@ -991,6 +1355,8 @@ private:
     int destX = 0, destY = 0, destW = 384, destH = 484;
 
     std::wstring ricerca;
+    int filtro = F_TUTTI;
+    int sopraFiltro = -1;
     std::vector<UINT> filtrate;
     float scrollY = 0;
     int sel = 0;
@@ -1099,13 +1465,17 @@ private:
         filtrate.clear();
         const auto& voci = Cronologia::io().voci;
         for (const auto& vc : voci) {
+            if (filtro == F_FISSATI && !vc.fissata) continue;
+            if (filtro == F_IMMAGINI && !vc.immagine) continue;
+            if (filtro == F_LINK && (vc.immagine || vc.eFile || !eUrl(vc.testo))) continue;
             if (ricerca.empty()) {
                 filtrate.push_back(vc.id);
             } else {
-                const bool matchTesto = !vc.immagine && contieneSenzaMaiusc(vc.testo, ricerca);
+                const bool matchTesto = !vc.immagine && (contieneSenzaMaiusc(vc.testo, ricerca) || contieneSenzaMaiusc(vc.anteprimaTesto, ricerca));
                 const bool matchApp = contieneSenzaMaiusc(vc.sorgente, ricerca);
                 const bool matchImg = vc.immagine && (contieneSenzaMaiusc(L"image", ricerca) || contieneSenzaMaiusc(L"immagine", ricerca));
-                if (matchTesto || matchApp || matchImg) filtrate.push_back(vc.id);
+                const bool matchFile = vc.eFile && contieneSenzaMaiusc(L"file", ricerca);
+                if (matchTesto || matchApp || matchImg || matchFile) filtrate.push_back(vc.id);
             }
         }
         if (filtrate.empty()) sel = 0;
@@ -1126,9 +1496,17 @@ private:
         return {12.0f * d, 48.0f * d, (float)v.W - 12.0f * d, 84.0f * d};
     }
 
+    D2D1_RECT_F rettFiltro(int idx) const {
+        const float d = v.dpi;
+        const float gap = 6.0f * d;
+        const float pw = ((float)v.W - 24.0f * d - gap * 3.0f) * 0.25f;
+        const float left = 12.0f * d + idx * (pw + gap);
+        return {left, 90.0f * d, left + pw, 116.0f * d};
+    }
+
     D2D1_RECT_F rettLista() const {
         const float d = v.dpi;
-        return {0.0f, 92.0f * d, (float)v.W, (float)v.H - 8.0f * d};
+        return {0.0f, 124.0f * d, (float)v.W, (float)v.H - 8.0f * d};
     }
 
     float altezzaScheda(const Voce& vc) const {
@@ -1210,10 +1588,18 @@ private:
 
     bool aggiornaHover(float mx, float my) {
         const bool sv = puntoIn(rettSvuota(), mx, my);
+        int fi = -1;
+        for (int i = 0; i < 4; i++) {
+            if (puntoIn(rettFiltro(i), mx, my)) {
+                fi = i;
+                break;
+            }
+        }
         int idx = -1, az = 0;
         colpisceLista(mx, my, idx, az);
-        const bool cambiato = (sv != sopraSvuota) || (idx != sopra) || (az != sopraAzione);
+        const bool cambiato = (sv != sopraSvuota) || (fi != sopraFiltro) || (idx != sopra) || (az != sopraAzione);
         sopraSvuota = sv;
+        sopraFiltro = fi;
         sopra = idx;
         sopraAzione = az;
         return cambiato;
@@ -1393,6 +1779,34 @@ private:
             }
         }
 
+        // barra filtri (pillole Liquid Glass)
+        {
+            const wchar_t* etichette[4] = {
+                testi::t(L"Tutti", L"All"),
+                testi::t(L"Fissati", L"Pinned"),
+                testi::t(L"Immagini", L"Images"),
+                testi::t(L"Link", L"Links")
+            };
+            for (int i = 0; i < 4; i++) {
+                const D2D1_RECT_F rp = rettFiltro(i);
+                const bool attivo = (filtro == i);
+                const bool hov = (sopraFiltro == i);
+                const D2D1_COLOR_F bg = attivo
+                    ? (sc ? D2D1::ColorF(0.32f, 0.58f, 0.96f, 0.28f) : D2D1::ColorF(0.0f, 0.45f, 0.88f, 0.16f))
+                    : hov
+                        ? (sc ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.13f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.08f))
+                        : (sc ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.06f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.04f));
+                const D2D1_COLOR_F bd = attivo
+                    ? (sc ? D2D1::ColorF(0.45f, 0.72f, 1.0f, 0.52f) : D2D1::ColorF(0.0f, 0.45f, 0.88f, 0.38f))
+                    : (sc ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.10f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.07f));
+                v.pen->SetColor(bg);
+                v.rt->FillRoundedRectangle({rp, 13.0f * d, 13.0f * d}, v.pen);
+                v.pen->SetColor(bd);
+                v.rt->DrawRoundedRectangle({rp, 13.0f * d, 13.0f * d}, v.pen, 1.0f);
+                v.testo(etichette[i], fPiccolo, rp, attivo ? ink : (hov ? v.inchiostro(0.85f) : muted));
+            }
+        }
+
         // lista scorrevole delle schede
         const D2D1_RECT_F area = rettLista();
         v.rt->PushAxisAlignedClip(area, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1455,10 +1869,58 @@ private:
                         swprintf(dim, 48, L"%d × %d", vc->w, vc->h);
                         v.testo(dim, fTesto, {tx, card.top + 22.0f * d, rightLimit, card.top + 46.0f * d}, ink);
                         v.testo(meta, fMeta, {tx, card.bottom - 30.0f * d, card.right - pad, card.bottom - 10.0f * d}, muted);
-                    } else {
+                    } else if (vc->eFile) {
+                        const float bx = card.left + pad;
+                        const float by = card.top + 14.0f * d;
+                        const D2D1_RECT_F rBadge = {bx, by, bx + 22.0f * d, by + 22.0f * d};
+                        v.pen->SetColor(sc ? D2D1::ColorF(0.38f, 0.68f, 1.0f, 0.18f) : D2D1::ColorF(0.0f, 0.45f, 0.88f, 0.12f));
+                        v.rt->FillRoundedRectangle({rBadge, 6.0f * d, 6.0f * d}, v.pen);
+                        v.pen->SetColor(sc ? D2D1::ColorF(0.55f, 0.80f, 1.0f, 0.90f) : D2D1::ColorF(0.0f, 0.42f, 0.85f, 0.88f));
+                        const D2D1_RECT_F rTab = {bx + 4.5f * d, by + 5.5f * d, bx + 10.5f * d, by + 8.5f * d};
+                        const D2D1_RECT_F rFld = {bx + 4.5f * d, by + 7.5f * d, bx + 17.5f * d, by + 16.5f * d};
+                        v.rt->FillRoundedRectangle({rTab, 1.2f * d, 1.2f * d}, v.pen);
+                        v.rt->DrawRoundedRectangle({rFld, 2.0f * d, 2.0f * d}, v.pen, 1.3f * d);
+
+                        std::wstring pref;
+                        if (vc->filePercorsi.size() > 1) {
+                            wchar_t fb[32]{};
+                            swprintf(fb, 32, testi::t(L"%zu file · ", L"%zu files · "), vc->filePercorsi.size());
+                            pref = fb;
+                        } else {
+                            pref = L"File · ";
+                        }
+                        const float tx = card.left + pad + 28.0f * d;
                         const std::wstring& snippet = vc->anteprimaTesto.empty() ? vc->testo : vc->anteprimaTesto;
-                        v.testo(snippet, fTesto, {card.left + pad, card.top + 10.0f * d, rightLimit, card.top + 48.0f * d}, ink);
-                        v.testo(meta, fMeta, {card.left + pad, card.bottom - 26.0f * d, card.right - pad, card.bottom - 8.0f * d}, muted);
+                        v.testo(snippet, fTesto, {tx, card.top + 10.0f * d, rightLimit, card.top + 48.0f * d}, ink);
+                        v.testo(pref + meta, fMeta, {tx, card.bottom - 26.0f * d, card.right - pad, card.bottom - 8.0f * d}, muted);
+                    } else {
+                        D2D1_COLOR_F colHex{};
+                        const bool isCol = estraiColoreHex(vc->testo, colHex);
+                        const bool isLink = !isCol && eUrl(vc->testo);
+                        float tx = card.left + pad;
+                        if (isCol) {
+                            const float r = 10.0f * d;
+                            const float cx = tx + r;
+                            const float cy = card.top + 27.0f * d;
+                            v.pen->SetColor(colHex);
+                            v.rt->FillEllipse({{cx, cy}, r, r}, v.pen);
+                            v.pen->SetColor(sc ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.35f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.25f));
+                            v.rt->DrawEllipse({{cx, cy}, r, r}, v.pen, 1.0f);
+                            tx += 28.0f * d;
+                        }
+                        const D2D1_COLOR_F linkCol = sc
+                            ? D2D1::ColorF(0.48f, 0.76f, 1.0f, 0.98f)
+                            : D2D1::ColorF(0.0f, 0.42f, 0.85f, 0.98f);
+                        const std::wstring& snippet = vc->anteprimaTesto.empty() ? vc->testo : vc->anteprimaTesto;
+                        v.testo(snippet, fTesto, {tx, card.top + 10.0f * d, rightLimit, card.top + 48.0f * d}, isLink ? linkCol : ink);
+                        if (isLink) {
+                            const std::wstring pref = L"Link · ";
+                            const float pw = v.larghezza(pref, fMeta);
+                            v.testo(pref, fMeta, {tx, card.bottom - 26.0f * d, card.right - pad, card.bottom - 8.0f * d}, linkCol);
+                            v.testo(meta, fMeta, {tx + pw, card.bottom - 26.0f * d, card.right - pad, card.bottom - 8.0f * d}, muted);
+                        } else {
+                            v.testo(meta, fMeta, {tx, card.bottom - 26.0f * d, card.right - pad, card.bottom - 8.0f * d}, muted);
+                        }
                     }
 
                     // pulsanti azione (Pin e Elimina) in alto a destra
