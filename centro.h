@@ -111,7 +111,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
     // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
     // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
-    const RECT ic = aSchermo(rettCentro());
+    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : rettCentro());
     const int stacco = (int)std::round(PAD + 10 * dpi);
     int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
     if (lato == 1) y1 = ic.bottom + stacco;
@@ -151,6 +151,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
     else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
+    else if (tipo == P_AI) { aiStato = aiMon.copia(); aiVer = aiMon.versione.load(); aiLetto = true; aiScroll = 0; dirty = true; }
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -163,6 +164,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_MIXER) h = altezzaMixer() + testa;
     else if (tipo == P_APPUNTI) h = altezzaAppunti() + testa;
     else if (tipo == P_WIFI) h = altezzaWifi() + testa;
+    else if (tipo == P_AI) h = altezzaAI();
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -172,7 +174,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
 inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     if (pannelloTipo == P_NESSUNO || pChiusura || tipo == pannelloTipo) return;
     vistaPrima = pannelloTipo; phPrima = PH;
-    vistaAvanti = tipo != P_CONTROLLO;
+    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI;
     if (vistaAvanti) origineVista = origineRitorno = origine;
     preparaVista(tipo);
     pannelloTipo = tipo;
@@ -183,7 +185,7 @@ inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     pAnimazione = true; pDirty = true;
 }
 
-inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
+inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
 
 inline auto Motore::inTransizione() const -> bool { return tVista >= 0; }
 
@@ -334,7 +336,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
     {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const RECT ic = aSchermo(rettCentro());
+        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : rettCentro());
         const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
         const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
         m = D2D1::Matrix3x2F::Scale(s, s, p);
@@ -480,6 +482,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
     const float phSalvato = PH;
     PH = h; baseVista = t; dc->SetTransform(t);
     if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
+    else if (tipo == P_AI) disegnaAI(scuro, ink);
     else {
         const float testa = std::round(TESTA * dpi);
         disegnaTesta(tipo, scuro, ink);
@@ -1194,6 +1197,247 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(ink);
     scrivi(testi::t(L"Impostazioni notifiche", L"Notification settings"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
     chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
+}
+
+// ---- Monitor AI ----
+static constexpr float AI_TESTA = 62, AI_SCHEDA = 66, AI_PIEDE = 48;
+
+inline auto Motore::sincronizzaAI() -> void {
+    const uint64_t v = aiMon.versione.load(std::memory_order_relaxed);
+    if (v == aiVer) return;
+    ai::Riepilogo nuovo = aiMon.copia();
+    const int s = slotCorrente;
+    usa(0);
+    const bool aiAperto = (pannelloTipo == P_AI && !pChiusura);
+    if (aiAperto) {
+        aiLetto = true;
+    } else {
+        for (const auto& a : nuovo.agenti) {
+            if (a.stato != ai::Stato::Completato && a.stato != ai::Stato::InAttesa) continue;
+            bool giaNotato = false;
+            for (const auto& old : aiStato.agenti) {
+                if (old.id == a.id && old.stato == a.stato && old.aggiornatoT == a.aggiornatoT) {
+                    giaNotato = true;
+                    break;
+                }
+            }
+            if (!giaNotato) { aiLetto = false; break; }
+        }
+    }
+    aiStato = std::move(nuovo);
+    aiVer = v;
+    dirty = true;
+    if (aiAperto) {
+        const float nuova = altezzaVista(P_AI);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pSopra = pPremuto = -1;
+        evidP.clear();
+        pDirty = true;
+    }
+    usa(s);
+}
+
+inline auto Motore::altezzaAI() const -> float {
+    const float corpo = aiStato.agenti.empty() ? 72.0f : (float)aiStato.agenti.size() * AI_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((AI_TESTA + corpo + AI_PIEDE) * dpi));
+}
+
+inline auto Motore::focusAgente(const ai::Agente& a) -> void {
+    HWND target = nullptr;
+    if (a.pid != 0) {
+        struct Ctx { DWORD pid; HWND best; } ctx{a.pid, nullptr};
+        EnumWindows([](HWND h, LPARAM l) -> BOOL {
+            auto* c = (Ctx*)l;
+            if (!IsWindowVisible(h) || GetWindow(h, GW_OWNER) || GetWindowTextLengthW(h) == 0) return TRUE;
+            if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
+            DWORD pid = 0;
+            GetWindowThreadProcessId(h, &pid);
+            if (pid == c->pid) { c->best = h; return FALSE; }
+            return TRUE;
+        }, (LPARAM)&ctx);
+        target = ctx.best;
+    }
+    if (target) {
+        chiudiPannello();
+        portaDavanti(target);
+        return;
+    }
+    if (!a.cwd.empty() && GetFileAttributesW(a.cwd.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        chiudiPannello();
+        ShellExecuteW(nullptr, L"open", a.cwd.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
+inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+
+    auto coloreStato = [&](ai::Stato st) -> D2D1_COLOR_F {
+        switch (st) {
+            case ai::Stato::Occupato:   return D2D1::ColorF(0.20f, 0.76f, 1.0f, 1.0f);
+            case ai::Stato::InAttesa:   return D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f);
+            case ai::Stato::Errore:     return D2D1::ColorF(0.95f, 0.28f, 0.25f, 1.0f);
+            case ai::Stato::Completato: return D2D1::ColorF(0.20f, 0.78f, 0.35f, 1.0f);
+            case ai::Stato::Inattivo:   return scuro ? D2D1::ColorF(1, 1, 1, 0.38f) : D2D1::ColorF(0, 0, 0, 0.32f);
+        }
+        return tenue;
+    };
+    auto testoStato = [&](ai::Stato st) -> std::wstring {
+        switch (st) {
+            case ai::Stato::Occupato:   return testi::t(L"Occupato", L"Busy");
+            case ai::Stato::InAttesa:   return testi::t(L"In attesa", L"Waiting");
+            case ai::Stato::Errore:     return testi::t(L"Errore", L"Error");
+            case ai::Stato::Completato: return testi::t(L"Fatto", L"Done");
+            case ai::Stato::Inattivo:   return testi::t(L"Inattivo", L"Idle");
+        }
+        return L"";
+    };
+
+    // Testata interna: titolo, pillola stato, pulsante Pulisci, totale token
+    const std::wstring titolo = testi::t(L"Monitor AI", L"AI Monitor");
+    const float lt = larghezzaTesto(titolo, fmtTitolo);
+    pennello->SetColor(ink);
+    scrivi(titolo, fmtTitolo, {m, 10 * dpi, m + lt + 8 * dpi, 34 * dpi});
+
+    const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
+        return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
+    });
+    float limPill = PW - m;
+    if (haCompletati) {
+        const std::wstring cl = testi::t(L"Pulisci", L"Clear");
+        const float cw = larghezzaTesto(cl, fmtSotto) + 18 * dpi;
+        const D2D1_RECT_F rc = {PW - m - cw, 11 * dpi, PW - m, 33 * dpi};
+        evidenzia(aggiungi(rc, A_AI_PULISCI, 0), rc, scuro, 11 * dpi);
+        pennello->SetColor(blu);
+        scrivi(cl, fmtNome, rc);
+        limPill = rc.left - 8 * dpi;
+    }
+
+    std::wstring pillTxt;
+    if (aiStato.occupati > 0) pillTxt = std::to_wstring(aiStato.occupati) + testi::t(L" attivi", L" Busy");
+    else if (aiStato.inAttesa > 0) pillTxt = testi::t(L"In attesa", L"Waiting");
+    else if (aiStato.statoGlobale == ai::Stato::Errore) pillTxt = testi::t(L"Errore", L"Error");
+    else if (aiStato.completati > 0) pillTxt = testi::t(L"Fatto", L"Done");
+    else pillTxt = testi::t(L"Inattivo", L"Idle");
+
+    const float px0 = m + lt + 12 * dpi;
+    const float pw = std::min(larghezzaTesto(pillTxt, fmtNome) + 16 * dpi, std::max(0.0f, limPill - px0));
+    if (pw >= 24 * dpi) {
+        const D2D1_RECT_F rpPill = {px0, 13 * dpi, px0 + pw, 31 * dpi};
+        const D2D1_COLOR_F scCol = coloreStato(aiStato.statoGlobale);
+        pennello->SetColor(aiStato.statoGlobale == ai::Stato::Inattivo
+                           ? (scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f))
+                           : D2D1::ColorF(scCol.r, scCol.g, scCol.b, 0.18f));
+        dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+        pennello->SetColor(aiStato.statoGlobale == ai::Stato::Inattivo ? tenue : scCol);
+        scrivi(pillTxt, fmtNome, rpPill);
+    }
+
+    const std::wstring totTok = ai::formattaToken(aiStato.tokInTot) + L" in · " + ai::formattaToken(aiStato.tokOutTot) + L" out" +
+                                (aiStato.tokCacheTot > 0 ? L" · " + ai::formattaToken(aiStato.tokCacheTot) + L" cache" : L"");
+    pennello->SetColor(tenue);
+    scrivi(totTok, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
+
+    const float listTop = AI_TESTA * dpi;
+    const float listBottom = PH - AI_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    if (aiStato.agenti.empty()) {
+        aiScroll = 0;
+        aiScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 66 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(testi::t(L"Nessun agente AI attivo", L"No active AI agents"), fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Avvia Antigravity, Claude Code o Ollama, o abilita gli hook CLI", L"Start Antigravity, Claude Code or Ollama, or enable CLI hooks"), fmtSotto, {re.left + 14 * dpi, re.top + 30 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const float contentH = (float)aiStato.agenti.size() * AI_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        aiScrollMax = std::max(0.0f, contentH - viewH);
+        aiScroll = std::clamp(aiScroll, 0.0f, aiScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        const size_t zona0 = elementi.size();
+        for (size_t i = 0; i < aiStato.agenti.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * AI_SCHEDA * dpi - aiScroll;
+            if (cy0 + (AI_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const ai::Agente& a = aiStato.agenti[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (AI_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+            evidenzia(aggiungi(r, A_AI_AGENTE, (int)i), r, scuro, rp);
+
+            pennello->SetColor(coloreStato(a.stato));
+            dc->FillEllipse({{r.left + 16 * dpi, r.top + 20 * dpi}, 4.0f * dpi, 4.0f * dpi}, pennello);
+
+            float limTit = r.right - 12 * dpi;
+            if (a.tokIn + a.tokOut + a.tokCache > 0) {
+                const std::wstring tok = (a.tokIn > 0 && a.tokOut > 0)
+                    ? (ai::formattaToken(a.tokIn) + L"·" + ai::formattaToken(a.tokOut))
+                    : ai::formattaToken(a.tokIn + a.tokOut + a.tokCache);
+                const float tw = std::max(34 * dpi, larghezzaTesto(tok, fmtNome) + 14 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(tenue);
+                scrivi(tok, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+            }
+
+            const std::wstring src = a.fonte == ai::Fonte::Processo ? a.nome : ai::dettagli::nomeFonte(a.fonte);
+            std::wstring riga1 = src;
+            if (!a.titolo.empty() && a.titolo != src) riga1 += L" · " + a.titolo;
+            pennello->SetColor(ink);
+            scrivi(riga1, fmtVoce, {r.left + 28 * dpi, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+
+            std::wstring riga2 = a.modello;
+            const std::wstring det = !a.strumento.empty() ? a.strumento : testoStato(a.stato);
+            if (!det.empty()) riga2 += (riga2.empty() ? L"" : L" · ") + det;
+            pennello->SetColor(tenue);
+            scrivi(riga2, fmtSotto, {r.left + 28 * dpi, r.top + 32 * dpi, r.right - 12 * dpi, r.bottom - 8 * dpi});
+        }
+        dc->PopAxisAlignedClip();
+
+        for (size_t k = zona0; k < elementi.size();) {
+            D2D1_RECT_F& zr = elementi[k].r;
+            zr.top = std::max(zr.top, listTop);
+            zr.bottom = std::min(zr.bottom, listBottom);
+            if (zr.bottom <= zr.top) elementi.erase(elementi.begin() + (std::ptrdiff_t)k);
+            else k++;
+        }
+
+        if (aiScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (aiScroll / aiScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    // Piede: stato hook CLI
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_AI_HOOK_MENU, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Hook CLI", L"CLI Hooks"), fmtVoce, {m, rPiede.top, PW * 0.55f, rPiede.bottom});
+
+    const bool hAg = ai::hookAntigravityInstallati(), hCl = ai::hookClaudeInstallati();
+    const std::wstring hSum = (hAg && hCl) ? L"Antigravity · Claude"
+                            : hAg ? L"Antigravity"
+                            : hCl ? L"Claude"
+                            : std::wstring(testi::t(L"Spenti", L"Off"));
+    pennello->SetColor(tenue);
+    const float sw = larghezzaTesto(hSum, fmtSotto);
+    scrivi(hSum, fmtSotto, {PW - m - sw - 16 * dpi, rPiede.top, PW - m - 14 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
 }
 
 // "Centro di controllo": rete, Bluetooth, volume a capsula, uscita audio, scorciatoie
@@ -2331,6 +2575,38 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             break;
         }
         case A_VOLUME: break;
+        case A_AI_AGENTE:
+            if (e.indice >= 0 && e.indice < (int)aiStato.agenti.size()) focusAgente(aiStato.agenti[e.indice]);
+            break;
+        case A_AI_PULISCI:
+            aiMon.pulisciCompletati();
+            sincronizzaAI();
+            break;
+        case A_AI_HOOK_MENU: {
+            std::vector<menu::Voce> vv = {menu::titolo(testi::t(L"Hook CLI", L"CLI Hooks"))};
+            auto ha = menu::voce(L"Antigravity CLI", 1);
+            ha.spuntata = ai::hookAntigravityInstallati();
+            vv.push_back(ha);
+            auto hc = menu::voce(L"Claude Code", 2);
+            hc.spuntata = ai::hookClaudeInstallati();
+            vv.push_back(hc);
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 3));
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.top};
+            ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(vv, pt, pannello);
+            if (s == 1) ai::installaHookAntigravity(!ai::hookAntigravityInstallati());
+            else if (s == 2) ai::installaHookClaude(!ai::hookClaudeInstallati());
+            else if (s == 3) {
+                const std::wstring dir = ai::cartellaHook();
+                if (!dir.empty()) {
+                    ai::dettagli::creaCartelle(dir);
+                    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            pDirty = true;
+            break;
+        }
     }
 }
 
@@ -2399,6 +2675,10 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         case WM_MOUSEWHEEL:
             if (d->pannelloTipo == P_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f), d->pDirty = true;
+            else if (d->pannelloTipo == P_AI) {
+                d->aiScroll = std::clamp(d->aiScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->aiScrollMax);
+                d->pDirty = true;
+            }
             return 0;
         // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
         case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;
@@ -2441,8 +2721,8 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 }
                 // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
                 // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
-                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo();
-                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && PtInRect(&is, pt)) return 0;
+                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo(), ia = d->rettAISchermo();
+                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt))) return 0;
                 d->chiudiTutte();
             }
             return 0;
@@ -2477,16 +2757,30 @@ inline auto Motore::rettCentro() const -> D2D1_RECT_F {
     return {x, yb - S, x + S, yb};
 }
 
+inline auto Motore::rettAI() const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == AVVIO_AI) x = pos[i];
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
 // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
 inline auto Motore::rettIsolaSchermo() const -> RECT {
     const D2D1_RECT_F r = rettCentro();
     return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});   // (sul lato del dock)
 }
 
+inline auto Motore::rettAISchermo() const -> RECT {
+    if (!mostraAI) return RECT{};
+    const D2D1_RECT_F r = rettAI();
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_APPUNTI) apriCentro(tipo); }
+inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_AI) apriCentro(tipo); }
 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui
@@ -2496,7 +2790,8 @@ inline auto Motore::apriCentro(int tipo) -> void {
     if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
     usa(0);
     if (pannelloTipo != P_NESSUNO && !pChiusura) {
-        if (pannelloTipo == tipo || tipo == P_CONTROLLO) { chiudiPannello(); return; }
+        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI)) { chiudiPannello(); return; }
+        if (tipo == P_AI || pannelloTipo == P_AI) { nascondiPannello(); apriPannello(tipo); return; }
         cambiaVista(tipo, {PW / 2, PH / 2});   // (da fuori: la vista nuova si apre dal centro)
         return;
     }

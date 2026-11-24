@@ -43,6 +43,7 @@ struct Valori {
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
+    bool dockAI = true;           // icona Monitor AI nel dock
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -133,6 +134,7 @@ inline void carica() {
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
+    v.dockAI = leggiDword(L"DockAI", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -154,7 +156,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -435,6 +437,8 @@ private:
          L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
         {L"Anteprime delle finestre", L"Window previews",
          L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
+        {L"Monitor AI nel dock", L"AI Monitor in the dock",
+         L"Stato e token degli agenti AI accanto al centro di controllo", L"AI agent status and tokens next to Control Center", &Valori::dockAI, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
