@@ -824,6 +824,36 @@ private:
         return out;
     }
 
+    static std::wstring descrizioneDaExe(const wchar_t* path) {
+        DWORD dummy = 0;
+        const DWORD sz = GetFileVersionInfoSizeW(path, &dummy);
+        if (!sz || sz > 2 * 1024 * 1024) return {};
+        std::vector<BYTE> buf(sz);
+        if (!GetFileVersionInfoW(path, 0, sz, buf.data())) return {};
+        struct LangCP { WORD lang, cp; } *tr = nullptr;
+        UINT trLen = 0;
+        std::vector<std::wstring> prefissi;
+        if (VerQueryValueW(buf.data(), L"\\VarFileInfo\\Translation", (void**)&tr, &trLen) && tr && trLen >= sizeof(LangCP)) {
+            wchar_t p[64];
+            swprintf(p, 64, L"\\StringFileInfo\\%04x%04x\\", tr[0].lang, tr[0].cp);
+            prefissi.push_back(p);
+        }
+        prefissi.push_back(L"\\StringFileInfo\\040904b0\\");
+        prefissi.push_back(L"\\StringFileInfo\\040904e4\\");
+        for (const wchar_t* campo : { L"FileDescription", L"ProductName" }) {
+            for (const auto& pre : prefissi) {
+                wchar_t* val = nullptr; UINT vLen = 0;
+                if (VerQueryValueW(buf.data(), (pre + campo).c_str(), (void**)&val, &vLen) && val && vLen > 1) {
+                    std::wstring s = trimSpazi(val);
+                    if (s.size() >= 2 && s.size() <= 48 && _wcsicmp(s.c_str(), L"Electron") != 0 &&
+                        _wcsicmp(s.c_str(), L"Chromium") != 0 && _wcsicmp(s.c_str(), L"Microsoft Windows Operating System") != 0)
+                        return s;
+                }
+            }
+        }
+        return {};
+    }
+
     static std::wstring nomeExeDaFinestra(HWND hw) {
         if (!hw) return {};
         DWORD pid = 0;
@@ -837,12 +867,32 @@ private:
         if (QueryFullProcessImageNameW(hp, 0, buf, &len) && len > 0) {
             const wchar_t* base = wcsrchr(buf, L'\\');
             nome = base ? (base + 1) : buf;
-            if (nome.size() > 4) {
-                std::wstring ext = nome.substr(nome.size() - 4);
-                for (wchar_t& ch : ext) ch = (wchar_t)towlower(ch);
-                if (ext == L".exe") nome.resize(nome.size() - 4);
+            std::wstring stemMin = nome;
+            for (wchar_t& ch : stemMin) ch = (wchar_t)towlower(ch);
+            if (stemMin.size() > 4 && stemMin.compare(stemMin.size() - 4, 4, L".exe") == 0) {
+                stemMin.resize(stemMin.size() - 4);
+                nome.resize(nome.size() - 4);
             }
-            if (!nome.empty()) nome[0] = (wchar_t)towupper(nome[0]);
+            static constexpr struct { const wchar_t *k, *v; } ALIAS[] = {
+                {L"leagueclientux", L"League of Legends"}, {L"leagueclient", L"League of Legends"},
+                {L"leagueclientuxrender", L"League of Legends"}, {L"riotclientux", L"Riot Client"},
+                {L"riotclientservices", L"Riot Client"}, {L"steamwebhelper", L"Steam"}, {L"steam", L"Steam"},
+                {L"explorer", L"File Explorer"}, {L"windowsterminal", L"Windows Terminal"},
+                {L"code", L"VS Code"}, {L"msedge", L"Edge"}, {L"chrome", L"Chrome"}, {L"firefox", L"Firefox"},
+                {L"brave", L"Brave"}, {L"opera", L"Opera"}, {L"vivaldi", L"Vivaldi"},
+                {L"discord", L"Discord"}, {L"spotify", L"Spotify"}, {L"obsidian", L"Obsidian"},
+                {L"1password", L"1Password"}, {L"notepad", L"Notepad"}, {L"winword", L"Word"},
+                {L"excel", L"Excel"}, {L"powerpnt", L"PowerPoint"}, {L"olk", L"Outlook"},
+                {L"outlook", L"Outlook"}, {L"ms-teams", L"Teams"}, {L"epicgameslauncher", L"Epic Games"},
+                {L"upc", L"Ubisoft Connect"}, {L"battle.net", L"Battle.net"}, {L"galaxyclient", L"GOG Galaxy"}
+            };
+            bool trovato = false;
+            for (const auto& a : ALIAS) { if (stemMin == a.k) { nome = a.v; trovato = true; break; } }
+            if (!trovato) {
+                std::wstring desc = descrizioneDaExe(buf);
+                if (!desc.empty()) nome = std::move(desc);
+                else if (!nome.empty()) nome[0] = (wchar_t)towupper(nome[0]);
+            }
         }
         CloseHandle(hp);
         return nome;
