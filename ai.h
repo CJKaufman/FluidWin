@@ -715,6 +715,8 @@ inline bool gestisciHookCli(int argc, wchar_t** argv) {
     if (ev.empty() && hasJson) ev = inJson.str("hook_event_name");
     if (ev.empty()) ev = dettagli::inUtf8(eventArg);
 
+    std::wstring consoleTitle;
+    DWORD consolePid = 0;
     const std::wstring dir = cartellaHook();
     if (!dir.empty()) {
         const std::wstring fileName = dettagli::sanificaId(sourceW, L"hook") + L"-" +
@@ -736,7 +738,16 @@ inline bool gestisciHookCli(int argc, wchar_t** argv) {
             std::string cwd = hasJson ? inJson.str("cwd") : "";
             if (cwd.empty() && hasPrev) cwd = prev.str("cwd");
 
-            std::string title = hasJson ? inJson.str("lastUserInput") : "";
+            std::string title;
+            if (dettagli::minuscolo(sourceW) == L"antigravity" && id != "default") {
+                const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+                if (!profile.empty()) {
+                    const std::wstring ann = dettagli::leggiTitoloPbtxt(
+                        profile + L"\\.gemini\\antigravity-cli\\annotations\\" + dettagli::daUtf8(id) + L".pbtxt");
+                    if (!ann.empty()) title = dettagli::inUtf8(ann);
+                }
+            }
+            if (title.empty() && hasJson) title = inJson.str("lastUserInput");
             if (title.empty() && hasJson) title = inJson.str("prompt");
             if (title.size() > 120) {
                 title.resize(117);
@@ -797,6 +808,9 @@ inline bool gestisciHookCli(int argc, wchar_t** argv) {
             rec.imposta("updatedAt", dettagli::Json::makeNum(dettagli::adessoEpoch()));
 
             dettagli::scriviAtomico(dst, dettagli::dumpJson(rec, false));
+            consolePid = (DWORD)pidVal;
+            if (!title.empty()) consoleTitle = dettagli::daUtf8(title);
+            else if (!cwd.empty()) consoleTitle = dettagli::leafPath(dettagli::daUtf8(cwd));
         }
     }
 
@@ -804,6 +818,13 @@ inline bool gestisciHookCli(int argc, wchar_t** argv) {
     if (hOut && hOut != INVALID_HANDLE_VALUE && GetFileType(hOut) != FILE_TYPE_UNKNOWN) {
         DWORD wr = 0;
         WriteFile(hOut, "{}\n", 3, &wr, nullptr);
+    }
+    if (!consoleTitle.empty()) {
+        const bool agganciato = (consolePid > 0 && AttachConsole(consolePid)) || AttachConsole(ATTACH_PARENT_PROCESS);
+        if (agganciato) {
+            SetConsoleTitleW(consoleTitle.c_str());
+            FreeConsole();
+        }
     }
     return true;
 }
