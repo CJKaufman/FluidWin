@@ -7,6 +7,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <ole2.h>
+#include <uiautomation.h>
 #include <tlhelp32.h>
 #include <winhttp.h>
 #include <algorithm>
@@ -1786,8 +1788,43 @@ private:
     }
 };
 
-inline HWND trovaFinestraAgente(const Agente& a) {
-    const auto procMap = dettagli::mappaProcessi();
+namespace dettagli {
+
+inline bool isCarattereParola(wchar_t c) {
+    if ((c >= L'0' && c <= L'9') || (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z')) return true;
+    if (c < 0xC0) return false;
+    if ((c >= 0x2000 && c <= 0x2BFF) || (c >= 0xD800 && c <= 0xDFFF) ||
+        (c >= 0xFE00 && c <= 0xFE0F) || (c >= 0xFFF0 && c <= 0xFFFF)) {
+        return false;
+    }
+    return !iswspace((wint_t)c);
+}
+
+inline std::wstring pulisciTitoloTab(const std::wstring& raw) {
+    std::wstring s = minuscolo(raw);
+    size_t lead = 0;
+    while (lead < s.size() && !isCarattereParola(s[lead])) lead++;
+    s.erase(0, lead);
+    while (!s.empty() && iswspace((wint_t)s.back())) s.pop_back();
+    return s;
+}
+
+inline std::wstring cartellaBreve(const std::wstring& cwd) {
+    std::wstring folderLower = minuscolo(leafPath(cwd));
+    if (folderLower.size() == 2 && folderLower[1] == L':') folderLower.clear();
+    return folderLower;
+}
+
+struct FinestraCandidata {
+    HWND hwnd = nullptr;
+    DWORD pid = 0;
+    std::wstring exeLower;
+    std::wstring titleLower;
+    int score = 0;
+};
+
+inline std::vector<FinestraCandidata> valutaFinestreAgente(const Agente& a) {
+    const auto procMap = mappaProcessi();
 
     std::unordered_map<DWORD, int> ancestorDepth;
     if (a.pid != 0) {
@@ -1810,19 +1847,13 @@ inline HWND trovaFinestraAgente(const Agente& a) {
         }
     }
 
-    struct CandWin {
-        HWND hwnd = nullptr;
-        DWORD pid = 0;
-        std::wstring exeLower;
-        std::wstring titleLower;
-    };
     struct EnumCtx {
-        const std::unordered_map<DWORD, dettagli::ProcInfo>* procs;
-        std::vector<CandWin> wins;
+        const std::unordered_map<DWORD, ProcInfo>* procs;
+        std::vector<FinestraCandidata> wins;
     } ctx{&procMap, {}};
 
     EnumWindows([](HWND h, LPARAM l) -> BOOL {
-        if (!dettagli::finestraValida(h)) return TRUE;
+        if (!finestraValida(h)) return TRUE;
         auto* c = (EnumCtx*)l;
         DWORD pid = 0;
         GetWindowThreadProcessId(h, &pid);
@@ -1832,16 +1863,15 @@ inline HWND trovaFinestraAgente(const Agente& a) {
         title.resize(got > 0 ? (size_t)got : 0);
         std::wstring exeLower;
         if (auto it = c->procs->find(pid); it != c->procs->end()) exeLower = it->second.exeLower;
-        c->wins.push_back({h, pid, std::move(exeLower), dettagli::minuscolo(title)});
+        c->wins.push_back({h, pid, std::move(exeLower), minuscolo(title), 0});
         return TRUE;
     }, (LPARAM)&ctx);
 
-    if (ctx.wins.empty()) return nullptr;
+    if (ctx.wins.empty()) return {};
 
-    const std::wstring titoloLower = dettagli::minuscolo(a.titolo);
-    std::wstring folderLower = dettagli::minuscolo(dettagli::leafPath(a.cwd));
-    if (folderLower.size() == 2 && folderLower[1] == L':') folderLower.clear();
-    const std::wstring nomeLower = dettagli::minuscolo(a.nome);
+    const std::wstring titoloLower = minuscolo(a.titolo);
+    const std::wstring folderLower = cartellaBreve(a.cwd);
+    const std::wstring nomeLower = minuscolo(a.nome);
 
     bool anyAncestorMatched = false;
     for (const auto& w : ctx.wins) {
@@ -1883,9 +1913,7 @@ inline HWND trovaFinestraAgente(const Agente& a) {
         return 0;
     };
 
-    HWND bestHwnd = nullptr;
-    int bestScore = 0;
-    for (const auto& w : ctx.wins) {
+    for (auto& w : ctx.wins) {
         int score = 0;
         if (auto it = ancestorDepth.find(w.pid); it != ancestorDepth.end()) {
             score += 100 - it->second * 4;
@@ -1899,9 +1927,165 @@ inline HWND trovaFinestraAgente(const Agente& a) {
         if (!anyAncestorMatched || ancestorDepth.count(w.pid)) {
             score += appBonus(w.exeLower);
         }
-        if (score > bestScore) {
-            bestScore = score;
-            bestHwnd = w.hwnd;
+        w.score = score;
+    }
+
+    std::stable_sort(ctx.wins.begin(), ctx.wins.end(), [](const FinestraCandidata& x, const FinestraCandidata& y) {
+        return x.score > y.score;
+    });
+    return ctx.wins;
+}
+
+}  // namespace dettagli
+
+inline HWND trovaFinestraAgente(const Agente& a) {
+    const auto wins = dettagli::valutaFinestreAgente(a);
+    return (!wins.empty() && wins.front().score > 0) ? wins.front().hwnd : nullptr;
+}
+
+inline bool attivaTabTerminale(HWND hwnd, const Agente& a) {
+    if (!hwnd || !IsWindow(hwnd)) return false;
+
+    const std::wstring titoloLower = dettagli::minuscolo(a.titolo);
+    const std::wstring folderLower = dettagli::cartellaBreve(a.cwd);
+    if (titoloLower.empty() && folderLower.size() < 3) return false;
+
+    std::vector<std::wstring> tokens;
+    for (size_t i = 0; i < titoloLower.size();) {
+        while (i < titoloLower.size() && !dettagli::isCarattereParola(titoloLower[i])) i++;
+        const size_t start = i;
+        while (i < titoloLower.size() && dettagli::isCarattereParola(titoloLower[i])) i++;
+        if (i - start >= 3) {
+            std::wstring tok = titoloLower.substr(start, i - start);
+            if (std::find(tokens.begin(), tokens.end(), tok) == tokens.end()) {
+                tokens.push_back(std::move(tok));
+            }
+        }
+    }
+
+    IUIAutomation* uia = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IUIAutomation, (void**)&uia);
+    bool didCoInit = false;
+    if (hr == CO_E_NOTINITIALIZED) {
+        if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+            didCoInit = true;
+            hr = CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IUIAutomation, (void**)&uia);
+        }
+    }
+    if (FAILED(hr) || !uia) {
+        if (uia) uia->Release();
+        if (didCoInit) CoUninitialize();
+        return false;
+    }
+
+    IUIAutomationElement* root = nullptr;
+    IUIAutomationCondition* cond = nullptr;
+    IUIAutomationElementArray* tabs = nullptr;
+    IUIAutomationElement* bestTab = nullptr;
+    int bestScore = 0;
+
+    if (SUCCEEDED(uia->ElementFromHandle((UIA_HWND)hwnd, &root)) && root) {
+        VARIANT v;
+        VariantInit(&v);
+        v.vt = VT_I4;
+        v.lVal = UIA_TabItemControlTypeId;
+        if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, v, &cond)) && cond) {
+            if (SUCCEEDED(root->FindAll(TreeScope_Descendants, cond, &tabs)) && tabs) {
+                int count = 0;
+                if (SUCCEEDED(tabs->get_Length(&count)) && count > 0) {
+                    for (int i = 0; i < count; i++) {
+                        IUIAutomationElement* el = nullptr;
+                        if (FAILED(tabs->GetElement(i, &el)) || !el) continue;
+
+                        BSTR bstr = nullptr;
+                        std::wstring tabLower;
+                        if (SUCCEEDED(el->get_CurrentName(&bstr)) && bstr) {
+                            tabLower = dettagli::pulisciTitoloTab(std::wstring(bstr, SysStringLen(bstr)));
+                            SysFreeString(bstr);
+                        }
+
+                        int score = 0;
+                        if (!tabLower.empty()) {
+                            if (!titoloLower.empty()) {
+                                if (tabLower == titoloLower) {
+                                    score += 100;
+                                } else if (titoloLower.size() >= 3 && tabLower.size() >= 4 &&
+                                           (tabLower.find(titoloLower) != std::wstring::npos ||
+                                            titoloLower.find(tabLower) != std::wstring::npos)) {
+                                    score += 75;
+                                }
+                                for (const std::wstring& tok : tokens) {
+                                    if (tabLower.find(tok) != std::wstring::npos) score += 18;
+                                }
+                            }
+                            if (folderLower.size() >= 3 && tabLower.find(folderLower) != std::wstring::npos) {
+                                score += 45;
+                            }
+                        }
+
+                        if (score > bestScore) {
+                            if (bestTab) bestTab->Release();
+                            bestTab = el;
+                            bestScore = score;
+                        } else {
+                            el->Release();
+                        }
+                    }
+                }
+            }
+        }
+        VariantClear(&v);
+    }
+
+    bool activated = false;
+    if (bestTab && bestScore >= 35) {
+        IUIAutomationSelectionItemPattern* sel = nullptr;
+        if (SUCCEEDED(bestTab->GetCurrentPatternAs(UIA_SelectionItemPatternId,
+                                                   IID_IUIAutomationSelectionItemPattern,
+                                                   (void**)&sel)) && sel) {
+            activated = SUCCEEDED(sel->Select());
+            sel->Release();
+        }
+        if (!activated) {
+            IUIAutomationInvokePattern* inv = nullptr;
+            if (SUCCEEDED(bestTab->GetCurrentPatternAs(UIA_InvokePatternId,
+                                                       IID_IUIAutomationInvokePattern,
+                                                       (void**)&inv)) && inv) {
+                activated = SUCCEEDED(inv->Invoke());
+                inv->Release();
+            }
+        }
+    }
+
+    if (bestTab) bestTab->Release();
+    if (tabs) tabs->Release();
+    if (cond) cond->Release();
+    if (root) root->Release();
+    uia->Release();
+    if (didCoInit) CoUninitialize();
+    return activated;
+}
+
+inline HWND trovaEAttivaFinestraAgente(const Agente& a) {
+    const auto wins = dettagli::valutaFinestreAgente(a);
+    if (wins.empty()) return nullptr;
+
+    const auto& top = wins.front();
+    const HWND bestHwnd = (top.score > 0) ? top.hwnd : nullptr;
+    if (bestHwnd && top.exeLower != L"windowsterminal.exe") {
+        return bestHwnd;
+    }
+
+    const bool hasMatchText = !a.titolo.empty() || dettagli::cartellaBreve(a.cwd).size() >= 3;
+    if (hasMatchText) {
+        if (bestHwnd && top.exeLower == L"windowsterminal.exe" && attivaTabTerminale(bestHwnd, a)) {
+            return bestHwnd;
+        }
+        for (const auto& w : wins) {
+            if (w.hwnd == bestHwnd || w.exeLower != L"windowsterminal.exe") continue;
+            if (attivaTabTerminale(w.hwnd, a)) return w.hwnd;
         }
     }
     return bestHwnd;
