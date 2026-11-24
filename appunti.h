@@ -88,6 +88,21 @@ inline bool eUrl(const std::wstring& s) {
     return iniziaCon(L"https://", 8) || iniziaCon(L"http://", 7);
 }
 
+inline bool eFileImmagine(const std::wstring& path) {
+    const size_t dot = path.find_last_of(L'.');
+    if (dot == std::wstring::npos) return false;
+    const size_t sep = path.find_last_of(L"\\/");
+    if (sep != std::wstring::npos && dot < sep) return false;
+    const wchar_t* ext = path.c_str() + dot;
+    static constexpr const wchar_t* EXT[] = {
+        L".png", L".jpg", L".jpeg", L".bmp", L".webp", L".gif", L".ico"
+    };
+    for (const wchar_t* e : EXT) {
+        if (_wcsicmp(ext, e) == 0) return true;
+    }
+    return false;
+}
+
 struct Voce {
     UINT id = 0;
     bool immagine = false;
@@ -104,6 +119,10 @@ struct Voce {
     INT64 quando = 0;              // FILETIME (usato dal centro di controllo)
     ULONGLONG tick = 0;            // GetTickCount64() per il tempo relativo
 };
+
+inline bool haAnteprimaImmagine(const Voce& v) {
+    return v.immagine || (v.eFile && !v.anteprima.empty());
+}
 
 class Cronologia {
 public:
@@ -220,7 +239,36 @@ public:
                     v.testo += v.filePercorsi[i];
                 }
                 v.anteprimaTesto = anteprimaFile(v.filePercorsi);
+                if (v.filePercorsi.size() == 1 && eFileImmagine(v.filePercorsi[0])) {
+                    creaAnteprimaDaFile(v.filePercorsi[0], v);
+                }
                 ok = true;
+            }
+        }
+        if (!vietato && !ok) {
+            constexpr UINT FORMATI_DIB[2] = { CF_DIB, CF_DIBV5 };
+            constexpr SIZE_T MAX_DIB = 16 * 1024 * 1024;
+            for (UINT fmtDib : FORMATI_DIB) {
+                if (!IsClipboardFormatAvailable(fmtDib)) continue;
+                v.dib.clear();
+                if (HANDLE hd = GetClipboardData(fmtDib)) {
+                    const SIZE_T n = GlobalSize(hd);
+                    if (n > sizeof(BITMAPINFOHEADER) && n <= MAX_DIB) {
+                        if (const BYTE* p = (const BYTE*)GlobalLock(hd)) {
+                            v.dib.assign(p, p + n);
+                            GlobalUnlock(hd);
+                        }
+                    }
+                }
+                if (!v.dib.empty() && creaAnteprima(v)) {
+                    v.immagine = true;
+                    ok = true;
+                    break;
+                }
+                v.dib.clear();
+                v.anteprima.clear();
+                v.w = v.h = v.aw = v.ah = 0;
+                v.immagine = false;
             }
         }
         if (!vietato && !ok && IsClipboardFormatAvailable(CF_UNICODETEXT)) {
@@ -234,19 +282,6 @@ public:
             }
             ok = std::any_of(v.testo.begin(), v.testo.end(), [](wchar_t ch) { return !iswspace(ch); });
             if (ok) v.anteprimaTesto = normalizzaAnteprima(v.testo);
-        } else if (!vietato && !ok && IsClipboardFormatAvailable(CF_DIB)) {
-            if (HANDLE hd = GetClipboardData(CF_DIB)) {
-                constexpr SIZE_T MAX_DIB = 16 * 1024 * 1024;
-                const SIZE_T n = GlobalSize(hd);
-                if (n > sizeof(BITMAPINFOHEADER) && n <= MAX_DIB) {
-                    if (const BYTE* p = (const BYTE*)GlobalLock(hd)) {
-                        v.dib.assign(p, p + n);
-                        GlobalUnlock(hd);
-                    }
-                }
-            }
-            v.immagine = true;
-            ok = !v.dib.empty() && creaAnteprima(v);
         }
         CloseClipboard();
         if (!ok) return false;
@@ -627,6 +662,9 @@ private:
                     v.testo += v.filePercorsi[j];
                 }
                 v.anteprimaTesto = anteprimaFile(v.filePercorsi);
+                if (v.filePercorsi.size() == 1 && eFileImmagine(v.filePercorsi[0])) {
+                    creaAnteprimaDaFile(v.filePercorsi[0], v);
+                }
             }
 
             caricate.push_back(std::move(v));
@@ -936,6 +974,99 @@ private:
         DeleteDC(mem);
         ReleaseDC(nullptr, scr);
         return ok;
+    }
+
+    static bool creaAnteprimaDaFile(const std::wstring& path, Voce& v) {
+        if (path.empty()) return false;
+        IWICImagingFactory* wic = nullptr;
+        IWICBitmapDecoder* dec = nullptr;
+        IWICBitmapFrameDecode* frame = nullptr;
+        IWICBitmapScaler* scaler = nullptr;
+        IWICFormatConverter* conv = nullptr;
+
+        HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
+        if (SUCCEEDED(hr)) {
+            hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ,
+                                                WICDecodeMetadataCacheOnLoad, &dec);
+        }
+
+        UINT frameIdx = 0;
+        if (SUCCEEDED(hr)) {
+            const size_t dot = path.find_last_of(L'.');
+            if (dot != std::wstring::npos && _wcsicmp(path.c_str() + dot, L".ico") == 0) {
+                UINT count = 0;
+                if (SUCCEEDED(dec->GetFrameCount(&count)) && count > 1) {
+                    uint64_t maxArea = 0;
+                    for (UINT i = 0; i < count; i++) {
+                        IWICBitmapFrameDecode* f = nullptr;
+                        if (SUCCEEDED(dec->GetFrame(i, &f)) && f) {
+                            UINT fw = 0, fh = 0;
+                            if (SUCCEEDED(f->GetSize(&fw, &fh))) {
+                                const uint64_t area = (uint64_t)fw * (uint64_t)fh;
+                                if (area > maxArea) {
+                                    maxArea = area;
+                                    frameIdx = i;
+                                }
+                            }
+                            f->Release();
+                        }
+                    }
+                }
+            }
+            hr = dec->GetFrame(frameIdx, &frame);
+        }
+
+        UINT srcW = 0, srcH = 0;
+        if (SUCCEEDED(hr)) hr = frame->GetSize(&srcW, &srcH);
+        if (SUCCEEDED(hr) && (srcW == 0 || srcH == 0 || srcW > 32768 || srcH > 32768)) hr = E_FAIL;
+
+        int aw = 0, ah = 0;
+        if (SUCCEEDED(hr)) {
+            const double k = std::min(1.0, std::min(180.0 / (double)srcH, 320.0 / (double)srcW));
+            aw = std::max(1, (int)std::lround((double)srcW * k));
+            ah = std::max(1, (int)std::lround((double)srcH * k));
+        }
+
+        IWICBitmapSource* src = nullptr;
+        if (SUCCEEDED(hr)) {
+            if ((UINT)aw != srcW || (UINT)ah != srcH) {
+                hr = wic->CreateBitmapScaler(&scaler);
+                if (SUCCEEDED(hr)) hr = scaler->Initialize(frame, (UINT)aw, (UINT)ah, WICBitmapInterpolationModeFant);
+                if (SUCCEEDED(hr)) src = scaler;
+            } else {
+                src = frame;
+            }
+        }
+
+        if (SUCCEEDED(hr)) hr = wic->CreateFormatConverter(&conv);
+        if (SUCCEEDED(hr)) {
+            hr = conv->Initialize(src, GUID_WICPixelFormat32bppPBGRA,
+                                  WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom);
+        }
+
+        std::vector<UINT> px;
+        if (SUCCEEDED(hr)) {
+            px.resize((size_t)aw * (size_t)ah);
+            const UINT stride = (UINT)aw * 4u;
+            const UINT bufSize = (UINT)(px.size() * sizeof(UINT));
+            hr = conv->CopyPixels(nullptr, stride, bufSize, reinterpret_cast<BYTE*>(px.data()));
+        }
+
+        if (conv) conv->Release();
+        if (scaler) scaler->Release();
+        if (frame) frame->Release();
+        if (dec) dec->Release();
+        if (wic) wic->Release();
+
+        if (SUCCEEDED(hr) && !px.empty()) {
+            v.w = (int)srcW;
+            v.h = (int)srcH;
+            v.aw = aw;
+            v.ah = ah;
+            v.anteprima = std::move(px);
+            return true;
+        }
+        return false;
     }
 };
 
@@ -1516,14 +1647,14 @@ private:
         const auto& voci = Cronologia::io().voci;
         for (const auto& vc : voci) {
             if (filtro == F_FISSATI && !vc.fissata) continue;
-            if (filtro == F_IMMAGINI && !vc.immagine) continue;
+            if (filtro == F_IMMAGINI && !haAnteprimaImmagine(vc)) continue;
             if (filtro == F_LINK && (vc.immagine || vc.eFile || !eUrl(vc.testo))) continue;
             if (ricerca.empty()) {
                 filtrate.push_back(vc.id);
             } else {
                 const bool matchTesto = !vc.immagine && (contieneSenzaMaiusc(vc.testo, ricerca) || contieneSenzaMaiusc(vc.anteprimaTesto, ricerca));
                 const bool matchApp = contieneSenzaMaiusc(vc.sorgente, ricerca);
-                const bool matchImg = vc.immagine && (contieneSenzaMaiusc(L"image", ricerca) || contieneSenzaMaiusc(L"immagine", ricerca));
+                const bool matchImg = haAnteprimaImmagine(vc) && (contieneSenzaMaiusc(L"image", ricerca) || contieneSenzaMaiusc(L"immagine", ricerca));
                 const bool matchFile = vc.eFile && contieneSenzaMaiusc(L"file", ricerca);
                 if (matchTesto || matchApp || matchImg || matchFile) filtrate.push_back(vc.id);
             }
@@ -1560,7 +1691,7 @@ private:
     }
 
     float altezzaScheda(const Voce& vc) const {
-        return (vc.immagine ? 108.0f : 78.0f) * v.dpi;
+        return (haAnteprimaImmagine(vc) ? 108.0f : 78.0f) * v.dpi;
     }
 
     float altezzaTotaleLista() const {
@@ -1900,7 +2031,7 @@ private:
                     if (!vc->sorgente.empty()) meta = vc->sorgente + L" · ";
                     meta += tempoRelativo(vc->quando);
 
-                    if (vc->immagine) {
+                    if (haAnteprimaImmagine(*vc)) {
                         const float maxW = 96.0f * d, maxH = 84.0f * d;
                         const float scala = std::min(maxW / std::max(1, vc->aw), maxH / std::max(1, vc->ah));
                         const float iw = std::max(12.0f * d, vc->aw * scala);
@@ -1909,7 +2040,18 @@ private:
                         const float iy = card.top + (h - ih) * 0.5f;
                         const D2D1_RECT_F rImg = {ix, iy, ix + iw, iy + ih};
                         if (ID2D1Bitmap* bmp = ottieniBitmap(*vc)) {
-                            v.rt->DrawBitmap(bmp, rImg, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                            ID2D1RoundedRectangleGeometry* clipGeo = nullptr;
+                            ID2D1Layer* layer = nullptr;
+                            if (v.f2d && SUCCEEDED(v.f2d->CreateRoundedRectangleGeometry({rImg, 5.0f * d, 5.0f * d}, &clipGeo)) && clipGeo
+                                && SUCCEEDED(v.rt->CreateLayer(nullptr, &layer)) && layer) {
+                                v.rt->PushLayer(D2D1::LayerParameters(rImg, clipGeo), layer);
+                                v.rt->DrawBitmap(bmp, rImg, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                                v.rt->PopLayer();
+                            } else {
+                                v.rt->DrawBitmap(bmp, rImg, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                            }
+                            if (layer) layer->Release();
+                            if (clipGeo) clipGeo->Release();
                         }
                         v.pen->SetColor(sc ? D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.14f) : D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.12f));
                         v.rt->DrawRoundedRectangle({rImg, 5.0f * d, 5.0f * d}, v.pen, 1.0f);
@@ -1917,8 +2059,16 @@ private:
                         const float tx = ix + iw + 12.0f * d;
                         wchar_t dim[48]{};
                         swprintf(dim, 48, L"%d × %d", vc->w, vc->h);
-                        v.testo(dim, fTesto, {tx, card.top + 22.0f * d, rightLimit, card.top + 46.0f * d}, ink);
-                        v.testo(meta, fMeta, {tx, card.bottom - 30.0f * d, card.right - pad, card.bottom - 10.0f * d}, muted);
+                        if (vc->eFile) {
+                            const std::wstring& nome = vc->anteprimaTesto.empty() ? vc->testo : vc->anteprimaTesto;
+                            v.testo(nome, fTesto, {tx, card.top + 14.0f * d, rightLimit, card.top + 52.0f * d}, ink);
+                            v.testo(dim, fMeta, {tx, card.bottom - 48.0f * d, card.right - pad, card.bottom - 30.0f * d}, muted);
+                            v.testo(meta, fMeta, {tx, card.bottom - 28.0f * d, card.right - pad, card.bottom - 10.0f * d}, muted);
+                        } else {
+                            const std::wstring titoloImg = std::wstring(testi::t(L"Immagine · ", L"Image · ")) + dim;
+                            v.testo(titoloImg, fTesto, {tx, card.top + 22.0f * d, rightLimit, card.top + 48.0f * d}, ink);
+                            v.testo(meta, fMeta, {tx, card.bottom - 30.0f * d, card.right - pad, card.bottom - 10.0f * d}, muted);
+                        }
                     } else if (vc->eFile) {
                         const float bx = card.left + pad;
                         const float by = card.top + 14.0f * d;
