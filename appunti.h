@@ -11,6 +11,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <shlobj.h>
+#include <wincrypt.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -249,6 +250,12 @@ private:
     static constexpr uint32_t MAX_TESTO_BYTES = 512 * 1024;
     static constexpr uint32_t MAX_DIB_BYTES = 16 * 1024 * 1024;
     static constexpr uint32_t MAX_ANT_BYTES = 4 * 1024 * 1024;
+    static constexpr size_t MAX_FILE_FISSATI = 64 * 1024 * 1024;
+
+    using FnCryptProtectData = BOOL (WINAPI*)(
+        DATA_BLOB*, LPCWSTR, DATA_BLOB*, PVOID, CRYPTPROTECT_PROMPTSTRUCT*, DWORD, DATA_BLOB*);
+    using FnCryptUnprotectData = BOOL (WINAPI*)(
+        DATA_BLOB*, LPWSTR*, DATA_BLOB*, PVOID, CRYPTPROTECT_PROMPTSTRUCT*, DWORD, DATA_BLOB*);
 
     HWND finestra = nullptr;
     UINT ultimoId = 0;
@@ -288,14 +295,178 @@ private:
         return true;
     }
 
-    template <typename T>
-    static bool scriviVal(HANDLE h, const T& val) {
-        return scriviTutto(h, &val, sizeof(T));
+    static bool caricaDpapi(FnCryptProtectData& fnProt, FnCryptUnprotectData& fnUnprot) {
+        static HMODULE mod = LoadLibraryW(L"crypt32.dll");
+        static FnCryptProtectData pProt = mod
+            ? reinterpret_cast<FnCryptProtectData>(reinterpret_cast<void*>(GetProcAddress(mod, "CryptProtectData")))
+            : nullptr;
+        static FnCryptUnprotectData pUnprot = mod
+            ? reinterpret_cast<FnCryptUnprotectData>(reinterpret_cast<void*>(GetProcAddress(mod, "CryptUnprotectData")))
+            : nullptr;
+        fnProt = pProt;
+        fnUnprot = pUnprot;
+        return fnProt != nullptr && fnUnprot != nullptr;
+    }
+
+    static DATA_BLOB entropiaDpapi() {
+        static constexpr char ENTROPIA[] = "FluidWin.Appunti.v1";
+        return DATA_BLOB{ (DWORD)(sizeof(ENTROPIA) - 1), const_cast<BYTE*>(reinterpret_cast<const BYTE*>(ENTROPIA)) };
+    }
+
+    static bool dpapiProteggi(const std::vector<BYTE>& in, std::vector<BYTE>& out) {
+        out.clear();
+        if (in.empty() || in.size() > MAX_FILE_FISSATI) return false;
+        FnCryptProtectData fnProt = nullptr;
+        FnCryptUnprotectData fnUnprot = nullptr;
+        if (!caricaDpapi(fnProt, fnUnprot)) return false;
+
+        DATA_BLOB blobIn{ (DWORD)in.size(), const_cast<BYTE*>(in.data()) };
+        DATA_BLOB entropia = entropiaDpapi();
+        DATA_BLOB blobOut{ 0, nullptr };
+        const BOOL ok = fnProt(&blobIn, nullptr, &entropia, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &blobOut);
+        if (!ok || !blobOut.pbData || blobOut.cbData == 0) {
+            if (blobOut.pbData) {
+                SecureZeroMemory(blobOut.pbData, blobOut.cbData);
+                LocalFree(blobOut.pbData);
+            }
+            return false;
+        }
+        out.assign(blobOut.pbData, blobOut.pbData + blobOut.cbData);
+        SecureZeroMemory(blobOut.pbData, blobOut.cbData);
+        LocalFree(blobOut.pbData);
+        return true;
+    }
+
+    static bool dpapiSproteggi(const BYTE* data, size_t len, std::vector<BYTE>& out) {
+        out.clear();
+        if (!data || len == 0 || len > MAX_FILE_FISSATI) return false;
+        FnCryptProtectData fnProt = nullptr;
+        FnCryptUnprotectData fnUnprot = nullptr;
+        if (!caricaDpapi(fnProt, fnUnprot)) return false;
+
+        DATA_BLOB blobIn{ (DWORD)len, const_cast<BYTE*>(data) };
+        DATA_BLOB entropia = entropiaDpapi();
+        DATA_BLOB blobOut{ 0, nullptr };
+        const BOOL ok = fnUnprot(&blobIn, nullptr, &entropia, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &blobOut);
+        if (!ok || !blobOut.pbData || blobOut.cbData == 0) {
+            if (blobOut.pbData) {
+                SecureZeroMemory(blobOut.pbData, blobOut.cbData);
+                LocalFree(blobOut.pbData);
+            }
+            return false;
+        }
+        out.assign(blobOut.pbData, blobOut.pbData + blobOut.cbData);
+        SecureZeroMemory(blobOut.pbData, blobOut.cbData);
+        LocalFree(blobOut.pbData);
+        return true;
+    }
+
+    static void appendBytes(std::vector<BYTE>& buf, const void* dati, size_t n) {
+        if (n == 0) return;
+        const BYTE* p = static_cast<const BYTE*>(dati);
+        buf.insert(buf.end(), p, p + n);
     }
 
     template <typename T>
-    static bool leggiVal(HANDLE h, T& val) {
-        return leggiTutto(h, &val, sizeof(T));
+    static void appendVal(std::vector<BYTE>& buf, const T& val) {
+        appendBytes(buf, &val, sizeof(T));
+    }
+
+    static bool readBytes(const BYTE* data, size_t len, size_t& pos, void* dst, size_t n) {
+        if (n > len || pos > len - n) return false;
+        if (n > 0) memcpy(dst, data + pos, n);
+        pos += n;
+        return true;
+    }
+
+    template <typename T>
+    static bool readVal(const BYTE* data, size_t len, size_t& pos, T& val) {
+        return readBytes(data, len, pos, &val, sizeof(T));
+    }
+
+    static bool parseFissatiPayload(const BYTE* data, size_t len, std::vector<Voce>& caricate) {
+        caricate.clear();
+        size_t pos = 0;
+        char magic[4]{};
+        uint32_t ver = 0, count = 0;
+        if (!readBytes(data, len, pos, magic, 4) || !readVal(data, len, pos, ver) || !readVal(data, len, pos, count)) {
+            return false;
+        }
+        if (memcmp(magic, "FWCB", 4) != 0 || ver != VERSIONE_FISSATI || count > MAX_FISSATI) {
+            return false;
+        }
+
+        FILETIME ftOra{};
+        GetSystemTimeAsFileTime(&ftOra);
+        const INT64 oraFt = (INT64)(((uint64_t)ftOra.dwHighDateTime << 32) | (uint64_t)ftOra.dwLowDateTime);
+        const ULONGLONG oraTick = GetTickCount64();
+
+        caricate.reserve(count);
+        for (uint32_t i = 0; i < count; i++) {
+            uint8_t img = 0;
+            uint64_t quando = 0;
+            uint32_t sorgLen = 0;
+            if (!readVal(data, len, pos, img) || !readVal(data, len, pos, quando) || !readVal(data, len, pos, sorgLen)) {
+                return false;
+            }
+            if (img > 1u || sorgLen > MAX_SORG_BYTES || (sorgLen % sizeof(wchar_t)) != 0) {
+                return false;
+            }
+
+            Voce v;
+            v.immagine = (img != 0);
+            v.fissata = true;
+            v.quando = (INT64)quando;
+            const ULONGLONG diffMs = (oraFt > v.quando && v.quando > 0) ? (ULONGLONG)((oraFt - v.quando) / 10000LL) : 0ULL;
+            v.tick = (oraTick > diffMs) ? (oraTick - diffMs) : 0ULL;
+
+            if (sorgLen > 0) {
+                v.sorgente.resize(sorgLen / sizeof(wchar_t));
+                if (!readBytes(data, len, pos, &v.sorgente[0], sorgLen)) return false;
+            }
+
+            if (!v.immagine) {
+                uint32_t testoLen = 0;
+                if (!readVal(data, len, pos, testoLen) || testoLen > MAX_TESTO_BYTES || (testoLen % sizeof(wchar_t)) != 0) {
+                    return false;
+                }
+                if (testoLen > 0) {
+                    v.testo.resize(testoLen / sizeof(wchar_t));
+                    if (!readBytes(data, len, pos, &v.testo[0], testoLen)) return false;
+                }
+                v.anteprimaTesto = normalizzaAnteprima(v.testo);
+            } else {
+                int32_t w = 0, hImg = 0, aw = 0, ah = 0;
+                uint32_t dibLen = 0, antLen = 0;
+                if (!readVal(data, len, pos, w) || !readVal(data, len, pos, hImg)
+                    || !readVal(data, len, pos, aw) || !readVal(data, len, pos, ah)
+                    || !readVal(data, len, pos, dibLen)) {
+                    return false;
+                }
+                if (w <= 0 || w > 32768 || hImg <= 0 || hImg > 32768 || aw <= 0 || aw > 1024 || ah <= 0 || ah > 1024) {
+                    return false;
+                }
+                if (dibLen <= sizeof(BITMAPINFOHEADER) || dibLen > MAX_DIB_BYTES) return false;
+                v.dib.resize(dibLen);
+                if (!readBytes(data, len, pos, v.dib.data(), dibLen)) return false;
+                if (inizioPixelDib(v.dib.data(), v.dib.size()) == 0) return false;
+
+                if (!readVal(data, len, pos, antLen) || antLen > MAX_ANT_BYTES || (antLen % sizeof(UINT)) != 0) {
+                    return false;
+                }
+                if ((uint64_t)aw * (uint64_t)ah * sizeof(UINT) != (uint64_t)antLen) return false;
+                v.anteprima.resize(antLen / sizeof(UINT));
+                if (antLen > 0 && !readBytes(data, len, pos, v.anteprima.data(), antLen)) return false;
+                v.w = (int)w;
+                v.h = (int)hImg;
+                v.aw = (int)aw;
+                v.ah = (int)ah;
+            }
+
+            caricate.push_back(std::move(v));
+        }
+
+        return true;
     }
 
     void salvaFissati() const {
@@ -310,28 +481,29 @@ private:
         }
         const std::wstring path = percorsoFissati(true);
         if (path.empty()) return;
-        const std::wstring tmp = path + L".tmp";
-        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h == INVALID_HANDLE_VALUE) return;
 
+        std::vector<BYTE> plain;
         static constexpr char MAGIA[4] = {'F', 'W', 'C', 'B'};
         const uint32_t ver = VERSIONE_FISSATI;
         const uint32_t count = (uint32_t)std::min<size_t>(fissate.size(), MAX_FISSATI);
-        bool ok = scriviTutto(h, MAGIA, 4) && scriviVal(h, ver) && scriviVal(h, count);
+        appendBytes(plain, MAGIA, 4);
+        appendVal(plain, ver);
+        appendVal(plain, count);
 
-        for (uint32_t i = 0; i < count && ok; i++) {
+        for (uint32_t i = 0; i < count; i++) {
             const Voce& v = *fissate[i];
             const uint8_t img = v.immagine ? 1u : 0u;
             const uint64_t quando = (uint64_t)v.quando;
             const uint32_t sorgLen = (uint32_t)std::min<size_t>(v.sorgente.size() * sizeof(wchar_t), MAX_SORG_BYTES);
-            ok = scriviVal(h, img) && scriviVal(h, quando) && scriviVal(h, sorgLen);
-            if (ok && sorgLen > 0) ok = scriviTutto(h, v.sorgente.data(), sorgLen);
+            appendVal(plain, img);
+            appendVal(plain, quando);
+            appendVal(plain, sorgLen);
+            if (sorgLen > 0) appendBytes(plain, v.sorgente.data(), sorgLen);
 
-            if (!ok) break;
             if (!v.immagine) {
                 const uint32_t testoLen = (uint32_t)std::min<size_t>(v.testo.size() * sizeof(wchar_t), MAX_TESTO_BYTES);
-                ok = scriviVal(h, testoLen);
-                if (ok && testoLen > 0) ok = scriviTutto(h, v.testo.data(), testoLen);
+                appendVal(plain, testoLen);
+                if (testoLen > 0) appendBytes(plain, v.testo.data(), testoLen);
             } else {
                 const int32_t w = (int32_t)v.w;
                 const int32_t hImg = (int32_t)v.h;
@@ -339,14 +511,28 @@ private:
                 const int32_t ah = (int32_t)v.ah;
                 const uint32_t dibLen = (uint32_t)v.dib.size();
                 const uint32_t antLen = (uint32_t)(v.anteprima.size() * sizeof(UINT));
-                ok = scriviVal(h, w) && scriviVal(h, hImg) && scriviVal(h, aw) && scriviVal(h, ah)
-                  && scriviVal(h, dibLen);
-                if (ok && dibLen > 0) ok = scriviTutto(h, v.dib.data(), dibLen);
-                if (ok) ok = scriviVal(h, antLen);
-                if (ok && antLen > 0) ok = scriviTutto(h, v.anteprima.data(), antLen);
+                appendVal(plain, w);
+                appendVal(plain, hImg);
+                appendVal(plain, aw);
+                appendVal(plain, ah);
+                appendVal(plain, dibLen);
+                if (dibLen > 0) appendBytes(plain, v.dib.data(), dibLen);
+                appendVal(plain, antLen);
+                if (antLen > 0) appendBytes(plain, v.anteprima.data(), antLen);
             }
         }
 
+        std::vector<BYTE> enc;
+        const bool protOk = dpapiProteggi(plain, enc);
+        if (!plain.empty()) SecureZeroMemory(plain.data(), plain.size());
+        if (!protOk) return;
+
+        const std::wstring tmp = path + L".tmp";
+        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+
+        static constexpr char MAGIA_ENC[4] = {'F', 'W', 'C', 'E'};
+        const bool ok = scriviTutto(h, MAGIA_ENC, 4) && scriviTutto(h, enc.data(), enc.size());
         CloseHandle(h);
         if (ok) {
             if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(tmp.c_str());
@@ -361,78 +547,38 @@ private:
         HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (h == INVALID_HANDLE_VALUE) return;
 
-        char magic[4]{};
-        uint32_t ver = 0, count = 0;
-        bool ok = leggiTutto(h, magic, 4) && leggiVal(h, ver) && leggiVal(h, count);
-        if (!ok || memcmp(magic, "FWCB", 4) != 0 || ver != VERSIONE_FISSATI || count > MAX_FISSATI) {
+        LARGE_INTEGER fileSize{};
+        if (!GetFileSizeEx(h, &fileSize) || fileSize.QuadPart < 4 || (uint64_t)fileSize.QuadPart > MAX_FILE_FISSATI) {
             CloseHandle(h);
             return;
         }
-
-        FILETIME ftOra{};
-        GetSystemTimeAsFileTime(&ftOra);
-        const INT64 oraFt = (INT64)(((uint64_t)ftOra.dwHighDateTime << 32) | (uint64_t)ftOra.dwLowDateTime);
-        const ULONGLONG oraTick = GetTickCount64();
+        std::vector<BYTE> raw((size_t)fileSize.QuadPart);
+        const bool letto = leggiTutto(h, raw.data(), raw.size());
+        CloseHandle(h);
+        if (!letto) return;
 
         std::vector<Voce> caricate;
-        caricate.reserve(count);
+        bool ok = false;
+        bool migra = false;
 
-        for (uint32_t i = 0; i < count; i++) {
-            uint8_t img = 0;
-            uint64_t quando = 0;
-            uint32_t sorgLen = 0;
-            if (!leggiVal(h, img) || !leggiVal(h, quando) || !leggiVal(h, sorgLen)) { ok = false; break; }
-            if (img > 1u || sorgLen > MAX_SORG_BYTES || (sorgLen % sizeof(wchar_t)) != 0) { ok = false; break; }
-
-            Voce v;
-            v.immagine = (img != 0);
-            v.fissata = true;
-            v.quando = (INT64)quando;
-            const ULONGLONG diffMs = (oraFt > v.quando && v.quando > 0) ? (ULONGLONG)((oraFt - v.quando) / 10000LL) : 0ULL;
-            v.tick = (oraTick > diffMs) ? (oraTick - diffMs) : 0ULL;
-
-            if (sorgLen > 0) {
-                v.sorgente.resize(sorgLen / sizeof(wchar_t));
-                if (!leggiTutto(h, &v.sorgente[0], sorgLen)) { ok = false; break; }
+        if (raw.size() >= 4 && memcmp(raw.data(), "FWCE", 4) == 0) {
+            std::vector<BYTE> plain;
+            if (dpapiSproteggi(raw.data() + 4, raw.size() - 4, plain)) {
+                ok = parseFissatiPayload(plain.data(), plain.size(), caricate);
+                if (!plain.empty()) SecureZeroMemory(plain.data(), plain.size());
             }
-
-            if (!v.immagine) {
-                uint32_t testoLen = 0;
-                if (!leggiVal(h, testoLen) || testoLen > MAX_TESTO_BYTES || (testoLen % sizeof(wchar_t)) != 0) { ok = false; break; }
-                if (testoLen > 0) {
-                    v.testo.resize(testoLen / sizeof(wchar_t));
-                    if (!leggiTutto(h, &v.testo[0], testoLen)) { ok = false; break; }
-                }
-                v.anteprimaTesto = normalizzaAnteprima(v.testo);
-            } else {
-                int32_t w = 0, hImg = 0, aw = 0, ah = 0;
-                uint32_t dibLen = 0, antLen = 0;
-                if (!leggiVal(h, w) || !leggiVal(h, hImg) || !leggiVal(h, aw) || !leggiVal(h, ah) || !leggiVal(h, dibLen)) { ok = false; break; }
-                if (w <= 0 || w > 32768 || hImg <= 0 || hImg > 32768 || aw <= 0 || aw > 1024 || ah <= 0 || ah > 1024) { ok = false; break; }
-                if (dibLen <= sizeof(BITMAPINFOHEADER) || dibLen > MAX_DIB_BYTES) { ok = false; break; }
-                v.dib.resize(dibLen);
-                if (!leggiTutto(h, v.dib.data(), dibLen)) { ok = false; break; }
-                if (inizioPixelDib(v.dib.data(), v.dib.size()) == 0) { ok = false; break; }
-
-                if (!leggiVal(h, antLen) || antLen > MAX_ANT_BYTES || (antLen % sizeof(UINT)) != 0) { ok = false; break; }
-                if ((uint64_t)aw * (uint64_t)ah * sizeof(UINT) != (uint64_t)antLen) { ok = false; break; }
-                v.anteprima.resize(antLen / sizeof(UINT));
-                if (antLen > 0 && !leggiTutto(h, v.anteprima.data(), antLen)) { ok = false; break; }
-                v.w = (int)w;
-                v.h = (int)hImg;
-                v.aw = (int)aw;
-                v.ah = (int)ah;
-            }
-
-            v.id = ++ultimoId;
-            caricate.push_back(std::move(v));
+        } else if (raw.size() >= 4 && memcmp(raw.data(), "FWCB", 4) == 0) {
+            ok = parseFissatiPayload(raw.data(), raw.size(), caricate);
+            if (!raw.empty()) SecureZeroMemory(raw.data(), raw.size());
+            migra = ok;
         }
 
-        CloseHandle(h);
         if (!ok || caricate.empty()) return;
 
+        for (Voce& v : caricate) v.id = ++ultimoId;
         voci.insert(voci.begin(), std::make_move_iterator(caricate.begin()), std::make_move_iterator(caricate.end()));
         versione++;
+        if (migra) salvaFissati();
     }
 
     bool apri() {
