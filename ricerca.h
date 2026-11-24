@@ -10,15 +10,22 @@
 #include <shobjidl.h>
 #include <structuredquerycondition.h>
 #include <propsys.h>
+#include <winhttp.h>
+#include <powrprof.h>
+#include <iphlpapi.h>
 #include <vector>
 #include <deque>
 #include <unordered_map>
 #include <functional>
 #include <cwctype>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include <ctime>
 
 namespace ricerca {
 
-enum Tipo { T_CALCOLO, T_APP, T_IMPOSTAZIONE, T_FILE, T_WEB };
+enum Tipo { T_CALCOLO, T_AZIONE, T_APP, T_IMPOSTAZIONE, T_FILE, T_WEB };
 
 struct Risultato {
     Tipo tipo = T_APP;
@@ -93,6 +100,467 @@ private:
         return v;
     }
 };
+
+namespace dettagli {
+
+inline std::wstring minuscolo(std::wstring s) { for (auto& c : s) c = (wchar_t)towlower(c); return s; }
+inline std::wstring maiuscolo(std::wstring s) { for (auto& c : s) c = (wchar_t)towupper(c); return s; }
+
+inline bool leggiNumero(const std::wstring& s, size_t& p, bool consentiSegno, double& out) {
+    size_t i = p;
+    if (consentiSegno && i < s.size() && (s[i] == L'-' || s[i] == L'+')) i++;
+    std::wstring buf;
+    if (i > p) buf += s[p];
+    bool cifra = false, punto = false;
+    while (i < s.size()) {
+        const wchar_t c = s[i];
+        if (c >= L'0' && c <= L'9') { buf += c; cifra = true; i++; }
+        else if ((c == L'.' || c == L',') && !punto) { buf += L'.'; punto = true; i++; }
+        else break;
+    }
+    if (!cifra) return false;
+    wchar_t* fine = nullptr;
+    const double v = wcstod(buf.c_str(), &fine);
+    if (!fine || *fine || !std::isfinite(v)) return false;
+    out = v;
+    p = i;
+    return true;
+}
+
+inline bool leggiSeparatore(const std::wstring& s, size_t& p, bool spazioPrima) {
+    if (p + 1 < s.size() && s[p] == L'-' && s[p + 1] == L'>') { p += 2; return true; }
+    if (p < s.size() && s[p] == L'=') { p += 1; return true; }
+    if (spazioPrima && p + 2 < s.size()) {
+        const wchar_t a = (wchar_t)towlower(s[p]), b = (wchar_t)towlower(s[p + 1]);
+        if (((a == L't' && b == L'o') || (a == L'i' && b == L'n')) && s[p + 2] == L' ') {
+            p += 3;
+            return true;
+        }
+    }
+    return false;
+}
+
+inline std::wstring formattaNumero(double v, const wchar_t* fmt) {
+    if (std::abs(v) < 1e-12) v = 0.0;
+    wchar_t b[64];
+    swprintf(b, 64, fmt, v);
+    std::wstring s = b;
+    const wchar_t vg = testi::virgola();
+    for (auto& c : s) if (c == L'.') c = vg;
+    return s;
+}
+
+struct WinHttpHandle {
+    HINTERNET h = nullptr;
+    ~WinHttpHandle() { if (h) WinHttpCloseHandle(h); }
+    WinHttpHandle(const WinHttpHandle&) = delete;
+    WinHttpHandle& operator=(const WinHttpHandle&) = delete;
+    explicit WinHttpHandle(HINTERNET x = nullptr) : h(x) {}
+};
+
+struct FileHandle {
+    HANDLE h = INVALID_HANDLE_VALUE;
+    ~FileHandle() { if (h != INVALID_HANDLE_VALUE) CloseHandle(h); }
+    FileHandle(const FileHandle&) = delete;
+    FileHandle& operator=(const FileHandle&) = delete;
+    explicit FileHandle(HANDLE x = INVALID_HANDLE_VALUE) : h(x) {}
+};
+
+}  // namespace dettagli
+
+inline bool convertiUnita(const std::wstring& q, std::wstring& outTitolo, std::wstring& outCopia) {
+    if (q.size() > 96) return false;
+    size_t p = 0;
+    double val = 0;
+    if (!dettagli::leggiNumero(q, p, true, val)) return false;
+    while (p < q.size() && q[p] == L' ') p++;
+    const size_t f0 = p;
+    while (p < q.size() && q[p] != L' ' && q[p] != L'=' && !(q[p] == L'-' && p + 1 < q.size() && q[p + 1] == L'>')) p++;
+    if (p == f0) return false;
+    const std::wstring da = dettagli::minuscolo(q.substr(f0, p - f0));
+    const size_t sp0 = p;
+    while (p < q.size() && q[p] == L' ') p++;
+    if (!dettagli::leggiSeparatore(q, p, p > sp0)) return false;
+    while (p < q.size() && q[p] == L' ') p++;
+    if (p >= q.size()) return false;
+    const std::wstring a = dettagli::minuscolo(q.substr(p));
+    if (a.find(L' ') != std::wstring::npos) return false;
+
+    auto tempId = [](const std::wstring& u) -> int {
+        if (u == L"c" || u == L"celsius" || u == L"\u00B0c") return 0;
+        if (u == L"f" || u == L"fahrenheit" || u == L"\u00B0f") return 1;
+        if (u == L"k" || u == L"kelvin") return 2;
+        return -1;
+    };
+    const int tDa = tempId(da), tA = tempId(a);
+    if (tDa >= 0 && tA >= 0) {
+        double c = val;
+        if (tDa == 1) c = (val - 32.0) * 5.0 / 9.0;
+        else if (tDa == 2) c = val - 273.15;
+        double res = c;
+        const wchar_t* et = L"\u00B0C";
+        if (tA == 1) { res = c * 9.0 / 5.0 + 32.0; et = L"\u00B0F"; }
+        else if (tA == 2) { res = c + 273.15; et = L"K"; }
+        outCopia = dettagli::formattaNumero(res, L"%.8g");
+        outTitolo = L"= " + outCopia + L" " + et;
+        return true;
+    }
+
+    enum Cat { C_LEN, C_MASS, C_VOL, C_DATA, C_SPEED, C_TIME, C_AREA };
+    struct Unita { const wchar_t* chiave; Cat cat; double fattore; const wchar_t* etichetta; };
+    static const Unita tabella[] = {
+        {L"mm", C_LEN, 0.001, L"mm"}, {L"cm", C_LEN, 0.01, L"cm"},
+        {L"m", C_LEN, 1.0, L"m"}, {L"meter", C_LEN, 1.0, L"m"}, {L"meters", C_LEN, 1.0, L"m"},
+        {L"km", C_LEN, 1000.0, L"km"},
+        {L"in", C_LEN, 0.0254, L"in"}, {L"inch", C_LEN, 0.0254, L"in"}, {L"inches", C_LEN, 0.0254, L"in"},
+        {L"ft", C_LEN, 0.3048, L"ft"}, {L"foot", C_LEN, 0.3048, L"ft"}, {L"feet", C_LEN, 0.3048, L"ft"},
+        {L"yd", C_LEN, 0.9144, L"yd"}, {L"yard", C_LEN, 0.9144, L"yd"}, {L"yards", C_LEN, 0.9144, L"yd"},
+        {L"mi", C_LEN, 1609.344, L"mi"}, {L"mile", C_LEN, 1609.344, L"mi"}, {L"miles", C_LEN, 1609.344, L"mi"},
+
+        {L"mg", C_MASS, 0.001, L"mg"},
+        {L"g", C_MASS, 1.0, L"g"}, {L"gram", C_MASS, 1.0, L"g"}, {L"grams", C_MASS, 1.0, L"g"},
+        {L"kg", C_MASS, 1000.0, L"kg"},
+        {L"oz", C_MASS, 28.349523125, L"oz"},
+        {L"lb", C_MASS, 453.59237, L"lb"}, {L"lbs", C_MASS, 453.59237, L"lb"},
+        {L"st", C_MASS, 6350.29318, L"st"}, {L"stone", C_MASS, 6350.29318, L"st"},
+        {L"t", C_MASS, 1000000.0, L"t"}, {L"ton", C_MASS, 1000000.0, L"t"}, {L"tonne", C_MASS, 1000000.0, L"t"},
+
+        {L"ml", C_VOL, 0.001, L"mL"},
+        {L"l", C_VOL, 1.0, L"L"}, {L"liter", C_VOL, 1.0, L"L"}, {L"liters", C_VOL, 1.0, L"L"},
+        {L"litre", C_VOL, 1.0, L"L"}, {L"litres", C_VOL, 1.0, L"L"},
+        {L"tsp", C_VOL, 0.00492892159375, L"tsp"},
+        {L"tbsp", C_VOL, 0.01478676478125, L"tbsp"},
+        {L"floz", C_VOL, 0.0295735295625, L"fl oz"},
+        {L"cup", C_VOL, 0.2365882365, L"cup"}, {L"cups", C_VOL, 0.2365882365, L"cup"},
+        {L"pt", C_VOL, 0.473176473, L"pt"}, {L"pint", C_VOL, 0.473176473, L"pt"},
+        {L"gal", C_VOL, 3.785411784, L"gal"}, {L"gallon", C_VOL, 3.785411784, L"gal"}, {L"gallons", C_VOL, 3.785411784, L"gal"},
+
+        {L"b", C_DATA, 1.0, L"B"}, {L"byte", C_DATA, 1.0, L"B"}, {L"bytes", C_DATA, 1.0, L"B"},
+        {L"kb", C_DATA, 1e3, L"KB"}, {L"mb", C_DATA, 1e6, L"MB"}, {L"gb", C_DATA, 1e9, L"GB"},
+        {L"tb", C_DATA, 1e12, L"TB"}, {L"pb", C_DATA, 1e15, L"PB"},
+        {L"kib", C_DATA, 1024.0, L"KiB"}, {L"mib", C_DATA, 1048576.0, L"MiB"},
+        {L"gib", C_DATA, 1073741824.0, L"GiB"}, {L"tib", C_DATA, 1099511627776.0, L"TiB"},
+
+        {L"m/s", C_SPEED, 1.0, L"m/s"}, {L"mps", C_SPEED, 1.0, L"m/s"},
+        {L"km/h", C_SPEED, 1.0 / 3.6, L"km/h"}, {L"kph", C_SPEED, 1.0 / 3.6, L"km/h"}, {L"kmh", C_SPEED, 1.0 / 3.6, L"km/h"},
+        {L"mph", C_SPEED, 0.44704, L"mph"},
+        {L"kn", C_SPEED, 1852.0 / 3600.0, L"kn"}, {L"kt", C_SPEED, 1852.0 / 3600.0, L"kn"}, {L"knots", C_SPEED, 1852.0 / 3600.0, L"kn"},
+
+        {L"ms", C_TIME, 0.001, L"ms"},
+        {L"s", C_TIME, 1.0, L"s"}, {L"sec", C_TIME, 1.0, L"s"}, {L"secs", C_TIME, 1.0, L"s"},
+        {L"second", C_TIME, 1.0, L"s"}, {L"seconds", C_TIME, 1.0, L"s"},
+        {L"min", C_TIME, 60.0, L"min"}, {L"mins", C_TIME, 60.0, L"min"},
+        {L"minute", C_TIME, 60.0, L"min"}, {L"minutes", C_TIME, 60.0, L"min"},
+        {L"h", C_TIME, 3600.0, L"h"}, {L"hr", C_TIME, 3600.0, L"h"}, {L"hrs", C_TIME, 3600.0, L"h"},
+        {L"hour", C_TIME, 3600.0, L"h"}, {L"hours", C_TIME, 3600.0, L"h"},
+        {L"d", C_TIME, 86400.0, L"d"}, {L"day", C_TIME, 86400.0, L"d"}, {L"days", C_TIME, 86400.0, L"d"},
+        {L"wk", C_TIME, 604800.0, L"wk"}, {L"week", C_TIME, 604800.0, L"wk"}, {L"weeks", C_TIME, 604800.0, L"wk"},
+
+        {L"m2", C_AREA, 1.0, L"m\u00B2"}, {L"sqm", C_AREA, 1.0, L"m\u00B2"},
+        {L"km2", C_AREA, 1e6, L"km\u00B2"}, {L"sqkm", C_AREA, 1e6, L"km\u00B2"},
+        {L"ft2", C_AREA, 0.09290304, L"ft\u00B2"}, {L"sqft", C_AREA, 0.09290304, L"ft\u00B2"},
+        {L"acre", C_AREA, 4046.8564224, L"acre"}, {L"acres", C_AREA, 4046.8564224, L"acre"},
+        {L"ha", C_AREA, 10000.0, L"ha"}, {L"hectare", C_AREA, 10000.0, L"ha"}, {L"hectares", C_AREA, 10000.0, L"ha"},
+    };
+    const Unita *uDa = nullptr, *uA = nullptr;
+    for (const auto& u : tabella) {
+        if (!uDa && da == u.chiave) uDa = &u;
+        if (!uA && a == u.chiave) uA = &u;
+    }
+    if (!uDa || !uA || uDa->cat != uA->cat) return false;
+    const double res = val * uDa->fattore / uA->fattore;
+    if (!std::isfinite(res)) return false;
+    outCopia = dettagli::formattaNumero(res, L"%.8g");
+    outTitolo = L"= " + outCopia + L" " + uA->etichetta;
+    return true;
+}
+
+class Valuta {
+public:
+    static constexpr long long TTL = 6 * 3600;
+
+    // 0 = non e' una valuta, 1 = convertita, 2 = tassi in caricamento
+    int converti(const std::wstring& q, HWND notifica, std::wstring& outTitolo, std::wstring& outSotto, std::wstring& outCopia) {
+        double importo = 0;
+        std::wstring da, a;
+        if (!analizza(q, importo, da, a)) return 0;
+
+        bool serveAggiornare = false;
+        double rDa = 0, rA = 0;
+        bool trovati = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx);
+            if (!discoLetto) {
+                discoLetto = true;
+                leggiDiscoBloccato();
+            }
+            const long long ora = (long long)std::time(nullptr);
+            if (tassi.empty() || ora - aggiornato >= TTL) serveAggiornare = true;
+            auto itDa = tassi.find(da), itA = tassi.find(a);
+            if (itDa != tassi.end() && itA != tassi.end() && itDa->second > 0 && itA->second > 0) {
+                rDa = itDa->second; rA = itA->second; trovati = true;
+            }
+        }
+        if (serveAggiornare) avviaAggiornamento(notifica);
+        if (!trovati) return 2;
+
+        const double tasso = rA / rDa;
+        const double res = importo * tasso;
+        if (!std::isfinite(res)) return 0;
+        outCopia = dettagli::formattaNumero(res, L"%.2f");
+        outTitolo = L"= " + outCopia + L" " + a;
+        outSotto = L"1 " + da + L" = " + dettagli::formattaNumero(tasso, L"%.4g") + L" " + a
+                   + testi::t(L" \u00B7 Invio per copiare", L" \u00B7 Enter to copy");
+        return 1;
+    }
+
+private:
+    std::mutex mtx;
+    std::unordered_map<std::wstring, double> tassi;
+    long long aggiornato = 0;
+    bool discoLetto = false;
+    std::atomic<bool> inCorso{false};
+
+    static bool codiceValido(const std::wstring& c) {
+        static const wchar_t* const codici[] = {
+            L"ZAR", L"USD", L"EUR", L"GBP", L"AUD", L"CAD", L"JPY", L"CHF", L"CNY",
+            L"INR", L"NZD", L"BRL", L"MXN", L"KRW", L"SGD", L"HKD", L"SEK", L"NOK",
+            L"DKK", L"PLN", L"TRY", L"AED", L"SAR", L"THB", L"NAD", L"BWP"
+        };
+        for (const wchar_t* x : codici) if (c == x) return true;
+        return false;
+    }
+
+    static bool analizza(const std::wstring& q, double& importo, std::wstring& da, std::wstring& a) {
+        if (q.size() > 64 || q.empty()) return false;
+        size_t p = 0;
+        bool daSimbolo = false;
+        if (q[0] == L'$') { da = L"USD"; p = 1; daSimbolo = true; }
+        else if (q[0] == L'\u20AC') { da = L"EUR"; p = 1; daSimbolo = true; }
+        else if (q[0] == L'\u00A3') { da = L"GBP"; p = 1; daSimbolo = true; }
+        else if ((q[0] == L'R' || q[0] == L'r') && q.size() > 1 && q[1] >= L'0' && q[1] <= L'9') { da = L"ZAR"; p = 1; daSimbolo = true; }
+
+        if (!dettagli::leggiNumero(q, p, false, importo)) return false;
+        if (!daSimbolo) {
+            while (p < q.size() && q[p] == L' ') p++;
+            const size_t f0 = p;
+            while (p < q.size() && iswalpha(q[p])) p++;
+            if (p - f0 != 3) return false;
+            da = dettagli::maiuscolo(q.substr(f0, 3));
+            if (!codiceValido(da)) return false;
+        }
+        const size_t sp0 = p;
+        while (p < q.size() && q[p] == L' ') p++;
+        if (!dettagli::leggiSeparatore(q, p, p > sp0)) return false;
+        while (p < q.size() && q[p] == L' ') p++;
+        if (q.size() - p != 3) return false;
+        a = dettagli::maiuscolo(q.substr(p));
+        return codiceValido(a);
+    }
+
+    static std::wstring percorsoCache(bool creaCartella) {
+        PWSTR base = nullptr;
+        if (FAILED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &base)) || !base) return L"";
+        std::wstring dir = std::wstring(base) + L"\\FluidWin";
+        CoTaskMemFree(base);
+        if (creaCartella) CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\tassi_valuta.json";
+    }
+
+    static bool leggiJson(const std::string& body, std::unordered_map<std::wstring, double>& out, long long* savedAt) {
+        if (savedAt) {
+            const size_t ps = body.find("\"saved_at\"");
+            if (ps != std::string::npos) {
+                const size_t col = body.find(':', ps + 10);
+                if (col != std::string::npos) *savedAt = strtoll(body.c_str() + col + 1, nullptr, 10);
+            }
+        }
+        const size_t pr = body.find("\"rates\"");
+        if (pr == std::string::npos) return false;
+        size_t i = body.find('{', pr + 7);
+        if (i == std::string::npos) return false;
+        i++;
+        std::unordered_map<std::wstring, double> mappa;
+        while (i < body.size()) {
+            while (i < body.size() && (body[i] == ' ' || body[i] == '\t' || body[i] == '\r' || body[i] == '\n' || body[i] == ',')) i++;
+            if (i >= body.size() || body[i] == '}') break;
+            if (body[i] != '"') break;
+            const size_t k0 = ++i;
+            while (i < body.size() && body[i] != '"') i++;
+            if (i >= body.size()) break;
+            const std::string chiave = body.substr(k0, i - k0);
+            i++;
+            while (i < body.size() && (body[i] == ' ' || body[i] == '\t' || body[i] == ':')) i++;
+            char* fine = nullptr;
+            const double val = strtod(body.c_str() + i, &fine);
+            if (!fine || fine == body.c_str() + i) break;
+            i = (size_t)(fine - body.c_str());
+            if (chiave.size() == 3 && std::isfinite(val) && val > 0) {
+                std::wstring wk(3, L' ');
+                for (size_t j = 0; j < 3; j++) wk[j] = (wchar_t)towupper((unsigned char)chiave[j]);
+                if (codiceValido(wk)) mappa[wk] = val;
+            }
+        }
+        if (mappa.size() < 5 || !mappa.count(L"USD")) return false;
+        out = std::move(mappa);
+        return true;
+    }
+
+    void leggiDiscoBloccato() {
+        const std::wstring p = percorsoCache(false);
+        if (p.empty()) return;
+        dettagli::FileHandle fh(CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (fh.h == INVALID_HANDLE_VALUE) return;
+        LARGE_INTEGER sz{};
+        if (!GetFileSizeEx(fh.h, &sz) || sz.QuadPart <= 0 || sz.QuadPart > 262144) return;
+        std::string buf((size_t)sz.QuadPart, '\0');
+        DWORD letti = 0;
+        if (!ReadFile(fh.h, buf.data(), (DWORD)buf.size(), &letti, nullptr) || letti == 0) return;
+        buf.resize(letti);
+        long long ts = 0;
+        std::unordered_map<std::wstring, double> mappa;
+        if (leggiJson(buf, mappa, &ts)) {
+            tassi = std::move(mappa);
+            aggiornato = ts;
+        }
+    }
+
+    static void scriviDisco(long long ts, const std::unordered_map<std::wstring, double>& mappa) {
+        const std::wstring p = percorsoCache(true);
+        if (p.empty()) return;
+        std::string json = "{\"saved_at\":" + std::to_string(ts) + ",\"rates\":{";
+        bool primo = true;
+        for (const auto& [k, v] : mappa) {
+            if (!primo) json += ',';
+            primo = false;
+            char riga[64];
+            snprintf(riga, sizeof(riga), "\"%c%c%c\":%.8g", (char)k[0], (char)k[1], (char)k[2], v);
+            json += riga;
+        }
+        json += "}}";
+        dettagli::FileHandle fh(CreateFileW(p.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr));
+        if (fh.h == INVALID_HANDLE_VALUE) return;
+        DWORD scritti = 0;
+        WriteFile(fh.h, json.data(), (DWORD)json.size(), &scritti, nullptr);
+    }
+
+    void avviaAggiornamento(HWND notifica) {
+        if (inCorso.exchange(true)) return;
+        std::thread([this, notifica]() {
+            struct Ripristina { std::atomic<bool>& f; ~Ripristina() { f.store(false); } } guard{inCorso};
+            dettagli::WinHttpHandle sess(WinHttpOpen(L"FluidWin/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
+            if (!sess.h) return;
+            WinHttpSetTimeouts(sess.h, 5000, 5000, 5000, 5000);
+            dettagli::WinHttpHandle conn(WinHttpConnect(sess.h, L"open.er-api.com", INTERNET_DEFAULT_HTTPS_PORT, 0));
+            if (!conn.h) return;
+            dettagli::WinHttpHandle req(WinHttpOpenRequest(conn.h, L"GET", L"/v6/latest/USD", nullptr,
+                                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE));
+            if (!req.h) return;
+            if (!WinHttpSendRequest(req.h, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0)) return;
+            if (!WinHttpReceiveResponse(req.h, nullptr)) return;
+            DWORD stato = 0, lunStato = sizeof(stato);
+            if (!WinHttpQueryHeaders(req.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                     WINHTTP_HEADER_NAME_BY_INDEX, &stato, &lunStato, WINHTTP_NO_HEADER_INDEX) || stato != 200) return;
+            std::string body;
+            for (;;) {
+                DWORD disp = 0;
+                if (!WinHttpQueryDataAvailable(req.h, &disp) || disp == 0) break;
+                if (body.size() + disp > 262144) return;
+                const size_t prec = body.size();
+                body.resize(prec + disp);
+                DWORD letti = 0;
+                if (!WinHttpReadData(req.h, body.data() + prec, disp, &letti)) return;
+                body.resize(prec + letti);
+                if (letti == 0) break;
+            }
+            std::unordered_map<std::wstring, double> mappa;
+            if (!leggiJson(body, mappa, nullptr)) return;
+            const long long ora = (long long)std::time(nullptr);
+            scriviDisco(ora, mappa);
+            {
+                std::lock_guard<std::mutex> lk(mtx);
+                tassi = std::move(mappa);
+                aggiornato = ora;
+            }
+            if (notifica && IsWindow(notifica)) PostMessageW(notifica, WM_APP + 12, 0, 0);
+        }).detach();
+    }
+};
+
+inline bool parseColoreHex(const std::wstring& q, std::wstring& outTitolo, std::wstring& outCopia, std::wstring& outIcona) {
+    if ((q.size() != 4 && q.size() != 7) || q[0] != L'#') return false;
+    auto hex = [](wchar_t c) -> int {
+        if (c >= L'0' && c <= L'9') return c - L'0';
+        if (c >= L'a' && c <= L'f') return 10 + (c - L'a');
+        if (c >= L'A' && c <= L'F') return 10 + (c - L'A');
+        return -1;
+    };
+    int r = 0, g = 0, b = 0;
+    if (q.size() == 4) {
+        const int d0 = hex(q[1]), d1 = hex(q[2]), d2 = hex(q[3]);
+        if (d0 < 0 || d1 < 0 || d2 < 0) return false;
+        r = d0 * 17; g = d1 * 17; b = d2 * 17;
+    } else {
+        int v[6];
+        for (int i = 0; i < 6; i++) { v[i] = hex(q[i + 1]); if (v[i] < 0) return false; }
+        r = v[0] * 16 + v[1]; g = v[2] * 16 + v[3]; b = v[4] * 16 + v[5];
+    }
+    const double rf = r / 255.0, gf = g / 255.0, bf = b / 255.0;
+    const double mx = std::max({rf, gf, bf}), mn = std::min({rf, gf, bf}), delta = mx - mn;
+    const double l = (mx + mn) / 2.0;
+    const double s = delta == 0.0 ? 0.0 : delta / (1.0 - std::abs(2.0 * l - 1.0));
+    double h = 0.0;
+    if (delta > 0.0) {
+        if (mx == rf) h = 60.0 * std::fmod((gf - bf) / delta + 6.0, 6.0);
+        else if (mx == gf) h = 60.0 * ((bf - rf) / delta + 2.0);
+        else h = 60.0 * ((rf - gf) / delta + 4.0);
+    }
+    wchar_t rgb[40], hsl[40], ic[16];
+    swprintf(rgb, 40, L"rgb(%d, %d, %d)", r, g, b);
+    swprintf(hsl, 40, L"hsl(%d, %d%%, %d%%)", (int)std::lround(h) % 360, (int)std::lround(s * 100.0), (int)std::lround(l * 100.0));
+    swprintf(ic, 16, L"*col:%02X%02X%02X", r, g, b);
+    outCopia = rgb;
+    outTitolo = std::wstring(rgb) + L" \u00B7 " + hsl;
+    outIcona = ic;
+    return true;
+}
+
+inline std::wstring nuovoUuid() {
+    GUID g{};
+    if (FAILED(CoCreateGuid(&g))) return L"";
+    wchar_t b[48];
+    swprintf(b, 48, L"%08lx-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+             (unsigned long)g.Data1, (unsigned)g.Data2, (unsigned)g.Data3,
+             (unsigned)g.Data4[0], (unsigned)g.Data4[1], (unsigned)g.Data4[2], (unsigned)g.Data4[3],
+             (unsigned)g.Data4[4], (unsigned)g.Data4[5], (unsigned)g.Data4[6], (unsigned)g.Data4[7]);
+    return b;
+}
+
+inline std::wstring ipLocale() {
+    ULONG sz = 0;
+    if (GetIpAddrTable(nullptr, &sz, TRUE) != ERROR_INSUFFICIENT_BUFFER || sz == 0) return L"";
+    std::vector<BYTE> buf(sz);
+    auto* tbl = reinterpret_cast<MIB_IPADDRTABLE*>(buf.data());
+    if (GetIpAddrTable(tbl, &sz, TRUE) != NO_ERROR) return L"";
+    DWORD migliore = 0;
+    int prioritaMigliore = -1;
+    for (DWORD i = 0; i < tbl->dwNumEntries; i++) {
+        const DWORD a = tbl->table[i].dwAddr;
+        const unsigned b0 = a & 0xFF, b1 = (a >> 8) & 0xFF;
+        if (a == 0 || b0 == 127) continue;
+        if (b0 == 169 && b1 == 254) continue;
+        const bool lan = (b0 == 192 && b1 == 168) || (b0 == 10) || (b0 == 172 && b1 >= 16 && b1 <= 31);
+        const int prio = lan ? 2 : 1;
+        if (prio > prioritaMigliore) { migliore = a; prioritaMigliore = prio; }
+    }
+    if (!migliore) return L"";
+    wchar_t s[32];
+    swprintf(s, 32, L"%u.%u.%u.%u",
+             (unsigned)(migliore & 0xFF), (unsigned)((migliore >> 8) & 0xFF),
+             (unsigned)((migliore >> 16) & 0xFF), (unsigned)((migliore >> 24) & 0xFF));
+    return s;
+}
 
 class Ricerca {
 public:
@@ -243,6 +711,7 @@ public:
                 return true;
             case WM_CLOSE: chiudi(); return true;
             case WM_APP + 2: if (apertaOra) prendiFuoco(); return true;
+            case WM_APP + 12: if (apertaOra) componi(); return true;
         }
         return false;
     }
@@ -253,6 +722,9 @@ private:
     std::wstring testo;
     std::vector<std::pair<std::wstring, std::wstring>> app;
     std::vector<Risultato> risultati, file;
+    Valuta valuta;
+    std::wstring uuidCache;
+    LONG genUuid = -1;
     int sel = 0, sopra = -1, larg = 0, x = 0, y = 0;
     DWORD ultimoMouse = 0;
     bool saltaBasso = false;   // WM_CHAR: la prima meta' di un carattere non entrata, si scarta anche la seconda
@@ -404,10 +876,44 @@ private:
         if (!q.empty()) {
             const std::wstring ql = minuscolo(q);
             double val;
+            std::wstring convTitolo, convSotto, convCopia, convIcona;
             if (Calcolo::valuta(q, val)) {
                 wchar_t b[64]; swprintf(b, 64, L"%.10g", val);
                 std::wstring s = b; const wchar_t vg = testi::virgola(); for (auto& c : s) if (c == L'.') c = vg;   // (virgola in italiano, spagnolo...)
                 risultati.push_back({T_CALCOLO, L"= " + s, testi::t(L"Invio per copiare il risultato", L"Enter to copy the result"), s, L""});
+            } else if (convertiUnita(q, convTitolo, convCopia)) {
+                risultati.push_back({T_CALCOLO, convTitolo, testi::t(L"Invio per copiare il risultato", L"Enter to copy the result"), convCopia, L""});
+            } else if (const int stVal = valuta.converti(q, v.fin, convTitolo, convSotto, convCopia); stVal > 0) {
+                if (stVal == 1) risultati.push_back({T_CALCOLO, convTitolo, convSotto, convCopia, L""});
+                else risultati.push_back({T_CALCOLO, testi::t(L"Caricamento tassi di cambio\u2026", L"Loading exchange rates\u2026"), L"", L"", L""});
+            } else if (parseColoreHex(q, convTitolo, convCopia, convIcona)) {
+                risultati.push_back({T_CALCOLO, convTitolo, testi::t(L"Invio per copiare rgb(...)", L"Enter to copy rgb(...)"), convCopia, convIcona});
+            } else if (ql == L"uuid" || ql == L"guid") {
+                if (genUuid != generazione || uuidCache.empty()) { uuidCache = nuovoUuid(); genUuid = generazione; }
+                if (!uuidCache.empty())
+                    risultati.push_back({T_CALCOLO, uuidCache, testi::t(L"UUID v4 \u00B7 Invio per copiare", L"UUID v4 \u00B7 Enter to copy"), uuidCache, L""});
+            } else if (ql == L"ip" || ql == L"my ip") {
+                const std::wstring ip = ipLocale();
+                if (!ip.empty())
+                    risultati.push_back({T_CALCOLO, ip, testi::t(L"Indirizzo IP locale \u00B7 Invio per copiare", L"Local IP address \u00B7 Enter to copy"), ip, L""});
+            }
+            if ((ql.rfind(L"https://", 0) == 0 || ql.rfind(L"http://", 0) == 0) && q.find(L' ') == std::wstring::npos && q.size() > 8) {
+                risultati.push_back({T_AZIONE, testi::t(L"Apri ", L"Open ") + q,
+                                     testi::t(L"Nel browser predefinito", L"In the default browser"), L"*url:" + q, L""});
+            }
+            {
+                std::vector<std::pair<int, size_t>> azTrovate;
+                const auto& elencoAz = azioni();
+                for (size_t i = 0; i < elencoAz.size(); i++) {
+                    const int p = std::max(punteggio(elencoAz[i].titolo, ql), punteggio(elencoAz[i].sotto, ql));
+                    if (p > 0) azTrovate.push_back({p, i});
+                }
+                std::stable_sort(azTrovate.begin(), azTrovate.end(), [](auto& a, auto& b) { return a.first > b.first; });
+                for (size_t i = 0; i < azTrovate.size() && i < 3; i++) {
+                    Risultato r = elencoAz[azTrovate[i].second];
+                    r.sotto = testi::t(L"Azione rapida", L"Quick action");
+                    risultati.push_back(std::move(r));
+                }
             }
             // app: prima chi inizia con il testo
             std::vector<std::pair<int, size_t>> trovate;
@@ -448,7 +954,7 @@ private:
     void chiediIcone() {
         bool nuove = false;
         EnterCriticalSection(&cs);
-        for (const auto& r : risultati) if (!r.icona.empty() && !icone.count(r.icona)) { icone[r.icona] = nullptr; iconeDaFare.push_back(r.icona); nuove = true; }
+        for (const auto& r : risultati) if (!r.icona.empty() && r.icona[0] != L'*' && !icone.count(r.icona)) { icone[r.icona] = nullptr; iconeDaFare.push_back(r.icona); nuove = true; }
         LeaveCriticalSection(&cs);
         if (nuove) { SetEvent(evento); SetTimer(v.fin, 4, 50, nullptr); }
     }
@@ -492,13 +998,48 @@ private:
         chiudi(false);
         switch (r.tipo) {
             case T_CALCOLO:
-                if (OpenClipboard(v.fin)) {
+                if (!r.azione.empty() && OpenClipboard(v.fin)) {
                     EmptyClipboard();
                     const size_t n = (r.azione.size() + 1) * sizeof(wchar_t);
                     if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, n)) { memcpy(GlobalLock(g), r.azione.c_str(), n); GlobalUnlock(g); SetClipboardData(CF_UNICODETEXT, g); }
                     CloseClipboard();
                 }
                 if (primaDi && IsWindow(primaDi)) SetForegroundWindow(primaDi);
+                break;
+            case T_AZIONE:
+                if (r.azione.rfind(L"*url:", 0) == 0) {
+                    ShellExecuteW(nullptr, L"open", r.azione.c_str() + 5, nullptr, nullptr, SW_SHOWNORMAL);
+                } else if (r.azione == L"*act:lock") {
+                    LockWorkStation();
+                } else if (r.azione == L"*act:sleep") {
+                    SetSuspendState(FALSE, FALSE, FALSE);
+                } else if (r.azione == L"*act:display") {
+                    PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND, SC_MONITORPOWER, 2);
+                } else if (r.azione == L"*act:trash") {
+                    SHEmptyRecycleBinW(nullptr, nullptr, 0);
+                } else if (r.azione == L"*act:theme") {
+                    DWORD cur = 1, sz = sizeof(cur);
+                    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &cur, &sz);
+                    const DWORD nuovo = cur == 0 ? 1 : 0;
+                    HKEY hk = nullptr;
+                    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                                        0, nullptr, 0, KEY_SET_VALUE, nullptr, &hk, nullptr) == ERROR_SUCCESS && hk) {
+                        RegSetValueExW(hk, L"AppsUseLightTheme", 0, REG_DWORD, (const BYTE*)&nuovo, sizeof(nuovo));
+                        RegSetValueExW(hk, L"SystemUsesLightTheme", 0, REG_DWORD, (const BYTE*)&nuovo, sizeof(nuovo));
+                        RegCloseKey(hk);
+                    }
+                    SendMessageTimeoutW(HWND_BROADCAST, WM_SETTINGCHANGE, 0, (LPARAM)L"ImmersiveColorSet", SMTO_ABORTIFHUNG, 500, nullptr);
+                } else if (r.azione == L"*act:snip") {
+                    ShellExecuteW(nullptr, L"open", L"ms-screenclip:", nullptr, nullptr, SW_SHOWNORMAL);
+                } else if (r.azione == L"*act:taskmgr") {
+                    ShellExecuteW(nullptr, L"open", L"taskmgr.exe", nullptr, nullptr, SW_SHOWNORMAL);
+                } else if (r.azione == L"*act:mute") {
+                    INPUT in[2]{};
+                    in[0].type = INPUT_KEYBOARD; in[0].ki.wVk = VK_VOLUME_MUTE;
+                    in[1].type = INPUT_KEYBOARD; in[1].ki.wVk = VK_VOLUME_MUTE; in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                    SendInput(2, in, sizeof(INPUT));
+                }
                 break;
             case T_WEB: {
                 // tutta la stringa in UTF-8 in una volta, poi in percentuale: prima un carattere alla volta, e le emoji o
@@ -564,9 +1105,19 @@ private:
             const D2D1_COLOR_F c = s ? D2D1::ColorF(1, 1, 1, 1) : ink, c2 = s ? D2D1::ColorF(1, 1, 1, 0.75f) : tenue;
             // icona
             const float ix = riga.left + 12 * d, iy = y0 + (ALTO_RIGA - 30) * d / 2, il = 30 * d;
-            auto it = icone.find(r.icona);
-            if (!r.icona.empty() && it != icone.end() && it->second) v.rt->DrawBitmap(it->second, {ix, iy, ix + il, iy + il});
-            else simbolo(r.tipo, ix + il / 2, iy + il / 2, c);
+            if (r.icona.size() == 11 && r.icona.rfind(L"*col:", 0) == 0) {
+                const unsigned rgb = (unsigned)wcstoul(r.icona.c_str() + 5, nullptr, 16);
+                const float cr = ((rgb >> 16) & 255) / 255.0f, cg = ((rgb >> 8) & 255) / 255.0f, cb = (rgb & 255) / 255.0f;
+                const float cx = ix + il / 2, cy = iy + il / 2;
+                v.pen->SetColor(D2D1::ColorF(cr, cg, cb, 1.0f));
+                v.rt->FillEllipse({{cx, cy}, 11 * d, 11 * d}, v.pen);
+                v.pen->SetColor(s ? D2D1::ColorF(1, 1, 1, 0.85f) : D2D1::ColorF(ink.r, ink.g, ink.b, 0.35f));
+                v.rt->DrawEllipse({{cx, cy}, 11 * d, 11 * d}, v.pen, 1.5f * d);
+            } else {
+                auto it = icone.find(r.icona);
+                if (!r.icona.empty() && it != icone.end() && it->second) v.rt->DrawBitmap(it->second, {ix, iy, ix + il, iy + il});
+                else simbolo(r.tipo, ix + il / 2, iy + il / 2, c);
+            }
             const float tx = ix + il + 12 * d;
             v.testo(r.titolo, fTitolo, {tx, y0 + 5 * d, riga.right - 12 * d, y0 + 26 * d}, c);
             v.testo(r.sotto, fSotto, {tx, y0 + 25 * d, riga.right - 12 * d, y0 + 43 * d}, c2);
@@ -583,6 +1134,15 @@ private:
                 v.rt->DrawLine({cx - 5 * d, cy - 5 * d}, {cx + 5 * d, cy - 5 * d}, v.pen, 1.6f * d);
                 for (int i = 0; i < 2; i++) for (int j = 0; j < 3; j++) v.rt->FillEllipse({{cx - 4.5f * d + j * 4.5f * d, cy + 1 * d + i * 5 * d}, 1.2f * d, 1.2f * d}, v.pen);
                 break;
+            case T_AZIONE:
+                v.pen->SetColor({c.r, c.g, c.b, c.a * 0.14f});
+                v.rt->FillRoundedRectangle({{cx - 11 * d, cy - 11 * d, cx + 11 * d, cy + 11 * d}, 6 * d, 6 * d}, v.pen);
+                v.pen->SetColor({c.r, c.g, c.b, c.a * 0.85f});
+                v.rt->DrawRoundedRectangle({{cx - 11 * d, cy - 11 * d, cx + 11 * d, cy + 11 * d}, 6 * d, 6 * d}, v.pen, 1.5f * d);
+                v.rt->DrawLine({cx + 1.5f * d, cy - 6.5f * d}, {cx - 4.0f * d, cy + 0.5f * d}, v.pen, 1.8f * d);
+                v.rt->DrawLine({cx - 4.0f * d, cy + 0.5f * d}, {cx + 0.8f * d, cy + 0.5f * d}, v.pen, 1.8f * d);
+                v.rt->DrawLine({cx + 0.8f * d, cy + 0.5f * d}, {cx - 1.5f * d, cy + 6.5f * d}, v.pen, 1.8f * d);
+                break;
             case T_WEB:
                 v.rt->DrawEllipse({{cx, cy}, 10 * d, 10 * d}, v.pen, 1.6f * d);
                 v.rt->DrawEllipse({{cx, cy}, 4.5f * d, 10 * d}, v.pen, 1.4f * d);
@@ -598,6 +1158,23 @@ private:
             default:   // file o app senza icona
                 v.rt->DrawRoundedRectangle({{cx - 8 * d, cy - 11 * d, cx + 8 * d, cy + 11 * d}, 2.5f * d, 2.5f * d}, v.pen, 1.6f * d);
         }
+    }
+
+    static const std::vector<Risultato>& azioni() {
+        static const wchar_t* const t[][4] = {
+                {L"Blocca schermo", L"Lock screen", L"lock lock screen blocca blocca schermo", L"*act:lock"},
+                {L"Sospendi", L"Sleep", L"sleep sospendi standby", L"*act:sleep"},
+                {L"Spegni schermo", L"Sleep display", L"display off screen off sleep display spegni schermo", L"*act:display"},
+                {L"Svuota cestino", L"Empty Recycle Bin", L"empty trash empty recycle bin svuota cestino", L"*act:trash"},
+                {L"Cambia tema scuro / chiaro", L"Toggle Dark / Light mode", L"dark mode light mode toggle theme tema scuro tema chiaro", L"*act:theme"},
+                {L"Cattura schermo", L"Take screenshot", L"screenshot snip cattura schermo", L"*act:snip"},
+                {L"Gestione attivit\u00E0", L"Task Manager", L"task manager gestione attivit\u00E0", L"*act:taskmgr"},
+                {L"Muto / Riattiva audio", L"Mute / Unmute audio", L"mute unmute muto", L"*act:mute"},
+        };
+        static std::vector<Risultato> p[testi::N_LINGUE];
+        std::vector<Risultato>& v = p[testi::attuale()];
+        if (v.empty()) for (const auto& x : t) v.push_back({T_AZIONE, testi::t(x[0], x[1]), x[2], x[3], L""});
+        return v;
     }
 
     // pagine delle impostazioni: nome in italiano e in inglese, parole chiave nelle due lingue (si trova in tutte e due)
