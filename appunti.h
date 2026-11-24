@@ -1,5 +1,6 @@
 // Cronologia degli appunti: memoria condivisa fra il centro di controllo e la finestra di vetro (Win+V).
-// Solo in memoria, mai su disco. Rispetta i segni di riservatezza dei gestori di password.
+// Le voci non fissate restano solo in memoria; le fissate si salvano in %LOCALAPPDATA%\FluidWin\appunti_fissati.bin.
+// Rispetta i segni di riservatezza dei gestori di password.
 #pragma once
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -9,10 +10,12 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <shlobj.h>
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <algorithm>
+#include <iterator>
 #include <cwctype>
 #include <cstdint>
 #include <cstring>
@@ -49,18 +52,28 @@ public:
         if (finestra && finestra != h) RemoveClipboardFormatListener(finestra);
         finestra = h;
         if (finestra) AddClipboardFormatListener(finestra);
+        if (!fissatiCaricati) {
+            fissatiCaricati = true;
+            caricaFissati();
+        }
     }
 
     void ferma() {
         if (finestra) RemoveClipboardFormatListener(finestra);
         finestra = nullptr;
-        svuota();
+        if (!voci.empty()) {
+            voci.clear();
+            versione++;
+        }
+        fissatiCaricati = false;
     }
 
     void svuota() {
-        if (voci.empty()) return;
-        voci.clear();
-        versione++;
+        if (!voci.empty()) {
+            voci.clear();
+            versione++;
+        }
+        salvaFissati();
     }
 
     void svuotaNonFissate() {
@@ -70,9 +83,12 @@ public:
     }
 
     void togli(UINT id) {
-        const size_t prima = voci.size();
-        voci.erase(std::remove_if(voci.begin(), voci.end(), [id](const Voce& v) { return v.id == id; }), voci.end());
-        if (voci.size() != prima) versione++;
+        auto it = std::find_if(voci.begin(), voci.end(), [id](const Voce& v) { return v.id == id; });
+        if (it == voci.end()) return;
+        const bool eraFissata = it->fissata;
+        voci.erase(it);
+        versione++;
+        if (eraFissata) salvaFissati();
     }
 
     void fissa(UINT id) {
@@ -84,6 +100,7 @@ public:
         inserisciNelGruppo(std::move(v));
         pulisciLimite();
         versione++;
+        salvaFissati();
     }
 
     // WM_CLIPBOARDUPDATE
@@ -162,6 +179,7 @@ public:
         inserisciNelGruppo(std::move(v));
         pulisciLimite();
         versione++;
+        if (eraFissata) salvaFissati();
         return true;
     }
 
@@ -187,6 +205,7 @@ public:
             haSequenzaInterna = true;
             if (spostaInCima) {
                 Voce v = std::move(*it);
+                const bool eraFissata = v.fissata;
                 voci.erase(it);
                 FILETIME ft{};
                 GetSystemTimeAsFileTime(&ft);
@@ -194,6 +213,7 @@ public:
                 v.tick = GetTickCount64();
                 inserisciNelGruppo(std::move(v));
                 versione++;
+                if (eraFissata) salvaFissati();
             }
         }
         return ok;
@@ -223,10 +243,197 @@ public:
     }
 
 private:
+    static constexpr uint32_t VERSIONE_FISSATI = 1;
+    static constexpr uint32_t MAX_FISSATI = 50;
+    static constexpr uint32_t MAX_SORG_BYTES = 4096;
+    static constexpr uint32_t MAX_TESTO_BYTES = 512 * 1024;
+    static constexpr uint32_t MAX_DIB_BYTES = 16 * 1024 * 1024;
+    static constexpr uint32_t MAX_ANT_BYTES = 4 * 1024 * 1024;
+
     HWND finestra = nullptr;
     UINT ultimoId = 0;
     DWORD ultimaSequenzaInterna = 0;
     bool haSequenzaInterna = false;
+    bool fissatiCaricati = false;
+
+    static std::wstring percorsoFissati(bool creaDir = false) {
+        wchar_t base[MAX_PATH] = L"";
+        if (FAILED(SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, 0, base)) || !base[0]) return {};
+        const std::wstring dir = std::wstring(base) + L"\\FluidWin";
+        if (creaDir) CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\appunti_fissati.bin";
+    }
+
+    static bool scriviTutto(HANDLE h, const void* dati, size_t n) {
+        const BYTE* p = (const BYTE*)dati;
+        while (n > 0) {
+            const DWORD chunk = (DWORD)std::min<size_t>(n, 0x40000000u);
+            DWORD scritti = 0;
+            if (!WriteFile(h, p, chunk, &scritti, nullptr) || scritti == 0) return false;
+            p += scritti;
+            n -= scritti;
+        }
+        return true;
+    }
+
+    static bool leggiTutto(HANDLE h, void* dati, size_t n) {
+        BYTE* p = (BYTE*)dati;
+        while (n > 0) {
+            const DWORD chunk = (DWORD)std::min<size_t>(n, 0x40000000u);
+            DWORD letti = 0;
+            if (!ReadFile(h, p, chunk, &letti, nullptr) || letti == 0) return false;
+            p += letti;
+            n -= letti;
+        }
+        return true;
+    }
+
+    template <typename T>
+    static bool scriviVal(HANDLE h, const T& val) {
+        return scriviTutto(h, &val, sizeof(T));
+    }
+
+    template <typename T>
+    static bool leggiVal(HANDLE h, T& val) {
+        return leggiTutto(h, &val, sizeof(T));
+    }
+
+    void salvaFissati() const {
+        std::vector<const Voce*> fissate;
+        for (const Voce& v : voci) {
+            if (v.fissata) fissate.push_back(&v);
+        }
+        if (fissate.empty()) {
+            const std::wstring path = percorsoFissati(false);
+            if (!path.empty()) DeleteFileW(path.c_str());
+            return;
+        }
+        const std::wstring path = percorsoFissati(true);
+        if (path.empty()) return;
+        const std::wstring tmp = path + L".tmp";
+        HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+
+        static constexpr char MAGIA[4] = {'F', 'W', 'C', 'B'};
+        const uint32_t ver = VERSIONE_FISSATI;
+        const uint32_t count = (uint32_t)std::min<size_t>(fissate.size(), MAX_FISSATI);
+        bool ok = scriviTutto(h, MAGIA, 4) && scriviVal(h, ver) && scriviVal(h, count);
+
+        for (uint32_t i = 0; i < count && ok; i++) {
+            const Voce& v = *fissate[i];
+            const uint8_t img = v.immagine ? 1u : 0u;
+            const uint64_t quando = (uint64_t)v.quando;
+            const uint32_t sorgLen = (uint32_t)std::min<size_t>(v.sorgente.size() * sizeof(wchar_t), MAX_SORG_BYTES);
+            ok = scriviVal(h, img) && scriviVal(h, quando) && scriviVal(h, sorgLen);
+            if (ok && sorgLen > 0) ok = scriviTutto(h, v.sorgente.data(), sorgLen);
+
+            if (!ok) break;
+            if (!v.immagine) {
+                const uint32_t testoLen = (uint32_t)std::min<size_t>(v.testo.size() * sizeof(wchar_t), MAX_TESTO_BYTES);
+                ok = scriviVal(h, testoLen);
+                if (ok && testoLen > 0) ok = scriviTutto(h, v.testo.data(), testoLen);
+            } else {
+                const int32_t w = (int32_t)v.w;
+                const int32_t hImg = (int32_t)v.h;
+                const int32_t aw = (int32_t)v.aw;
+                const int32_t ah = (int32_t)v.ah;
+                const uint32_t dibLen = (uint32_t)v.dib.size();
+                const uint32_t antLen = (uint32_t)(v.anteprima.size() * sizeof(UINT));
+                ok = scriviVal(h, w) && scriviVal(h, hImg) && scriviVal(h, aw) && scriviVal(h, ah)
+                  && scriviVal(h, dibLen);
+                if (ok && dibLen > 0) ok = scriviTutto(h, v.dib.data(), dibLen);
+                if (ok) ok = scriviVal(h, antLen);
+                if (ok && antLen > 0) ok = scriviTutto(h, v.anteprima.data(), antLen);
+            }
+        }
+
+        CloseHandle(h);
+        if (ok) {
+            if (!MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) DeleteFileW(tmp.c_str());
+        } else {
+            DeleteFileW(tmp.c_str());
+        }
+    }
+
+    void caricaFissati() {
+        const std::wstring path = percorsoFissati(false);
+        if (path.empty()) return;
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h == INVALID_HANDLE_VALUE) return;
+
+        char magic[4]{};
+        uint32_t ver = 0, count = 0;
+        bool ok = leggiTutto(h, magic, 4) && leggiVal(h, ver) && leggiVal(h, count);
+        if (!ok || memcmp(magic, "FWCB", 4) != 0 || ver != VERSIONE_FISSATI || count > MAX_FISSATI) {
+            CloseHandle(h);
+            return;
+        }
+
+        FILETIME ftOra{};
+        GetSystemTimeAsFileTime(&ftOra);
+        const INT64 oraFt = (INT64)(((uint64_t)ftOra.dwHighDateTime << 32) | (uint64_t)ftOra.dwLowDateTime);
+        const ULONGLONG oraTick = GetTickCount64();
+
+        std::vector<Voce> caricate;
+        caricate.reserve(count);
+
+        for (uint32_t i = 0; i < count; i++) {
+            uint8_t img = 0;
+            uint64_t quando = 0;
+            uint32_t sorgLen = 0;
+            if (!leggiVal(h, img) || !leggiVal(h, quando) || !leggiVal(h, sorgLen)) { ok = false; break; }
+            if (img > 1u || sorgLen > MAX_SORG_BYTES || (sorgLen % sizeof(wchar_t)) != 0) { ok = false; break; }
+
+            Voce v;
+            v.immagine = (img != 0);
+            v.fissata = true;
+            v.quando = (INT64)quando;
+            const ULONGLONG diffMs = (oraFt > v.quando && v.quando > 0) ? (ULONGLONG)((oraFt - v.quando) / 10000LL) : 0ULL;
+            v.tick = (oraTick > diffMs) ? (oraTick - diffMs) : 0ULL;
+
+            if (sorgLen > 0) {
+                v.sorgente.resize(sorgLen / sizeof(wchar_t));
+                if (!leggiTutto(h, &v.sorgente[0], sorgLen)) { ok = false; break; }
+            }
+
+            if (!v.immagine) {
+                uint32_t testoLen = 0;
+                if (!leggiVal(h, testoLen) || testoLen > MAX_TESTO_BYTES || (testoLen % sizeof(wchar_t)) != 0) { ok = false; break; }
+                if (testoLen > 0) {
+                    v.testo.resize(testoLen / sizeof(wchar_t));
+                    if (!leggiTutto(h, &v.testo[0], testoLen)) { ok = false; break; }
+                }
+                v.anteprimaTesto = normalizzaAnteprima(v.testo);
+            } else {
+                int32_t w = 0, hImg = 0, aw = 0, ah = 0;
+                uint32_t dibLen = 0, antLen = 0;
+                if (!leggiVal(h, w) || !leggiVal(h, hImg) || !leggiVal(h, aw) || !leggiVal(h, ah) || !leggiVal(h, dibLen)) { ok = false; break; }
+                if (w <= 0 || w > 32768 || hImg <= 0 || hImg > 32768 || aw <= 0 || aw > 1024 || ah <= 0 || ah > 1024) { ok = false; break; }
+                if (dibLen <= sizeof(BITMAPINFOHEADER) || dibLen > MAX_DIB_BYTES) { ok = false; break; }
+                v.dib.resize(dibLen);
+                if (!leggiTutto(h, v.dib.data(), dibLen)) { ok = false; break; }
+                if (inizioPixelDib(v.dib.data(), v.dib.size()) == 0) { ok = false; break; }
+
+                if (!leggiVal(h, antLen) || antLen > MAX_ANT_BYTES || (antLen % sizeof(UINT)) != 0) { ok = false; break; }
+                if ((uint64_t)aw * (uint64_t)ah * sizeof(UINT) != (uint64_t)antLen) { ok = false; break; }
+                v.anteprima.resize(antLen / sizeof(UINT));
+                if (antLen > 0 && !leggiTutto(h, v.anteprima.data(), antLen)) { ok = false; break; }
+                v.w = (int)w;
+                v.h = (int)hImg;
+                v.aw = (int)aw;
+                v.ah = (int)ah;
+            }
+
+            v.id = ++ultimoId;
+            caricate.push_back(std::move(v));
+        }
+
+        CloseHandle(h);
+        if (!ok || caricate.empty()) return;
+
+        voci.insert(voci.begin(), std::make_move_iterator(caricate.begin()), std::make_move_iterator(caricate.end()));
+        versione++;
+    }
 
     bool apri() {
         for (int i = 0; i < 5; i++) {
@@ -890,16 +1097,22 @@ private:
         SendInput(4, in, sizeof(INPUT));
     }
 
-    static std::wstring tempoRelativo(ULONGLONG tick) {
-        const ULONGLONG ora = GetTickCount64();
-        const ULONGLONG sec = (ora >= tick) ? ((ora - tick) / 1000ULL) : 0ULL;
+    static std::wstring tempoRelativo(INT64 quando) {
+        FILETIME ft{};
+        GetSystemTimeAsFileTime(&ft);
+        const INT64 ora = (INT64)(((uint64_t)ft.dwHighDateTime << 32) | (uint64_t)ft.dwLowDateTime);
+        const ULONGLONG sec = (ora > quando && quando > 0) ? (ULONGLONG)((ora - quando) / 10000000LL) : 0ULL;
         if (sec < 60) return testi::t(L"Adesso", L"Just now");
         wchar_t buf[32]{};
         if (sec < 3600) {
             swprintf(buf, 32, testi::t(L"%llu min fa", L"%llum ago"), (unsigned long long)(sec / 60));
             return buf;
         }
-        swprintf(buf, 32, testi::t(L"%llu h fa", L"%lluh ago"), (unsigned long long)(sec / 3600));
+        if (sec < 86400) {
+            swprintf(buf, 32, testi::t(L"%llu h fa", L"%lluh ago"), (unsigned long long)(sec / 3600));
+            return buf;
+        }
+        swprintf(buf, 32, testi::t(L"%llu g fa", L"%llud ago"), (unsigned long long)(sec / 86400));
         return buf;
     }
 
@@ -1075,7 +1288,7 @@ private:
 
                     std::wstring meta;
                     if (!vc->sorgente.empty()) meta = vc->sorgente + L" · ";
-                    meta += tempoRelativo(vc->tick);
+                    meta += tempoRelativo(vc->quando);
 
                     if (vc->immagine) {
                         const float maxW = 96.0f * d, maxH = 84.0f * d;
