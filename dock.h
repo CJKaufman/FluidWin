@@ -3846,11 +3846,11 @@ private:
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
         dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
+        const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.20f, 0.76f, 1.0f, alfa)
+            : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
+            : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
+            : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
         if (bat >= 0) {
-            const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.20f, 0.76f, 1.0f, alfa)
-                : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
-                : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
-                : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
             if (bat >= 100) {
                 pennello->SetColor(colRing);
                 dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
@@ -3874,61 +3874,48 @@ private:
                 if (sArc) sArc->Release();
                 if (gArc) gArc->Release();
             }
-            const float rg = d * 0.17f;
-            const float gSw = std::max(1.8f, d * 0.068f);
-            const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.0f, 0.74f, 1.0f, 0.96f * alfa)
-                                            : D2D1::ColorF(0.0f, 0.54f, 0.92f, 0.96f * alfa);
-            const float aStart = -0.25f * (float)M_PI;
-            ID2D1PathGeometry* gG = nullptr;
-            ID2D1GeometrySink* sG = nullptr;
-            if (SUCCEEDED(f2d->CreatePathGeometry(&gG)) && SUCCEEDED(gG->Open(&sG))) {
-                sG->BeginFigure({cx + rg * std::cos(aStart), cy + rg * std::sin(aStart)}, D2D1_FIGURE_BEGIN_HOLLOW);
-                sG->AddArc(D2D1::ArcSegment({cx + rg, cy}, {rg, rg}, 0,
-                                            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                sG->AddLine({cx + rg * 0.05f, cy});
-                sG->EndFigure(D2D1_FIGURE_END_OPEN);
-                if (SUCCEEDED(sG->Close())) {
-                    pennello->SetColor(colG);
-                    dc->DrawGeometry(gG, pennello, gSw, tratto);
-                }
+        }
+        auto disegnaLogoG = [&](float gcx, float gcy, float R, D2D1_COLOR_F col) {
+            const float rIn = R * 0.55f;
+            const float t = R - rIn;
+            pennello->SetColor(col);
+            ID2D1PathGeometry* gArcG = nullptr;
+            ID2D1GeometrySink* sArcG = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArcG)) && SUCCEEDED(gArcG->Open(&sArcG))) {
+                sArcG->BeginFigure({gcx, gcy - R}, D2D1_FIGURE_BEGIN_FILLED);
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy + R}, {R, R}, 0,
+                                               D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->AddLine({gcx, gcy + rIn});
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy - rIn}, {rIn, rIn}, 0,
+                                               D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->EndFigure(D2D1_FIGURE_END_CLOSED);
+                if (SUCCEEDED(sArcG->Close())) dc->FillGeometry(gArcG, pennello);
             }
-            if (sG) sG->Release();
-            if (gG) gG->Release();
+            if (sArcG) sArcG->Release();
+            if (gArcG) gArcG->Release();
+            const float rx = gcx + R * 0.92f;
+            const float ty = gcy - t * 0.35f;
+            const float by = gcy + R * 0.78f;
+            dc->FillRectangle({gcx, ty, rx, ty + t}, pennello);
+            dc->FillRectangle({rx - t, ty, rx, by}, pennello);
+        };
 
-            if (d > 14.0f) {
-                wchar_t b[12];
-                swprintf(b, 12, L"%d%%", bat);
-                const float rb = std::max(6.2f * dpi, d * 0.135f);
-                const float lb = std::max(rb * 2.0f, larghezzaTesto(b, fmtNome) + 7.0f * dpi);
-                const float bx = r.right - lb + d * 0.04f, by = r.bottom - 2.0f * rb + d * 0.04f;
-                pennello->SetColor({colRing.r, colRing.g, colRing.b, 0.95f * alfa});
-                dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2.0f * rb}, rb, rb}, pennello);
-                pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
-                scrivi(b, fmtNome, {bx, by, bx + lb, by + 2.0f * rb});
-            }
-        } else {
-            const float rg = d * 0.17f;
-            const float gSw = std::max(1.8f, d * 0.068f);
-            const float inkA = logiStato.ghubAttivo ? 0.92f : 0.45f;
-            const D2D1_COLOR_F colG = logiStato.ghubAttivo
-                ? (scuro ? D2D1::ColorF(0.0f, 0.74f, 1.0f, inkA * alfa) : D2D1::ColorF(0.0f, 0.54f, 0.92f, inkA * alfa))
-                : (scuro ? D2D1::ColorF(1, 1, 1, inkA * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, inkA * alfa));
-            const float aStart = -0.25f * (float)M_PI;
-            ID2D1PathGeometry* gG = nullptr;
-            ID2D1GeometrySink* sG = nullptr;
-            if (SUCCEEDED(f2d->CreatePathGeometry(&gG)) && SUCCEEDED(gG->Open(&sG))) {
-                sG->BeginFigure({cx + rg * std::cos(aStart), cy + rg * std::sin(aStart)}, D2D1_FIGURE_BEGIN_HOLLOW);
-                sG->AddArc(D2D1::ArcSegment({cx + rg, cy}, {rg, rg}, 0,
-                                            D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                sG->AddLine({cx + rg * 0.05f, cy});
-                sG->EndFigure(D2D1_FIGURE_END_OPEN);
-                if (SUCCEEDED(sG->Close())) {
-                    pennello->SetColor(colG);
-                    dc->DrawGeometry(gG, pennello, gSw, tratto);
-                }
-            }
-            if (sG) sG->Release();
-            if (gG) gG->Release();
+        const float gR = d * 0.20f;
+        const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
+        const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
+                                        : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa);
+        disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
+
+        if (bat >= 0 && d > 14.0f) {
+            wchar_t b[12];
+            swprintf(b, 12, L"%d%%", bat);
+            const float rb = std::max(6.2f * dpi, d * 0.135f);
+            const float lb = std::max(rb * 2.0f, larghezzaTesto(b, fmtNome) + 7.0f * dpi);
+            const float bx = r.right - lb + d * 0.04f, by = r.bottom - 2.0f * rb + d * 0.04f;
+            pennello->SetColor({colRing.r, colRing.g, colRing.b, 0.95f * alfa});
+            dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2.0f * rb}, rb, rb}, pennello);
+            pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
+            scrivi(b, fmtNome, {bx, by, bx + lb, by + 2.0f * rb});
         }
     }
 
