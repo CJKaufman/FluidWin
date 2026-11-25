@@ -8,6 +8,8 @@
 #endif
 #include <windows.h>
 #include <ole2.h>
+#include <shellapi.h>
+#include <shobjidl.h>
 #include <uiautomation.h>
 #include <tlhelp32.h>
 #include <winhttp.h>
@@ -2110,6 +2112,237 @@ inline HWND trovaEAttivaFinestraAgente(const Agente& a) {
         }
     }
     return bestHwnd;
+}
+
+// ---- avvio nuove chat AI ----
+
+struct Avviabile {
+    std::wstring id, nome, exe, args;
+    bool usaTerminale = true;
+};
+
+inline std::wstring trovaEseguibile(const wchar_t* cmd, const std::vector<std::wstring>& extraPaths) {
+    for (const auto& p : extraPaths) {
+        if (p.empty()) continue;
+        const DWORD attr = GetFileAttributesW(p.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return p;
+    }
+    if (cmd && *cmd) {
+        wchar_t buf[MAX_PATH] = L"";
+        const DWORD n = SearchPathW(nullptr, cmd, nullptr, MAX_PATH, buf, nullptr);
+        if (n > 0 && n < MAX_PATH) {
+            const DWORD attr = GetFileAttributesW(buf);
+            if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                return std::wstring(buf, n);
+            }
+        }
+    }
+    return L"";
+}
+
+inline std::vector<Avviabile> elencoAvviabili() {
+    std::vector<Avviabile> out;
+    const std::wstring localApp = dettagli::envDir(L"LOCALAPPDATA");
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    const std::wstring appData = dettagli::envDir(L"APPDATA");
+
+    auto cerca = [](std::initializer_list<const wchar_t*> cmds, const std::vector<std::wstring>& extra) -> std::wstring {
+        std::wstring p = trovaEseguibile(nullptr, extra);
+        if (!p.empty()) return p;
+        for (const wchar_t* c : cmds) {
+            p = trovaEseguibile(c, {});
+            if (!p.empty()) return p;
+        }
+        return L"";
+    };
+
+    // 1. Antigravity CLI
+    {
+        std::vector<std::wstring> extra;
+        if (!localApp.empty()) extra.push_back(localApp + L"\\agy\\bin\\agy.exe");
+        if (std::wstring p = cerca({L"agy.exe", L"agy.cmd"}, extra); !p.empty()) {
+            out.push_back({L"antigravity", L"Antigravity CLI", std::move(p), L"", true});
+        }
+    }
+    // 2. Claude Code
+    {
+        std::vector<std::wstring> extra;
+        if (!profile.empty()) extra.push_back(profile + L"\\.local\\bin\\claude.exe");
+        if (!appData.empty()) extra.push_back(appData + L"\\npm\\claude.cmd");
+        if (std::wstring p = cerca({L"claude.exe", L"claude.cmd"}, extra); !p.empty()) {
+            out.push_back({L"claude", L"Claude Code", std::move(p), L"", true});
+        }
+    }
+    // 3. Codex
+    {
+        std::vector<std::wstring> extra;
+        if (!appData.empty()) extra.push_back(appData + L"\\npm\\codex.cmd");
+        if (std::wstring p = cerca({L"codex.exe", L"codex.cmd"}, extra); !p.empty()) {
+            out.push_back({L"codex", L"Codex", std::move(p), L"", true});
+        }
+    }
+    // 4. Gemini CLI
+    {
+        std::vector<std::wstring> extra;
+        if (!appData.empty()) extra.push_back(appData + L"\\npm\\gemini.cmd");
+        if (std::wstring p = cerca({L"gemini.exe", L"gemini.cmd"}, extra); !p.empty()) {
+            out.push_back({L"gemini", L"Gemini CLI", std::move(p), L"", true});
+        }
+    }
+    // 5. Ollama (interactive PowerShell tab showing available models, stays open for `ollama run ...`)
+    {
+        std::vector<std::wstring> extra;
+        if (!localApp.empty()) extra.push_back(localApp + L"\\Programs\\Ollama\\ollama.exe");
+        if (const std::wstring ollama = cerca({L"ollama.exe"}, extra); !ollama.empty()) {
+            std::wstring ps = trovaEseguibile(L"powershell.exe", {});
+            if (ps.empty()) ps = L"powershell.exe";
+            std::wstring qOllama = ollama;
+            for (size_t pos = 0; (pos = qOllama.find(L'\'', pos)) != std::wstring::npos; pos += 2) {
+                qOllama.insert(pos, 1, L'\'');
+            }
+            out.push_back({L"ollama", L"Ollama", std::move(ps),
+                           L"-NoLogo -NoExit -Command \"& '" + qOllama + L"' list\"", true});
+        }
+    }
+    // 6. LM Studio
+    {
+        std::vector<std::wstring> extra;
+        if (!localApp.empty()) {
+            extra.push_back(localApp + L"\\Programs\\LM Studio\\LM Studio.exe");
+            extra.push_back(localApp + L"\\LM-Studio\\LM Studio.exe");
+        }
+        if (std::wstring p = trovaEseguibile(nullptr, extra); !p.empty()) {
+            out.push_back({L"lmstudio", L"LM Studio", std::move(p), L"", false});
+        }
+    }
+    return out;
+}
+
+inline const Avviabile* primoTerminale(const std::vector<Avviabile>& lista) {
+    for (const auto& av : lista) {
+        if (av.usaTerminale) return &av;
+    }
+    return nullptr;
+}
+
+inline std::wstring cartellaPredefinita(const Riepilogo& r) {
+    for (const auto& a : r.agenti) {
+        if (a.cwd.empty()) continue;
+        const DWORD attr = GetFileAttributesW(a.cwd.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return a.cwd;
+    }
+    const std::wstring profile = dettagli::envDir(L"USERPROFILE");
+    if (!profile.empty()) {
+        const DWORD attr = GetFileAttributesW(profile.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return profile;
+    }
+    return L"";
+}
+
+inline bool avviaNuovaChat(const Avviabile& av, const std::wstring& dir = L"") {
+    if (av.exe.empty()) return false;
+
+    std::wstring dirOk;
+    if (!dir.empty()) {
+        const DWORD attr = GetFileAttributesW(dir.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) dirOk = dir;
+    }
+
+    if (av.usaTerminale) {
+        std::vector<std::wstring> wtExtra;
+        const std::wstring localApp = dettagli::envDir(L"LOCALAPPDATA");
+        if (!localApp.empty()) wtExtra.push_back(localApp + L"\\Microsoft\\WindowsApps\\wt.exe");
+        const std::wstring wt = trovaEseguibile(L"wt.exe", wtExtra);
+        if (!wt.empty()) {
+            auto quotaCli = [](const std::wstring& s) -> std::wstring {
+                std::wstring out = L"\"";
+                size_t bs = 0;
+                for (wchar_t c : s) {
+                    if (c == L'\\') {
+                        bs++;
+                    } else if (c == L'"') {
+                        out.append(bs * 2 + 1, L'\\');
+                        out.push_back(L'"');
+                        bs = 0;
+                    } else {
+                        out.append(bs, L'\\');
+                        out.push_back(c);
+                        bs = 0;
+                    }
+                }
+                out.append(bs * 2, L'\\');
+                out.push_back(L'"');
+                return out;
+            };
+            auto endsWithI = [](const std::wstring& s, const wchar_t* suf) {
+                const size_t sl = wcslen(suf);
+                return s.size() >= sl && dettagli::minuscolo(s.substr(s.size() - sl)) == suf;
+            };
+            const bool isBatch = endsWithI(av.exe, L".cmd") || endsWithI(av.exe, L".bat");
+
+            std::wstring wtArgs = L"-w 0 new-tab --title " + quotaCli(av.nome);
+            if (!dirOk.empty()) wtArgs += L" -d " + quotaCli(dirOk);
+            if (isBatch) wtArgs += L" cmd.exe /k " + quotaCli(av.exe);
+            else wtArgs += L" " + quotaCli(av.exe);
+            if (!av.args.empty()) wtArgs += L" " + av.args;
+
+            return (INT_PTR)ShellExecuteW(nullptr, L"open", wt.c_str(), wtArgs.c_str(),
+                                          dirOk.empty() ? nullptr : dirOk.c_str(), SW_SHOWNORMAL) > 32;
+        }
+    }
+
+    return (INT_PTR)ShellExecuteW(nullptr, L"open", av.exe.c_str(),
+                                  av.args.empty() ? nullptr : av.args.c_str(),
+                                  dirOk.empty() ? nullptr : dirOk.c_str(), SW_SHOWNORMAL) > 32;
+}
+
+inline std::wstring scegliCartella(HWND owner, const std::wstring& iniziale = L"") {
+    bool didCoInit = false;
+    IFileOpenDialog* dlg = nullptr;
+    HRESULT hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IFileOpenDialog, (void**)&dlg);
+    if (hr == CO_E_NOTINITIALIZED) {
+        if (SUCCEEDED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) {
+            didCoInit = true;
+            hr = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_IFileOpenDialog, (void**)&dlg);
+        }
+    }
+    if (FAILED(hr) || !dlg) {
+        if (dlg) dlg->Release();
+        if (didCoInit) CoUninitialize();
+        return L"";
+    }
+
+    DWORD opts = 0;
+    if (SUCCEEDED(dlg->GetOptions(&opts))) {
+        dlg->SetOptions(opts | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST);
+    }
+    if (!iniziale.empty()) {
+        IShellItem* initItem = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(iniziale.c_str(), nullptr,
+                                                 IID_IShellItem, (void**)&initItem)) && initItem) {
+            dlg->SetFolder(initItem);
+            initItem->Release();
+        }
+    }
+
+    std::wstring result;
+    if (SUCCEEDED(dlg->Show(owner))) {
+        IShellItem* item = nullptr;
+        if (SUCCEEDED(dlg->GetResult(&item)) && item) {
+            PWSTR path = nullptr;
+            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) && path) {
+                result = path;
+                CoTaskMemFree(path);
+            }
+            item->Release();
+        }
+    }
+
+    dlg->Release();
+    if (didCoInit) CoUninitialize();
+    return result;
 }
 
 }  // namespace ai
