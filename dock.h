@@ -473,6 +473,7 @@ public:
         leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
         caricaNascoste();       // (le app nascoste dal dock, PR #20)
         caricaPilePers();
+        aiAvvisi = leggiAIAvvisi();
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -881,6 +882,22 @@ public:
         appDaAggiornare = true;
         if (attivo) aggiornaApp();
         dirty = true;
+    }
+    static bool leggiAIAvvisi() {
+        DWORD v = 1, n = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
+                         RRF_RT_REG_DWORD, nullptr, &v, &n) == ERROR_SUCCESS) {
+            return v != 0;
+        }
+        return true;
+    }
+    bool aiAvvisi = leggiAIAvvisi();
+    void impostaAIAvvisi(bool si) {
+        if (si == aiAvvisi) return;
+        aiAvvisi = si;
+        const DWORD v = si ? 1 : 0;
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
+                        REG_DWORD, &v, sizeof(v));
     }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
     // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
@@ -4698,6 +4715,10 @@ private:
             hc.spuntata = ai::hookClaudeInstallati();
             vv.push_back(hc);
             vv.push_back(menu::separatore());
+            auto av = menu::voce(testi::t(L"Avvisi nel notch", L"Notch alerts"), 6);
+            av.spuntata = aiAvvisi;
+            vv.push_back(av);
+            vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 5));
             SetForegroundWindow(icone);
             const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
@@ -4715,6 +4736,7 @@ private:
                     ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 }
             }
+            else if (s == 6) impostaAIAvvisi(!aiAvvisi);
             return;
         }
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
