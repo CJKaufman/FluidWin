@@ -424,7 +424,7 @@ public:
 
 private:
     static constexpr float LARGO = 780, ALTO = 500, BARRA = 240;
-    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, S_CURSORE, SEZIONI };
+    enum { S_GENERALE, S_DOCK, S_WIDGET, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, S_CURSORE, SEZIONI };
     // nome e spiegazione in italiano e in inglese, sezione
     struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; int sezione; };
     const std::vector<Voce> voci = {
@@ -437,8 +437,8 @@ private:
          L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
         {L"Anteprime delle finestre", L"Window previews",
          L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
-        {L"Monitor AI nel dock", L"AI Monitor in the dock",
-         L"Stato e token degli agenti AI accanto al centro di controllo", L"AI agent status and tokens next to Control Center", &Valori::dockAI, S_DOCK},
+        {L"Monitor AI", L"AI Monitor",
+         L"Widget nel dock per stato, contesto e avvio rapido degli agenti AI", L"Dock widget for live AI agent status, context usage and quick launch", &Valori::dockAI, S_WIDGET},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
@@ -797,6 +797,7 @@ private:
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
             case S_DOCK: return testi::t(L"Dock", L"Dock");
+            case S_WIDGET: return testi::t(L"Widget", L"Widgets");
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -819,6 +820,12 @@ private:
                 v.rt->DrawRoundedRectangle({{cx - 9 * d, cy + 1 * d, cx + 9 * d, cy + 7 * d}, 2.5f * d, 2.5f * d}, v.pen, sp);
                 for (int i = 0; i < 3; i++) v.rt->FillRoundedRectangle({{cx + (-6.5f + i * 5) * d, cy + 2.5f * d, cx + (-3.5f + i * 5) * d, cy + 5.5f * d}, 0.8f * d, 0.8f * d}, v.pen);
                 l(-7, -6, 7, -6); break;
+            case S_WIDGET:     // griglia 2x2 di widget
+                v.rt->DrawRoundedRectangle({{cx - 8 * d, cy - 8 * d, cx - 1.5f * d, cy - 1.5f * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx + 1.5f * d, cy - 8 * d, cx + 8 * d, cy - 1.5f * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx - 8 * d, cy + 1.5f * d, cx - 1.5f * d, cy + 8 * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx + 1.5f * d, cy + 1.5f * d, cx + 8 * d, cy + 8 * d}, 2 * d, 2 * d}, v.pen, sp);
+                break;
             case S_ANIMAZIONI: // scintilla e una piccola
                 l(-2, -8, -2, 4); l(-8, -2, 4, -2); l(-5.5f, -5.5f, 1.5f, 1.5f); l(1.5f, -5.5f, -5.5f, 1.5f);
                 l(5, 3, 5, 8); l(2.5f, 5.5f, 7.5f, 5.5f); break;
