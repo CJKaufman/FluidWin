@@ -36,6 +36,7 @@ struct Agente {
     Fonte fonte = Fonte::Processo;
     Stato stato = Stato::Inattivo;
     uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+    uint64_t ctxTok = 0, ctxMax = 0;
     DWORD pid = 0;
     double aggiornatoT = 0;
     bool daHook = false;
@@ -59,6 +60,18 @@ inline std::wstring formattaToken(uint64_t n) {
     } else {
         swprintf(b, 32, L"%.1fB", (double)n / 1000000000.0);
     }
+    return b;
+}
+
+inline std::wstring formattaTempoFa(double updatedEpoch, double nowEpoch) {
+    if (updatedEpoch <= 0.0 || nowEpoch <= 0.0) return L"";
+    const double s = std::max(0.0, nowEpoch - updatedEpoch);
+    if (s < 5.0) return L"";
+    wchar_t b[32];
+    if (s < 60.0) swprintf(b, 32, L"%ds", (int)s);
+    else if (s < 3600.0) swprintf(b, 32, L"%dm", (int)(s / 60.0));
+    else if (s < 86400.0) swprintf(b, 32, L"%dh", (int)(s / 3600.0));
+    else swprintf(b, 32, L"%dd", (int)(s / 86400.0));
     return b;
 }
 
@@ -678,6 +691,148 @@ inline bool finestraValida(HWND h) {
 
 }  // namespace dettagli
 
+inline uint64_t stimaFinestraContesto(const std::wstring& modello, Fonte fonte = Fonte::Processo) {
+    if (modello.empty()) return 0;
+    const std::wstring m = dettagli::minuscolo(modello);
+    if (m.find(L"gemini") != std::wstring::npos) return 1000000ULL;
+    if (m.find(L"claude") != std::wstring::npos) {
+        if (m.find(L"[1m]") != std::wstring::npos || m.find(L"-1m") != std::wstring::npos) return 1000000ULL;
+        return 200000ULL;
+    }
+    if (m.find(L"codex") != std::wstring::npos || m.find(L"gpt") != std::wstring::npos) return 200000ULL;
+    if (fonte == Fonte::Antigravity || m.find(L"antigravity") != std::wstring::npos ||
+        m.find(L"model_placeholder") != std::wstring::npos) {
+        return 1000000ULL;
+    }
+    return 128000ULL;
+}
+
+inline std::wstring formattaModello(const std::wstring& raw) {
+    auto isSpace = [](wchar_t c) { return c == L' ' || c == L'\t' || c == L'\r' || c == L'\n'; };
+    size_t start = 0;
+    while (start < raw.size() && isSpace(raw[start])) start++;
+    size_t end = raw.size();
+    while (end > start && isSpace(raw[end - 1])) end--;
+    if (start >= end) return L"";
+
+    std::wstring s = raw.substr(start, end - start);
+    for (;;) {
+        while (!s.empty() && isSpace(s.back())) s.pop_back();
+        if (s.empty()) break;
+        const std::wstring low = dettagli::minuscolo(s);
+        bool changed = false;
+
+        if (low.size() > 4 && low.compare(low.size() - 4, 4, L"[1m]") == 0) {
+            s.resize(s.size() - 4);
+            changed = true;
+        } else {
+            static constexpr const wchar_t* TIERS[] = {L"medium", L"high", L"low", L"minimal", L"default", L"auto"};
+            for (const wchar_t* tier : TIERS) {
+                const size_t tl = wcslen(tier);
+                if (low.size() > tl + 1 && low.compare(low.size() - tl, tl, tier) == 0) {
+                    const wchar_t sep = low[low.size() - tl - 1];
+                    if (sep == L'-' || sep == L'_' || sep == L':' || sep == L' ') {
+                        s.resize(s.size() - tl - 1);
+                        changed = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (!changed && s.size() > 9 && (s[s.size() - 9] == L'-' || s[s.size() - 9] == L'_')) {
+            bool allDig = true;
+            for (size_t i = s.size() - 8; i < s.size(); i++) {
+                if (s[i] < L'0' || s[i] > L'9') { allDig = false; break; }
+            }
+            if (allDig) {
+                s.resize(s.size() - 9);
+                changed = true;
+            }
+        }
+        if (!changed) break;
+    }
+
+    while (!s.empty() && isSpace(s.back())) s.pop_back();
+    if (s.empty()) return raw.substr(start, end - start);
+
+    std::vector<std::wstring> rawToks;
+    size_t i = 0;
+    auto isSep = [](wchar_t c) { return c == L'-' || c == L'_' || c == L':' || c == L'/' || c == L' ' || c == L'\t'; };
+    while (i < s.size()) {
+        while (i < s.size() && isSep(s[i])) i++;
+        const size_t t0 = i;
+        while (i < s.size() && !isSep(s[i])) i++;
+        if (i > t0) rawToks.push_back(s.substr(t0, i - t0));
+    }
+    if (rawToks.empty()) return s;
+
+    auto isSingleDigit = [](const std::wstring& w) {
+        return w.size() == 1 && w[0] >= L'0' && w[0] <= L'9';
+    };
+    std::vector<std::wstring> toks;
+    toks.reserve(rawToks.size());
+    for (size_t k = 0; k < rawToks.size();) {
+        if (k + 1 < rawToks.size() && isSingleDigit(rawToks[k]) && isSingleDigit(rawToks[k + 1])) {
+            toks.push_back(rawToks[k] + L"." + rawToks[k + 1]);
+            k += 2;
+        } else {
+            toks.push_back(std::move(rawToks[k]));
+            k++;
+        }
+    }
+
+    auto formatTok = [](const std::wstring& t) -> std::wstring {
+        const std::wstring low = dettagli::minuscolo(t);
+        static constexpr const wchar_t* ACR[] = {
+            L"gpt", L"ai", L"llm", L"oss", L"mlx", L"gguf", L"awq", L"api", L"ui", L"cli", L"fp8", L"fp16", L"bf16", L"int4", L"int8"
+        };
+        for (const wchar_t* a : ACR) {
+            if (low == a) {
+                std::wstring up = low;
+                for (wchar_t& c : up) c = (wchar_t)towupper((wint_t)c);
+                return up;
+            }
+        }
+        if (low.size() >= 2 && low.back() == L'b') {
+            bool hasDigit = false, valid = true;
+            for (size_t j = 0; j + 1 < low.size(); j++) {
+                if (low[j] >= L'0' && low[j] <= L'9') hasDigit = true;
+                else if (low[j] != L'.') { valid = false; break; }
+            }
+            if (hasDigit && valid) {
+                std::wstring sz = low;
+                sz.back() = L'B';
+                return sz;
+            }
+        }
+
+        bool hasAlpha = false, allUpper = true;
+        for (wchar_t c : t) {
+            if (iswalpha((wint_t)c)) {
+                hasAlpha = true;
+                if (iswlower((wint_t)c)) allUpper = false;
+            }
+        }
+        std::wstring out = (hasAlpha && allUpper) ? low : t;
+        if (!out.empty() && iswlower((wint_t)out[0])) out[0] = (wchar_t)towupper((wint_t)out[0]);
+        return out;
+    };
+
+    std::wstring res;
+    std::wstring prev;
+    for (const auto& t : toks) {
+        std::wstring ft = formatTok(t);
+        if (!res.empty()) {
+            const bool gptVer = (prev == L"GPT" && !ft.empty() && ft[0] >= L'0' && ft[0] <= L'9');
+            res.push_back(gptVer ? L'-' : L' ');
+        }
+        res += ft;
+        prev = std::move(ft);
+    }
+    return res;
+}
+
 inline std::wstring cartellaHook() {
     const std::wstring base = dettagli::envDir(L"LOCALAPPDATA");
     if (base.empty()) return L"";
@@ -1070,7 +1225,7 @@ private:
         uint64_t size = 0;
         FILETIME mtime{};
         uint64_t offset = 0;
-        uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+        uint64_t tokIn = 0, tokOut = 0, tokCache = 0, lastCtxTok = 0;
         std::string model, lastType, lastTool;
         bool lastHasToolCalls = false;
     };
@@ -1130,6 +1285,7 @@ private:
             if (x.id != y.id || x.nome != y.nome || x.titolo != y.titolo || x.modello != y.modello ||
                 x.strumento != y.strumento || x.cwd != y.cwd || x.fonte != y.fonte || x.stato != y.stato ||
                 x.tokIn != y.tokIn || x.tokOut != y.tokOut || x.tokCache != y.tokCache ||
+                x.ctxTok != y.ctxTok || x.ctxMax != y.ctxMax ||
                 x.pid != y.pid || x.daHook != y.daHook) return false;
         }
         return true;
@@ -1163,6 +1319,7 @@ private:
             a.nome = dettagli::nomeFonte(a.fonte);
             a.titolo = dettagli::daUtf8(j.str("title"));
             a.modello = dettagli::daUtf8(j.str("model"));
+            a.ctxMax = stimaFinestraContesto(a.modello, a.fonte);
             a.strumento = dettagli::daUtf8(j.str("tool"));
             a.cwd = dettagli::daUtf8(j.str("cwd"));
             a.stato = dettagli::statoDaStringa(j.str("status"));
@@ -1215,9 +1372,12 @@ private:
                         if (tp == "PLANNER_RESPONSE") {
                             const std::string m = obj.str("model");
                             if (!m.empty()) tc.model = m;
-                            tc.tokIn += obj.u64("input_tokens");
-                            tc.tokCache += obj.u64("cache_read_tokens");
+                            const uint64_t inTok = obj.u64("input_tokens");
+                            const uint64_t cacheTok = obj.u64("cache_read_tokens");
+                            tc.tokIn += inTok;
+                            tc.tokCache += cacheTok;
                             tc.tokOut += obj.u64("output_tokens");
+                            if (inTok + cacheTok > 0) tc.lastCtxTok = inTok + cacheTok;
                             if (const auto* calls = obj.trova("tool_calls"); calls && calls->tipo == dettagli::Json::Arr && !calls->arr.empty()) {
                                 tc.lastHasToolCalls = true;
                                 tc.lastTool = calls->arr.back().str("name");
@@ -1316,9 +1476,12 @@ private:
                 hook->tokIn = std::max(hook->tokIn, tc.tokIn);
                 hook->tokOut = std::max(hook->tokOut, tc.tokOut);
                 hook->tokCache = std::max(hook->tokCache, tc.tokCache);
+                if (tc.lastCtxTok > 0) hook->ctxTok = tc.lastCtxTok;
                 if (hook->modello.empty() && !tc.model.empty()) hook->modello = dettagli::daUtf8(tc.model);
                 if (!annTitle.empty()) hook->titolo = annTitle;
                 if (hook->fonte == Fonte::Hook) { hook->fonte = Fonte::Antigravity; hook->nome = L"Antigravity"; }
+                hook->ctxMax = !hook->modello.empty() ? stimaFinestraContesto(hook->modello, hook->fonte)
+                                                      : (hook->ctxTok > 0 ? 1000000ULL : 0ULL);
                 if (hook->pid == 0) hookSenzaPid.push_back(hook);
                 continue;
             }
@@ -1334,6 +1497,9 @@ private:
             a.tokIn = tc.tokIn;
             a.tokOut = tc.tokOut;
             a.tokCache = tc.tokCache;
+            a.ctxTok = tc.lastCtxTok;
+            a.ctxMax = !a.modello.empty() ? stimaFinestraContesto(a.modello, a.fonte)
+                                          : (a.ctxTok > 0 ? 1000000ULL : 0ULL);
             a.aggiornatoT = mtimeEpoch;
             passivi.push_back({dettagli::fileTimeAEpoch(fd.ftCreationTime), std::move(a)});
         } while (FindNextFileW(h, &fd));
@@ -1395,7 +1561,7 @@ private:
             pos = firstNl + 1;
         }
 
-        struct UsageRec { uint64_t in = 0, out = 0, cache = 0; };
+        struct UsageRec { uint64_t in = 0, out = 0, cache = 0; bool assistant = false; };
         std::vector<std::pair<std::string, UsageRec>> usages;
         std::string sessionId, cwd, model, title, lastType, lastStopReason, lastTool;
         bool lastHasToolUse = false;
@@ -1436,6 +1602,7 @@ private:
                     ur.in = u->u64("input_tokens");
                     ur.out = u->u64("output_tokens");
                     ur.cache = u->u64("cache_read_input_tokens") + u->u64("cache_creation_input_tokens");
+                    ur.assistant = (tp == "assistant");
                     std::string mid = msg->str("id");
                     if (mid.empty()) mid = std::to_string(usages.size());
                     auto it = std::find_if(usages.begin(), usages.end(), [&](const auto& p) { return p.first == mid; });
@@ -1446,12 +1613,19 @@ private:
         }
 
         if (sessionId.empty()) sessionId = dettagli::inUtf8(stem);
-        uint64_t tokIn = 0, tokOut = 0, tokCache = 0;
+        uint64_t tokIn = 0, tokOut = 0, tokCache = 0, ctxTok = 0;
         for (const auto& [k, u] : usages) {
             (void)k;
             tokIn += u.in;
             tokOut += u.out;
             tokCache += u.cache;
+            if (u.assistant && (u.in + u.cache) > 0) ctxTok = u.in + u.cache;
+        }
+        if (ctxTok == 0) {
+            for (const auto& [k, u] : usages) {
+                (void)k;
+                if ((u.in + u.cache) > 0) ctxTok = u.in + u.cache;
+            }
         }
 
         const double age = std::max(0.0, now - mtimeEpoch);
@@ -1485,10 +1659,12 @@ private:
                 ha.tokIn = std::max(ha.tokIn, tokIn);
                 ha.tokOut = std::max(ha.tokOut, tokOut);
                 ha.tokCache = std::max(ha.tokCache, tokCache);
+                if (ctxTok > 0) ha.ctxTok = ctxTok;
                 if (ha.modello.empty() && !model.empty()) ha.modello = dettagli::daUtf8(model);
                 if (ha.titolo.empty() && !titoloW.empty()) ha.titolo = titoloW;
                 if (ha.cwd.empty() && !cwdW.empty()) ha.cwd = cwdW;
                 if (ha.fonte == Fonte::Hook) { ha.fonte = Fonte::Claude; ha.nome = L"Claude"; }
+                ha.ctxMax = stimaFinestraContesto(ha.modello, ha.fonte);
                 return;
             }
         }
@@ -1505,6 +1681,8 @@ private:
         a.tokIn = tokIn;
         a.tokOut = tokOut;
         a.tokCache = tokCache;
+        a.ctxTok = ctxTok;
+        a.ctxMax = stimaFinestraContesto(a.modello, a.fonte);
         a.aggiornatoT = mtimeEpoch;
         out.push_back(std::move(a));
     }

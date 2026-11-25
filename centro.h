@@ -1383,10 +1383,25 @@ inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
         scrivi(pillTxt, fmtNome, rpPill);
     }
 
-    const std::wstring totTok = ai::formattaToken(aiStato.tokInTot) + L" in · " + ai::formattaToken(aiStato.tokOutTot) + L" out" +
-                                (aiStato.tokCacheTot > 0 ? L" · " + ai::formattaToken(aiStato.tokCacheTot) + L" cache" : L"");
+    std::wstring sommario;
+    if (aiStato.agenti.empty()) {
+        sommario = testi::t(L"Nessuna sessione attiva", L"No active sessions");
+    } else {
+        const int nSess = (int)aiStato.agenti.size();
+        if (nSess == 1) {
+            sommario = testi::t(L"1 sessione", L"1 session");
+        } else {
+            wchar_t b[48];
+            swprintf(b, 48, testi::t(L"%d sessioni", L"%d sessions"), nSess);
+            sommario = b;
+        }
+        const uint64_t tokTot = aiStato.tokInTot + aiStato.tokOutTot;
+        if (tokTot > 0) {
+            sommario += L" · " + ai::formattaToken(tokTot) + L" " + testi::t(L"token", L"tokens");
+        }
+    }
     pennello->SetColor(tenue);
-    scrivi(totTok, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
+    scrivi(sommario, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
 
     const float listTop = AI_TESTA * dpi;
     const float listBottom = PH - AI_PIEDE * dpi;
@@ -1404,6 +1419,7 @@ inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
         pennello->SetColor(tenue);
         scrivi(testi::t(L"Avvia Antigravity, Claude Code o Ollama, o abilita gli hook CLI", L"Start Antigravity, Claude Code or Ollama, or enable CLI hooks"), fmtSotto, {re.left + 14 * dpi, re.top + 30 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
     } else {
+        const double nowEpoch = ai::dettagli::adessoEpoch();
         const float contentH = (float)aiStato.agenti.size() * AI_SCHEDA * dpi;
         const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
         aiScrollMax = std::max(0.0f, contentH - viewH);
@@ -1420,31 +1436,80 @@ inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
             dc->FillRoundedRectangle({r, rp, rp}, pennello);
             evidenzia(aggiungi(r, A_AI_AGENTE, (int)i), r, scuro, rp);
 
-            pennello->SetColor(coloreStato(a.stato));
-            dc->FillEllipse({{r.left + 16 * dpi, r.top + 20 * dpi}, 4.0f * dpi, 4.0f * dpi}, pennello);
+            const D2D1_COLOR_F dotCol = coloreStato(a.stato);
+            const D2D1_POINT_2F dotC = {r.left + 16 * dpi, r.top + 20 * dpi};
+            if (a.stato == ai::Stato::Occupato) {
+                const float pulse = 0.5f + 0.5f * std::sin((float)adesso() * 3.8f);
+                const float haloR = (6.5f + 2.5f * pulse) * dpi;
+                const float haloA = 0.15f + 0.23f * pulse;
+                pennello->SetColor(D2D1::ColorF(dotCol.r, dotCol.g, dotCol.b, haloA));
+                dc->FillEllipse({dotC, haloR, haloR}, pennello);
+                const float coreR = (3.6f + 0.7f * pulse) * dpi;
+                pennello->SetColor(dotCol);
+                dc->FillEllipse({dotC, coreR, coreR}, pennello);
+                pAnimazione = true;
+            } else {
+                pennello->SetColor(dotCol);
+                dc->FillEllipse({dotC, 4.0f * dpi, 4.0f * dpi}, pennello);
+            }
 
             float limTit = r.right - 12 * dpi;
-            if (a.tokIn + a.tokOut + a.tokCache > 0) {
-                const std::wstring tok = (a.tokIn > 0 && a.tokOut > 0)
-                    ? (ai::formattaToken(a.tokIn) + L"·" + ai::formattaToken(a.tokOut))
-                    : ai::formattaToken(a.tokIn + a.tokOut + a.tokCache);
-                const float tw = std::max(34 * dpi, larghezzaTesto(tok, fmtNome) + 14 * dpi);
+            std::wstring pill;
+            D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+            D2D1_COLOR_F pillFg = tenue;
+            if (a.ctxTok > 0 && a.ctxMax > 0) {
+                const int pct = std::clamp((int)std::lround(100.0 * (double)a.ctxTok / (double)a.ctxMax), 1, 100);
+                wchar_t b[32];
+                swprintf(b, 32, L"%d%% ctx", pct);
+                pill = b;
+                if (pct >= 85) {
+                    const D2D1_COLOR_F rosso = scuro ? D2D1::ColorF(1.0f, 0.42f, 0.38f, 1.0f) : D2D1::ColorF(0.86f, 0.22f, 0.20f, 1.0f);
+                    pillBg = D2D1::ColorF(rosso.r, rosso.g, rosso.b, scuro ? 0.20f : 0.14f);
+                    pillFg = rosso;
+                } else if (pct >= 65) {
+                    const D2D1_COLOR_F ambra = scuro ? D2D1::ColorF(0.98f, 0.72f, 0.25f, 1.0f) : D2D1::ColorF(0.82f, 0.50f, 0.04f, 1.0f);
+                    pillBg = D2D1::ColorF(ambra.r, ambra.g, ambra.b, scuro ? 0.20f : 0.14f);
+                    pillFg = ambra;
+                }
+            } else if (a.tokIn + a.tokOut > 0) {
+                pill = ai::formattaToken(a.tokIn + a.tokOut) + L" tok";
+            }
+            if (!pill.empty()) {
+                const float tw = std::max(34 * dpi, larghezzaTesto(pill, fmtNome) + 14 * dpi);
                 const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+                pennello->SetColor(pillBg);
                 dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
-                pennello->SetColor(tenue);
-                scrivi(tok, fmtNome, rt);
+                pennello->SetColor(pillFg);
+                scrivi(pill, fmtNome, rt);
                 limTit = rt.left - 8 * dpi;
             }
 
             const std::wstring src = a.fonte == ai::Fonte::Processo ? a.nome : ai::dettagli::nomeFonte(a.fonte);
-            std::wstring riga1 = src;
-            if (!a.titolo.empty() && a.titolo != src) riga1 += L" · " + a.titolo;
+            const std::wstring riga1 = !a.titolo.empty() ? a.titolo : src;
             pennello->SetColor(ink);
             scrivi(riga1, fmtVoce, {r.left + 28 * dpi, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
 
-            std::wstring riga2 = a.modello;
-            const std::wstring det = !a.strumento.empty() ? a.strumento : testoStato(a.stato);
+            std::wstring riga2 = src;
+            const std::wstring modPretty = ai::formattaModello(a.modello);
+            if (!modPretty.empty()) riga2 += (riga2.empty() ? L"" : L" · ") + modPretty;
+            std::wstring det;
+            if (!a.strumento.empty()) {
+                det = a.strumento;
+            } else {
+                det = testoStato(a.stato);
+                if (a.stato != ai::Stato::Occupato && a.aggiornatoT > 0) {
+                    const std::wstring tempoFa = ai::formattaTempoFa(a.aggiornatoT, nowEpoch);
+                    if (!tempoFa.empty()) {
+                        if (a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore) {
+                            wchar_t b[64];
+                            swprintf(b, 64, testi::t(L"%ls %ls fa", L"%ls %ls ago"), det.c_str(), tempoFa.c_str());
+                            det = b;
+                        } else {
+                            det += L" " + tempoFa;
+                        }
+                    }
+                }
+            }
             if (!det.empty()) riga2 += (riga2.empty() ? L"" : L" · ") + det;
             pennello->SetColor(tenue);
             scrivi(riga2, fmtSotto, {r.left + 28 * dpi, r.top + 32 * dpi, r.right - 12 * dpi, r.bottom - 8 * dpi});
