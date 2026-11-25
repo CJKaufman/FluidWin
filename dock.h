@@ -3381,7 +3381,7 @@ private:
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_FISSA, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
                   A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
-                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU };
+                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -4243,18 +4243,6 @@ private:
         if (s) s->Release();
         if (g) g->Release();
 
-        const bool mostraDot = busy || st == ai::Stato::InAttesa || st == ai::Stato::Errore || (st == ai::Stato::Completato && !aiLetto);
-        if (mostraDot && d > 8.0f) {
-            const float dotR = std::max(2.0f, d * 0.08f);
-            const float dotX = r.right - d * 0.18f, dotY = r.top + d * 0.18f;
-            D2D1_COLOR_F dotCol = D2D1::ColorF(0.22f, 0.80f, 1.0f, alfa);
-            if (st == ai::Stato::InAttesa) dotCol = D2D1::ColorF(1.0f, 0.68f, 0.12f, alfa);
-            else if (st == ai::Stato::Errore) dotCol = D2D1::ColorF(0.96f, 0.27f, 0.24f, alfa);
-            else if (st == ai::Stato::Completato) dotCol = D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa);
-            pennello->SetColor(dotCol);
-            dc->FillEllipse({{dotX, dotY}, dotR, dotR}, pennello);
-        }
-
         if (aiStato.occupati > 1 && d > 10.0f) {
             wchar_t b[12];
             swprintf(b, 12, L"%d", aiStato.occupati);
@@ -4697,10 +4685,15 @@ private:
             return;
         }
         if (v.avvio == AVVIO_AI) {
+            const auto avviabili = ai::elencoAvviabili();
+            const ai::Avviabile* cli = ai::primoTerminale(avviabili);
             std::vector<menu::Voce> vv = {
                 menu::titolo(testi::t(L"Monitor AI", L"AI Monitor")),
                 menu::voce(testi::t(L"Apri Monitor AI", L"Open AI Monitor"), 1),
             };
+            auto nc = menu::voce(testi::t(L"Nuova chat", L"New chat"), 7);
+            nc.disattivata = (cli == nullptr);
+            vv.push_back(nc);
             const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
                 return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
             });
@@ -4723,6 +4716,7 @@ private:
             SetForegroundWindow(icone);
             const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (s == 1) { aiLetto = true; dirty = true; apriCentro(P_AI); }
+            else if (s == 7 && cli) ai::avviaNuovaChat(*cli, ai::cartellaPredefinita(aiStato));
             else if (s == 2) {
                 aiMon.pulisciCompletati();
                 sincronizzaAI();

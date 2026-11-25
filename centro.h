@@ -1392,20 +1392,31 @@ inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
         return L"";
     };
 
-    // Testata interna: titolo, pillola stato, pulsante Pulisci, totale token
+    // Testata interna: titolo, pillola stato, pulsante Pulisci, pulsante Nuova chat, totale token
     const std::wstring titolo = testi::t(L"Monitor AI", L"AI Monitor");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
     scrivi(titolo, fmtTitolo, {m, 10 * dpi, m + lt + 8 * dpi, 34 * dpi});
 
+    const D2D1_RECT_F rPlus = {PW - m - 24 * dpi, 10 * dpi, PW - m, 34 * dpi};
+    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+    dc->FillRoundedRectangle({rPlus, 12 * dpi, 12 * dpi}, pennello);
+    evidenzia(aggiungi(rPlus, A_AI_NUOVA_CHAT, 0), rPlus, scuro, 12 * dpi);
+    {
+        const float cxP = (rPlus.left + rPlus.right) / 2, cyP = (rPlus.top + rPlus.bottom) / 2, arm = 4.5f * dpi;
+        pennello->SetColor(ink);
+        dc->DrawLine({cxP - arm, cyP}, {cxP + arm, cyP}, pennello, 1.6f * dpi, tratto);
+        dc->DrawLine({cxP, cyP - arm}, {cxP, cyP + arm}, pennello, 1.6f * dpi, tratto);
+    }
+
     const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
         return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
     });
-    float limPill = PW - m;
+    float limPill = rPlus.left - 8 * dpi;
     if (haCompletati) {
         const std::wstring cl = testi::t(L"Pulisci", L"Clear");
         const float cw = larghezzaTesto(cl, fmtSotto) + 18 * dpi;
-        const D2D1_RECT_F rc = {PW - m - cw, 11 * dpi, PW - m, 33 * dpi};
+        const D2D1_RECT_F rc = {rPlus.left - 6 * dpi - cw, 11 * dpi, rPlus.left - 6 * dpi, 33 * dpi};
         evidenzia(aggiungi(rc, A_AI_PULISCI, 0), rc, scuro, 11 * dpi);
         pennello->SetColor(blu);
         scrivi(cl, fmtNome, rc);
@@ -3072,6 +3083,39 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             aiMon.pulisciCompletati();
             sincronizzaAI();
             break;
+        case A_AI_NUOVA_CHAT: {
+            const auto lista = ai::elencoAvviabili();
+            const ai::Avviabile* primoCli = ai::primoTerminale(lista);
+            std::vector<menu::Voce> vv = {menu::titolo(testi::t(L"Nuova chat AI", L"New AI chat"))};
+            if (lista.empty()) {
+                auto nv = menu::voce(testi::t(L"Nessun agente trovato", L"No agents found"), 0);
+                nv.disattivata = true;
+                vv.push_back(nv);
+            } else {
+                for (size_t i = 0; i < lista.size(); i++) {
+                    vv.push_back(menu::voce(lista[i].nome, (UINT)(i + 1)));
+                }
+                if (primoCli) {
+                    vv.push_back(menu::separatore());
+                    vv.push_back(menu::voce(testi::t(L"Scegli cartella…", L"Choose folder…"), 1000));
+                }
+            }
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom};
+            ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(vv, pt, pannello);
+            if (s >= 1 && s <= (UINT)lista.size()) {
+                const std::wstring defCwd = ai::cartellaPredefinita(aiStato);
+                chiudiPannello();
+                ai::avviaNuovaChat(lista[s - 1], defCwd);
+            } else if (s == 1000 && primoCli) {
+                const std::wstring defCwd = ai::cartellaPredefinita(aiStato);
+                chiudiPannello();
+                const std::wstring dir = ai::scegliCartella(icone, defCwd);
+                if (!dir.empty()) ai::avviaNuovaChat(*primoCli, dir);
+            }
+            pDirty = true;
+            break;
+        }
         case A_AI_HOOK_MENU: {
             std::vector<menu::Voce> vv = {menu::titolo(testi::t(L"Hook CLI", L"CLI Hooks"))};
             auto ha = menu::voce(L"Antigravity CLI", 1);
