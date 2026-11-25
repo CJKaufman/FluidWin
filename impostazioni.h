@@ -44,6 +44,7 @@ struct Valori {
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     bool dockAI = true;           // icona Monitor AI nel dock
+    bool dockLogi = true;         // widget Logitech G HUB nel dock
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -135,6 +136,7 @@ inline void carica() {
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.dockAI = leggiDword(L"DockAI", 1);
+    v.dockLogi = leggiDword(L"DockLogi", 1);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -156,7 +158,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -439,6 +441,8 @@ private:
          L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
         {L"Monitor AI", L"AI Monitor",
          L"Widget nel dock per stato, contesto e avvio rapido degli agenti AI", L"Dock widget for live AI agent status, context usage and quick launch", &Valori::dockAI, S_WIDGET},
+        {L"Logitech", L"Logitech",
+         L"Widget nel dock per batteria e stato dei dispositivi Logitech G HUB", L"Dock widget for Logitech G HUB battery levels and connected gear", &Valori::dockLogi, S_WIDGET},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
