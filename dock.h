@@ -2521,9 +2521,15 @@ private:
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
             // (uno anche sotto App, Giochi, Monitor AI, Logitech e centro di controllo mentre sono attivi/aperti)
-            const bool aiAttivo = v.avvio == AVVIO_AI && ((pannelloTipo == P_AI && !pChiusura) || aiStato.occupati > 0);
-            const bool logiAttivo = v.avvio == AVVIO_LOGI && (pannelloTipo == P_LOGI && !pChiusura);
-            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda() && pannelloTipo != P_AI && pannelloTipo != P_LOGI) || aiAttivo || logiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
+            const auto schedaAperta = [&](int t) {
+                return (pannelloTipo == t && !pChiusura) || (altra.pannelloTipo == t && !altra.pChiusura);
+            };
+            const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
+            const bool logiAttivo = v.avvio == AVVIO_LOGI && schedaAperta(P_LOGI);
+            const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -4398,23 +4404,11 @@ private:
             dc->FillRectangle({rx - t, ty, rx, by}, pennello);
         };
 
-        const float gR = d * 0.20f;
+        const float gR = d * 0.21f;
         const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
         const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
                                         : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa);
         disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
-
-        if (bat >= 0 && d > 14.0f) {
-            wchar_t b[12];
-            swprintf(b, 12, L"%d%%", bat);
-            const float rb = std::max(6.2f * dpi, d * 0.135f);
-            const float lb = std::max(rb * 2.0f, larghezzaTesto(b, fmtNome) + 7.0f * dpi);
-            const float bx = r.right - lb + d * 0.04f, by = r.bottom - 2.0f * rb + d * 0.04f;
-            pennello->SetColor({colRing.r, colRing.g, colRing.b, 0.95f * alfa});
-            dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2.0f * rb}, rb, rb}, pennello);
-            pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
-            scrivi(b, fmtNome, {bx, by, bx + lb, by + 2.0f * rb});
-        }
     }
 
     bool renderLauncher();
