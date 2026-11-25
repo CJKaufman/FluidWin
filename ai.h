@@ -514,7 +514,7 @@ inline Fonte fonteDaStringa(const std::string& s) {
 inline std::wstring nomeFonte(Fonte f) {
     switch (f) {
         case Fonte::Hook:        return L"Hook";
-        case Fonte::Antigravity: return L"Antigravity";
+        case Fonte::Antigravity: return L"AGY";
         case Fonte::Claude:      return L"Claude";
         case Fonte::Codex:       return L"Codex";
         case Fonte::Ollama:      return L"Ollama";
@@ -1479,7 +1479,7 @@ private:
                 if (tc.lastCtxTok > 0) hook->ctxTok = tc.lastCtxTok;
                 if (hook->modello.empty() && !tc.model.empty()) hook->modello = dettagli::daUtf8(tc.model);
                 if (!annTitle.empty()) hook->titolo = annTitle;
-                if (hook->fonte == Fonte::Hook) { hook->fonte = Fonte::Antigravity; hook->nome = L"Antigravity"; }
+                if (hook->fonte == Fonte::Hook) { hook->fonte = Fonte::Antigravity; hook->nome = L"AGY"; }
                 hook->ctxMax = !hook->modello.empty() ? stimaFinestraContesto(hook->modello, hook->fonte)
                                                       : (hook->ctxTok > 0 ? 1000000ULL : 0ULL);
                 if (hook->pid == 0) hookSenzaPid.push_back(hook);
@@ -1489,7 +1489,7 @@ private:
             Agente a;
             a.id = uuid;
             a.fonte = Fonte::Antigravity;
-            a.nome = L"Antigravity";
+            a.nome = L"AGY";
             a.titolo = !annTitle.empty() ? annTitle : uuid.substr(0, std::min<size_t>(uuid.size(), 8));
             a.modello = dettagli::daUtf8(tc.model);
             if (st == Stato::Occupato && !tc.lastTool.empty()) a.strumento = dettagli::daUtf8(tc.lastTool);
@@ -1869,8 +1869,8 @@ private:
                 Gruppo g;
                 g.exeLower = p.exeLower;
                 if (p.exeLower == L"claude.exe") { g.fonte = Fonte::Claude; g.nome = L"Claude"; }
-                else if (p.exeLower == L"antigravity.exe") { g.fonte = Fonte::Antigravity; g.nome = L"Antigravity"; }
-                else if (p.exeLower == L"agy.exe") { g.fonte = Fonte::Antigravity; g.nome = L"Antigravity CLI"; }
+                else if (p.exeLower == L"antigravity.exe") { g.fonte = Fonte::Antigravity; g.nome = L"AGY"; }
+                else if (p.exeLower == L"agy.exe") { g.fonte = Fonte::Antigravity; g.nome = L"AGY"; }
                 else if (p.exeLower == L"codex.exe") { g.fonte = Fonte::Codex; g.nome = L"Codex"; }
                 else if (p.exeLower == L"gemini.exe") { g.fonte = Fonte::Processo; g.nome = L"Gemini CLI"; }
                 else if (p.exeLower == L"cursor.exe") { g.fonte = Fonte::Processo; g.nome = L"Cursor"; }
