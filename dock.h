@@ -2174,8 +2174,14 @@ private:
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
             // (uno anche sotto App, Monitor AI e centro di controllo mentre sono attivi/aperti)
-            const bool aiAttivo = v.avvio == AVVIO_AI && ((pannelloTipo == P_AI && !pChiusura) || aiStato.occupati > 0);
-            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda() && pannelloTipo != P_AI) || aiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
+            const auto schedaAperta = [&](int t) {
+                return (pannelloTipo == t && !pChiusura) || (altra.pannelloTipo == t && !altra.pChiusura);
+            };
+            const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
+            const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
