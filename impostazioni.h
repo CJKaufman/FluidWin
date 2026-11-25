@@ -47,8 +47,8 @@ struct Valori {
     bool dockGiochi = true;       // pulsante Giochi nel dock accanto a quello delle app
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     int stileVetro = 0;           // stile del vetro (vetro::Stile: acrilico, liquido, mica, trasparente)
-    bool dockAI = true;           // icona Monitor AI nel dock
-    bool dockLogi = true;         // widget Logitech G HUB nel dock
+    bool dockAI = false;          // icona Monitor AI nel dock
+    bool dockLogi = false;        // widget Logitech G HUB nel dock
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -143,8 +143,8 @@ inline void carica() {
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.stileVetro = std::clamp((int)leggiDword(L"StileVetro", 0), 0, vetro::N_STILI - 1);
     vetro::stile() = v.stileVetro;
-    v.dockAI = leggiDword(L"DockAI", 1);
-    v.dockLogi = leggiDword(L"DockLogi", 1);
+    v.dockAI = leggiDword(L"DockAI", 0);
+    v.dockLogi = leggiDword(L"DockLogi", 0);
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
