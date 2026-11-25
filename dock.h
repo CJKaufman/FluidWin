@@ -2572,7 +2572,22 @@ private:
         // (non con le anteprime aperte: le coprirebbe, e il nome e' gia' nei loro titoli)
         if (sopra >= 0 && premuta < 0 && !trascinando && !ant.aperta()) {
             const Voce& v = voci[sopra];
-            etichettaTesto = v.nome; etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
+            if (v.avvio == AVVIO_AI) {
+                if (aiStato.occupati > 0) {
+                    wchar_t b[64];
+                    swprintf(b, 64, testi::t(L"Monitor AI · %d attivi", L"AI Monitor · %d busy"), aiStato.occupati);
+                    etichettaTesto = b;
+                } else if (aiStato.inAttesa > 0) {
+                    etichettaTesto = testi::t(L"Monitor AI · In attesa", L"AI Monitor · Needs input");
+                } else if (aiStato.statoGlobale == ai::Stato::Completato && !aiLetto) {
+                    etichettaTesto = testi::t(L"Monitor AI · Fatto", L"AI Monitor · Done");
+                } else {
+                    etichettaTesto = testi::t(L"Monitor AI", L"AI Monitor");
+                }
+            } else {
+                etichettaTesto = v.nome;
+            }
+            etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
             etichettaVoluta = true;
         } else if (statoSopra >= 0 && statoPremuto < 0 && nessunaScheda()) {   // con un pannello aperto l'etichetta lo coprirebbe
             etichettaTesto = descrizioneStato(statoSopra);
