@@ -3906,7 +3906,7 @@ private:
             dc->FillRectangle({rx - t, ty, rx, by}, pennello);
         };
 
-        const float gR = d * 0.21f;
+        const float gR = d * 0.165f;
         const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
         const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
                                         : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa);
