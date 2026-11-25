@@ -2280,7 +2280,7 @@ inline bool avviaNuovaChat(const Avviabile& av, const std::wstring& dir = L"") {
             };
             const bool isBatch = endsWithI(av.exe, L".cmd") || endsWithI(av.exe, L".bat");
 
-            std::wstring wtArgs = L"-w 0 new-tab --title " + quotaCli(av.nome);
+            std::wstring wtArgs = L"-w new";
             if (!dirOk.empty()) wtArgs += L" -d " + quotaCli(dirOk);
             if (isBatch) wtArgs += L" cmd.exe /k " + quotaCli(av.exe);
             else wtArgs += L" " + quotaCli(av.exe);
