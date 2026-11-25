@@ -1915,10 +1915,17 @@ inline auto Motore::elencaTuttiGiochi() -> std::vector<AppL> {
         }
     }
 
-    std::sort(nuove.begin(), nuove.end(), [](const AppL& a, const AppL& b) {
+    auto prio = [](const AppL& x) -> int {
+        if (!x.manuale && !x.argomenti.empty() && finisceCon(minuscolo(x.avvio), L"\\riotclientservices.exe"))
+            return 2;
+        if (x.manuale) return (!x.argomenti.empty() || !x.argomentiExtra.empty()) ? 3 : 1;
+        return 0;
+    };
+    std::sort(nuove.begin(), nuove.end(), [&prio](const AppL& a, const AppL& b) {
         const int c = lstrcmpiW(a.nome.c_str(), b.nome.c_str());
         if (c != 0) return c < 0;
-        if (a.manuale != b.manuale) return a.manuale > b.manuale;
+        const int pa = prio(a), pb = prio(b);
+        if (pa != pb) return pa > pb;
         if (a.iconaPers != b.iconaPers) return a.iconaPers > b.iconaPers;
         const bool ia = !a.iconaFile.empty(), ib = !b.iconaFile.empty();
         if (ia != ib) return ia > ib;
@@ -2536,13 +2543,15 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
     IContextMenu* cm = nullptr;
     it->BindToHandler(nullptr, BHID_SFUIObject, IID_PPV_ARGS(&cm));
     // eseguibile e AppUserModelID dell'app, per il collegamento nel dock
-    std::wstring exe, id;
+    std::wstring exe, id, linkArgs;
     IShellItem2* it2 = nullptr;
     if (SUCCEEDED(it->QueryInterface(IID_PPV_ARGS(&it2)))) {
         LPWSTR s = nullptr;
         if (SUCCEEDED(it2->GetString(PKEY_Link_TargetParsingPath, &s)) && s) { exe = s; CoTaskMemFree(s); }
         s = nullptr;
         if (SUCCEEDED(it2->GetString(PKEY_AppUserModel_ID, &s)) && s) { id = s; CoTaskMemFree(s); }
+        s = nullptr;
+        if (SUCCEEDED(it2->GetString(PKEY_Link_Arguments, &s)) && s) { linkArgs = s; CoTaskMemFree(s); }
         it2->Release();
     }
     it->Release();
@@ -2577,7 +2586,7 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
             aggiungiAlDock(a.nome, exe, id, a.avvio);
         } else if (cmd == ID_GIOCHI) {
             auto el = leggiGiochiAggiunti();
-            const std::wstring target = (!exe.empty() && esisteFile(exe)) ? exe : a.avvio;
+            const std::wstring target = (linkArgs.empty() && !exe.empty() && esisteFile(exe)) ? exe : a.avvio;
             const std::wstring tMin = minuscolo(target);
             bool gia = false;
             for (const auto& kv : el) if (minuscolo(kv.second) == tMin) { gia = true; break; }
