@@ -476,8 +476,8 @@ public:
         dirty = true;
         // comandi delle app (jump list): il thread li legge subito, cosi' sono pronti al primo tasto destro
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
-        aiMon.avvia(icone, WM_AI_AGGIORNATO);
-        logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
+        if (mostraAI) aiMon.avvia(icone, WM_AI_AGGIORNATO);
+        if (mostraLogi) logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
         return true;
     }
 
@@ -857,6 +857,9 @@ public:
         if (!si) {
             usa(0);
             if (pannelloTipo == P_AI) chiudiPannello();
+            aiMon.ferma();
+        } else if (icone) {
+            aiMon.avvia(icone, WM_AI_AGGIORNATO);
         }
         appDaAggiornare = true;
         if (attivo) aggiornaApp();
@@ -868,6 +871,9 @@ public:
         if (!si) {
             usa(0);
             if (pannelloTipo == P_LOGI) chiudiPannello();
+            logiMon.ferma();
+        } else if (icone) {
+            logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
         }
         appDaAggiornare = true;
         if (attivo) aggiornaApp();
@@ -1087,8 +1093,8 @@ private:
     // impostazione: ora e data in fondo al dock, dopo il centro di controllo (larghezzaCoda). Per il mouse fa da
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
-    bool mostraAI = true;
-    bool mostraLogi = true;
+    bool mostraAI = false;
+    bool mostraLogi = false;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
     // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
     // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
