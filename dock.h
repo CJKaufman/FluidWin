@@ -66,6 +66,7 @@
 #include "pila.h"
 #include "appunti.h"
 #include "ai.h"
+#include "logitech.h"
 #include <ole2.h>
 #include <knownfolders.h>
 #include "testi.h"
@@ -105,8 +106,9 @@ static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce:
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
 static const wchar_t* const AVVIO_AI = L"*ai";                 // monitor AI (tra cestino e centro di controllo)
+static const wchar_t* const AVVIO_LOGI = L"*logitech";         // widget Logitech G HUB (tra monitor AI e centro di controllo)
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -358,7 +360,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
-    ~Motore() { aiMon.ferma(); }
+    ~Motore() { aiMon.ferma(); logiMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -475,6 +477,7 @@ public:
         // comandi delle app (jump list): il thread li legge subito, cosi' sono pronti al primo tasto destro
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
         aiMon.avvia(icone, WM_AI_AGGIORNATO);
+        logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
         return true;
     }
 
@@ -488,7 +491,8 @@ public:
         const bool b = jumpList.ferma(ms);
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
         const bool d = aiMon.ferma(ms);
-        return a && b && c && d;
+        const bool e = logiMon.ferma(ms);
+        return a && b && c && d && e;
     }
 
     void chiudi() {
@@ -647,6 +651,7 @@ public:
             if (!pChiusura) riadattaControllo();   // la batteria puo' comparire o sparire (ripresa dalla sospensione)
         }
         sincronizzaAI();
+        sincronizzaLogi();
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
         if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
@@ -852,6 +857,17 @@ public:
         if (!si) {
             usa(0);
             if (pannelloTipo == P_AI) chiudiPannello();
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
+    void impostaLogi(bool si) {
+        if (si == mostraLogi) return;
+        mostraLogi = si;
+        if (!si) {
+            usa(0);
+            if (pannelloTipo == P_LOGI) chiudiPannello();
         }
         appDaAggiornare = true;
         if (attivo) aggiornaApp();
@@ -1072,6 +1088,7 @@ private:
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
     bool mostraAI = true;
+    bool mostraLogi = true;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
     // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
     // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
@@ -1620,6 +1637,7 @@ private:
         { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
         if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); nuove.push_back(std::move(c)); }
+        if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; nuove.push_back(std::move(c)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
@@ -1638,7 +1656,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -1890,8 +1908,8 @@ private:
         if (!nuovo || nessunaScheda() || pChiusura || adesso() - pT0 < 0.15) return;
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
-        const RECT is = rettIsolaSchermo(), ia = rettAISchermo();
-        if (PtInRect(&is, pt) || PtInRect(&ia, pt)) return;   // l'icona del centro o AI: decide il suo clic
+        const RECT is = rettIsolaSchermo(), ia = rettAISchermo(), il = rettLogiSchermo();
+        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt)) return;   // l'icona del centro, AI o Logitech: decide il suo clic
         if (schedaFinestra(WindowFromPoint(pt))) return;
         scrivi("centro di controllo: clic fuori, si chiude");
         chiudiTutte();
@@ -2156,6 +2174,7 @@ private:
                 disegnaIconaAI(r, alfa, scuro);
                 if (aiStato.statoGlobale == ai::Stato::Occupato) movimento = true;
             }
+            else if (v.avvio == AVVIO_LOGI) disegnaIconaLogi(r, alfa, scuro);
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
@@ -2173,15 +2192,16 @@ private:
             }
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
-            // (uno anche sotto App, Monitor AI e centro di controllo mentre sono attivi/aperti)
+            // (uno anche sotto App, Monitor AI, Logitech e centro di controllo mentre sono attivi/aperti)
             const auto schedaAperta = [&](int t) {
                 return (pannelloTipo == t && !pChiusura) || (altra.pannelloTipo == t && !altra.pChiusura);
             };
             const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
+            const bool logiAttivo = v.avvio == AVVIO_LOGI && schedaAperta(P_LOGI);
             const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
-                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI) ||
-                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI));
-            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -2261,6 +2281,30 @@ private:
                     etichettaTesto = testi::t(L"Monitor AI · Fatto", L"AI Monitor · Done");
                 } else {
                     etichettaTesto = testi::t(L"Monitor AI", L"AI Monitor");
+                }
+            } else if (v.avvio == AVVIO_LOGI) {
+                if (logiStato.batteriaMin >= 0) {
+                    bool chg = logiStato.alcunoInCarica;
+                    for (const auto& dv : logiStato.dispositivi) {
+                        if (dv.stato != logitech::Stato::Disconnesso && dv.batteria == logiStato.batteriaMin && dv.nome == logiStato.nomePrincipale) {
+                            chg = dv.inCarica;
+                            break;
+                        }
+                    }
+                    wchar_t b[128];
+                    const std::wstring& dev = logiStato.nomePrincipale;
+                    if (!dev.empty()) {
+                        swprintf(b, 128, chg ? L"Logitech \u00b7 %ls %d%% \u26a1" : L"Logitech \u00b7 %ls %d%%", dev.c_str(), logiStato.batteriaMin);
+                    } else {
+                        swprintf(b, 128, chg ? L"Logitech \u00b7 %d%% \u26a1" : L"Logitech \u00b7 %d%%", logiStato.batteriaMin);
+                    }
+                    etichettaTesto = b;
+                } else if (logiStato.ghubAttivo) {
+                    wchar_t b[64];
+                    swprintf(b, 64, testi::t(L"Logitech \u00b7 %d connessi", L"Logitech \u00b7 %d connected"), logiStato.connessi);
+                    etichettaTesto = b;
+                } else {
+                    etichettaTesto = L"Logitech";
                 }
             } else {
                 etichettaTesto = v.nome;
@@ -2994,8 +3038,9 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI };
     static const UINT WM_AI_AGGIORNATO = WM_APP + 33;
+    static const UINT WM_LOGI_AGGIORNATO = WM_APP + 52;
     ai::Monitor aiMon;
     ai::Riepilogo aiStato;
     uint64_t aiVer = 0;
@@ -3006,6 +3051,14 @@ private:
     float altezzaAI() const;
     void disegnaAI(bool scuro, D2D1_COLOR_F ink);
     void focusAgente(const ai::Agente& a);
+    logitech::Monitor logiMon;
+    logitech::Riepilogo logiStato;
+    uint64_t logiVer = 0;
+    float logiScroll = 0;
+    float logiScrollMax = 0;
+    void sincronizzaLogi();
+    float altezzaLogi() const;
+    void disegnaLogi(bool scuro, D2D1_COLOR_F ink);
     // reti Wi-Fi (vista P_WIFI, wifi.h): ultima copia del thread, per il disegno
     wifi::Wifi wlan;
     std::vector<wifi::Rete> wlReti;
@@ -3031,7 +3084,8 @@ private:
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
                   A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
-                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT };
+                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
+                  A_LOGI_AGGIORNA, A_LOGI_GHUB };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -3598,8 +3652,10 @@ public:
 
     D2D1_RECT_F rettCentro() const;
     D2D1_RECT_F rettAI() const;
+    D2D1_RECT_F rettLogi() const;
     RECT rettIsolaSchermo() const;
     RECT rettAISchermo() const;
+    RECT rettLogiSchermo() const;
     bool isolaVisibile() const;
 
     void apriPannelloIsola(int tipo);
@@ -3779,6 +3835,84 @@ private:
         }
     }
 
+    void disegnaIconaLogi(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        if (d <= 8.0f) return;
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const float ra = d * 0.33f;
+        const float sw = std::max(1.8f, d * 0.075f);
+        const int bat = logiStato.batteriaMin;
+        const bool chg = logiStato.alcunoInCarica;
+
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+        dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+
+        const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.20f, 0.76f, 1.0f, alfa)
+            : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
+            : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
+            : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
+        if (bat >= 0) {
+            if (bat >= 100) {
+                pennello->SetColor(colRing);
+                dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            } else if (bat > 0) {
+                const float a0 = -(float)M_PI / 2.0f;
+                const float sweep = 2.0f * (float)M_PI * (bat / 100.0f);
+                const float a1 = a0 + sweep;
+                ID2D1PathGeometry* gArc = nullptr;
+                ID2D1GeometrySink* sArc = nullptr;
+                if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+                    sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+                    sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
+                                                  D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                                  sweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+                    sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+                    if (SUCCEEDED(sArc->Close())) {
+                        pennello->SetColor(colRing);
+                        dc->DrawGeometry(gArc, pennello, sw, tratto);
+                    }
+                }
+                if (sArc) sArc->Release();
+                if (gArc) gArc->Release();
+            }
+        }
+        auto disegnaLogoG = [&](float gcx, float gcy, float R, D2D1_COLOR_F col) {
+            const float rIn = R * 0.55f;
+            const float t = R - rIn;
+            pennello->SetColor(col);
+            ID2D1PathGeometry* gArcG = nullptr;
+            ID2D1GeometrySink* sArcG = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArcG)) && SUCCEEDED(gArcG->Open(&sArcG))) {
+                sArcG->BeginFigure({gcx, gcy - R}, D2D1_FIGURE_BEGIN_FILLED);
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy + R}, {R, R}, 0,
+                                               D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->AddLine({gcx, gcy + rIn});
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy - rIn}, {rIn, rIn}, 0,
+                                               D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->EndFigure(D2D1_FIGURE_END_CLOSED);
+                if (SUCCEEDED(sArcG->Close())) dc->FillGeometry(gArcG, pennello);
+            }
+            if (sArcG) sArcG->Release();
+            if (gArcG) gArcG->Release();
+            const float rx = gcx + R * 0.92f;
+            const float ty = gcy - t * 0.35f;
+            const float by = gcy + R * 0.78f;
+            dc->FillRectangle({gcx, ty, rx, ty + t}, pennello);
+            dc->FillRectangle({rx - t, ty, rx, by}, pennello);
+        };
+
+        const float gR = d * 0.165f;
+        const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
+        const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
+                                        : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa);
+        disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
+    }
+
     bool renderLauncher();
 
     static LRESULT CALLBACK procLauncher(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -3841,6 +3975,7 @@ private:
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
         if (v.avvio == AVVIO_AI) { aiLetto = true; dirty = true; apriCentro(P_AI); return; }
+        if (v.avvio == AVVIO_LOGI) { apriCentro(P_LOGI); return; }
         if (v.avvio == AVVIO_PILA) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
@@ -4018,7 +4153,7 @@ private:
         const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
-                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI;
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI;
         if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
         if (ant.aperta()) {
             ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
@@ -4194,6 +4329,21 @@ private:
                 }
             }
             else if (s == 6) impostaAIAvvisi(!aiAvvisi);
+            return;
+        }
+        if (v.avvio == AVVIO_LOGI) {
+            std::vector<menu::Voce> vv = {
+                menu::titolo(L"Logitech"),
+                menu::voce(testi::t(L"Apri Logitech", L"Open Logitech"), 1),
+                menu::voce(testi::t(L"Aggiorna", L"Refresh"), 2),
+                menu::separatore(),
+                menu::voce(testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), 3),
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) apriCentro(P_LOGI);
+            else if (s == 2) logiMon.aggiornaOra();
+            else if (s == 3) logitech::apriGHub();
             return;
         }
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
@@ -4444,6 +4594,7 @@ private:
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
             case WM_AI_AGGIORNATO: d->sincronizzaAI(); return 0;
+            case WM_LOGI_AGGIORNATO: d->sincronizzaLogi(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
