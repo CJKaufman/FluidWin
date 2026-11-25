@@ -1224,9 +1224,57 @@ inline auto Motore::sincronizzaAI() -> void {
             if (!giaNotato) { aiLetto = false; break; }
         }
     }
+    bool haAvviso = false;
+    int avvisoCode = 0;
+    std::wstring avvisoMsg;
+    if (aiVer > 0 && aiAvvisi && !comodita::silenzio()) {
+        const ai::Agente* scelto = nullptr;
+        int sceltoCode = -1;
+        const wchar_t* sceltoSuf = nullptr;
+        for (const auto& a : nuovo.agenti) {
+            ai::Stato prev = ai::Stato::Inattivo;
+            for (const auto& old : aiStato.agenti) {
+                if (old.id == a.id) { prev = old.stato; break; }
+            }
+            int code = -1;
+            const wchar_t* suf = nullptr;
+            if (a.stato == ai::Stato::InAttesa && prev != ai::Stato::InAttesa) {
+                code = 1;
+                suf = testi::t(L"In attesa", L"Needs input");
+            } else if (a.stato == ai::Stato::Errore && prev == ai::Stato::Occupato) {
+                code = 2;
+                suf = testi::t(L"Errore", L"Error");
+            } else if (a.stato == ai::Stato::Completato && prev == ai::Stato::Occupato) {
+                code = 0;
+                suf = testi::t(L"Fatto", L"Done");
+            }
+            if (code < 0) continue;
+            if (!scelto || (sceltoCode == 0 && code != 0)) {
+                scelto = &a;
+                sceltoCode = code;
+                sceltoSuf = suf;
+                if (sceltoCode != 0) break;
+            }
+        }
+        if (scelto) {
+            std::wstring label = !scelto->titolo.empty()
+                ? scelto->titolo
+                : (!scelto->nome.empty() ? scelto->nome : ai::dettagli::nomeFonte(scelto->fonte));
+            if (label.size() > 28) {
+                label.resize(27);
+                if (!label.empty() && label.back() >= 0xD800 && label.back() <= 0xDBFF) label.pop_back();
+                while (!label.empty() && label.back() == L' ') label.pop_back();
+                label += L"…";
+            }
+            haAvviso = true;
+            avvisoCode = sceltoCode;
+            avvisoMsg = label + L" · " + sceltoSuf;
+        }
+    }
     aiStato = std::move(nuovo);
     aiVer = v;
     dirty = true;
+    if (haAvviso) ilNotch().avviso(avvisoMsg, sensori::S_AI, avvisoCode, true);
     if (aiAperto) {
         const float nuova = altezzaVista(P_AI);
         if (nuova != PH) { PH = nuova; pAnimazione = true; }
@@ -2579,6 +2627,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             hc.spuntata = ai::hookClaudeInstallati();
             vv.push_back(hc);
             vv.push_back(menu::separatore());
+            auto av = menu::voce(testi::t(L"Avvisi nel notch", L"Notch alerts"), 4);
+            av.spuntata = aiAvvisi;
+            vv.push_back(av);
+            vv.push_back(menu::separatore());
             vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 3));
             POINT pt = {(LONG)e.r.left, (LONG)e.r.top};
             ClientToScreen(pannello, &pt);
@@ -2591,6 +2643,8 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
                     ai::dettagli::creaCartelle(dir);
                     ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
                 }
+            } else if (s == 4) {
+                impostaAIAvvisi(!aiAvvisi);
             }
             pDirty = true;
             break;
