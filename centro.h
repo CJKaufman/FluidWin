@@ -1891,11 +1891,16 @@ inline auto Motore::disegnaWPlugin(bool scuro, D2D1_COLOR_F ink) -> void {
     const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
     const float testaH = w.sottotitolo.empty() ? WP_TESTA_COMP : WP_TESTA;
 
+    const float togW = 40 * dpi, togH = 22 * dpi;
+    const float togX = PW - m - togW;
+    const float togY = w.sottotitolo.empty() ? 15 * dpi : 11 * dpi;
+    const float rightLimit = w.haToggle ? (togX - 10 * dpi) : (PW - m);
+
     float pwPill = 0;
     D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
     D2D1_COLOR_F pillFg = tenue;
     if (!w.stato.empty()) {
-        pwPill = std::min(larghezzaTesto(w.stato, fmtNome) + 16 * dpi, (PW - 2 * m) * 0.45f);
+        pwPill = std::min(larghezzaTesto(w.stato, fmtNome) + 16 * dpi, (rightLimit - m) * 0.45f);
         if (w.statoColore.valido) {
             pillFg = D2D1::ColorF(w.statoColore.r, w.statoColore.g, w.statoColore.b, 1.0f);
             pillBg = D2D1::ColorF(pillFg.r, pillFg.g, pillFg.b, scuro ? 0.20f : 0.14f);
@@ -1907,21 +1912,57 @@ inline auto Motore::disegnaWPlugin(bool scuro, D2D1_COLOR_F ink) -> void {
 
     const float titleTop = w.sottotitolo.empty() ? 14 * dpi : 10 * dpi;
     const float titleBot = titleTop + 24 * dpi;
-    const float maxTitleW = std::max(40 * dpi, PW - 2 * m - (pwPill >= 24 * dpi ? pwPill + 12 * dpi : 0));
+    const float maxTitleW = std::max(40 * dpi, rightLimit - m - (pwPill >= 24 * dpi ? pwPill + 12 * dpi : 0));
     const float lt = std::min(larghezzaTesto(w.nome, fmtTitolo), maxTitleW);
     pennello->SetColor(ink);
-    scrivi(w.nome, fmtTitolo, {m, titleTop, m + lt + 6 * dpi, titleBot});
+    scrivi(w.nome, fmtTitolo, {m, titleTop, std::min(rightLimit, m + lt + 6 * dpi), titleBot});
 
     if (pwPill >= 24 * dpi) {
         const float px0 = m + lt + 12 * dpi;
         const float pTop = w.sottotitolo.empty() ? 17 * dpi : 13 * dpi;
-        const D2D1_RECT_F rpPill = {px0, pTop, std::min(PW - m, px0 + pwPill), pTop + 18 * dpi};
+        const D2D1_RECT_F rpPill = {px0, pTop, std::min(rightLimit, px0 + pwPill), pTop + 18 * dpi};
         if (rpPill.right - rpPill.left >= 20 * dpi) {
             pennello->SetColor(pillBg);
             dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
             pennello->SetColor(pillFg);
             scrivi(w.stato, fmtNome, rpPill);
         }
+    }
+
+    if (w.haToggle) {
+        const D2D1_RECT_F togRect = {togX, togY, togX + togW, togY + togH};
+        const D2D1_RECT_F togHit = {togX - 4 * dpi, togY - 4 * dpi, togX + togW + 4 * dpi, togY + togH + 4 * dpi};
+        const int eTog = aggiungi(togHit, A_WPLUGIN_TOGGLE, 0);
+        const bool hover = (eTog == pSopra && pMouseDentro);
+        D2D1_COLOR_F trackCol;
+        if (w.toggleStato) {
+            if (w.statoColore.valido) {
+                trackCol = D2D1::ColorF(w.statoColore.r, w.statoColore.g, w.statoColore.b, 1.0f);
+            } else if (w.iconaColore.valido) {
+                trackCol = D2D1::ColorF(w.iconaColore.r, w.iconaColore.g, w.iconaColore.b, 1.0f);
+            } else {
+                trackCol = D2D1::ColorF(0.19f, 0.82f, 0.35f, 1.0f);
+            }
+            if (hover) {
+                trackCol.r += (1.0f - trackCol.r) * 0.14f;
+                trackCol.g += (1.0f - trackCol.g) * 0.14f;
+                trackCol.b += (1.0f - trackCol.b) * 0.14f;
+            }
+        } else {
+            trackCol = scuro
+                ? D2D1::ColorF(1, 1, 1, hover ? 0.24f : 0.16f)
+                : D2D1::ColorF(0, 0, 0, hover ? 0.20f : 0.14f);
+        }
+        pennello->SetColor(trackCol);
+        dc->FillRoundedRectangle({togRect, togH * 0.5f, togH * 0.5f}, pennello);
+
+        const float knobR = togH * 0.5f - 2.5f * dpi;
+        const float knobX = w.toggleStato ? (togX + togW - togH * 0.5f) : (togX + togH * 0.5f);
+        const float knobY = togY + togH * 0.5f;
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.14f));
+        dc->FillEllipse({{knobX, knobY + 0.8f * dpi}, knobR, knobR}, pennello);
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, (eTog == pPremuto) ? 0.92f : 1.0f));
+        dc->FillEllipse({{knobX, knobY}, knobR, knobR}, pennello);
     }
 
     if (!w.sottotitolo.empty()) {
@@ -3250,6 +3291,16 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_LOGI_GHUB:
             chiudiPannello();
             logitech::apriGHub();
+            break;
+        case A_WPLUGIN_TOGGLE:
+            for (auto& w : wplugStato.widgets) {
+                if (w.id == wplugIdAperto && w.haToggle) {
+                    w.toggleStato = !w.toggleStato;
+                    wplugin::scriviAzioneToggle(w.id, w.toggleChiave, w.toggleStato);
+                    pDirty = true;
+                    break;
+                }
+            }
             break;
         case A_WPLUGIN_ITEM:
             if (const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto)) {
