@@ -904,11 +904,46 @@ public:
         RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
                         REG_DWORD, &v, sizeof(v));
     }
+    bool logiAnimCarica = true;
+    void impostaLogiAnimCarica(bool si) {
+        if (si == logiAnimCarica) return;
+        logiAnimCarica = si;
+        dirty = true;
+    }
     std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> elencoWPlugin() const {
         std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> r;
         r.reserve(wplugStato.widgets.size());
         for (const auto& w : wplugStato.widgets) r.emplace_back(w.id, std::make_pair(w.nome, w.abilitato));
         return r;
+    }
+    bool widgetWPlugin(const std::wstring& id, wplugin::Widget& out) const {
+        if (const wplugin::Widget* w = trovaWPlugin(wplugin::dettagli::sanificaId(id))) {
+            out = *w;
+            return true;
+        }
+        return false;
+    }
+    void impostaConfigWPluginBool(const std::wstring& id, const std::wstring& key, bool val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigBool(sid, key, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == key && cv.tipo == L"toggle") cv.valBool = val;
+            }
+        }
+        wplugMon.ricaricaOra();
+    }
+    void impostaConfigWPluginStr(const std::wstring& id, const std::wstring& key, const std::wstring& val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigStr(sid, key, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == key && cv.tipo == L"choice") cv.valStr = val;
+            }
+        }
+        wplugMon.ricaricaOra();
     }
     void impostaWPlugin(const std::wstring& id, bool si) {
         wplugMon.impostaAbilitazione(id, si);
@@ -2260,7 +2295,7 @@ private:
             }
             else if (v.avvio == AVVIO_LOGI) {
                 disegnaIconaLogi(r, alfa, scuro);
-                if (logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
+                if (logiAnimCarica && logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
             }
             else if (eWPlugin(v.avvio)) {
                 if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) disegnaIconaWPlugin(r, alfa, scuro, *pw);
@@ -3978,11 +4013,12 @@ private:
         const float sw = std::max(1.8f, d * 0.075f);
         const int bat = logiStato.batteriaMin;
         const bool chg = logiStato.alcunoInCarica;
+        const bool animChg = chg && logiAnimCarica && bat >= 0;
 
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
         dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
-        const float pulse = (chg && bat >= 0) ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
+        const float pulse = animChg ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
         const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.16f + 0.10f * pulse, 0.80f + 0.10f * pulse, 0.98f, alfa)
             : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
             : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
@@ -4014,11 +4050,11 @@ private:
         if (bat >= 0) {
             const float a0 = -(float)M_PI / 2.0f;
             const float sweep = (bat >= 100) ? (2.0f * (float)M_PI) : (2.0f * (float)M_PI * (bat / 100.0f));
-            if (chg && bat > 0) {
+            if (animChg && bat > 0) {
                 disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(0.18f, 0.86f, 1.0f, (0.14f + 0.14f * pulse) * alfa));
             }
             disegnaArcoLogi(a0, sweep, sw, colRing);
-            if (chg && sweep > 0.18f) {
+            if (animChg && sweep > 0.18f) {
                 const float phase = (float)std::fmod(ultimoT * 0.55, 1.0);
                 const float fadeIn = std::clamp(phase / 0.14f, 0.0f, 1.0f);
                 const float fadeOut = std::clamp((1.0f - phase) / 0.16f, 0.0f, 1.0f);
@@ -4061,7 +4097,7 @@ private:
 
         const float gR = d * 0.165f;
         const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
-        const D2D1_COLOR_F colG = chg
+        const D2D1_COLOR_F colG = animChg
             ? (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
                      : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa))
             : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
