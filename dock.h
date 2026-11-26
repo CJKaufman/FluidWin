@@ -2586,7 +2586,10 @@ private:
                 disegnaIconaAI(r, alfa, scuro);
                 if (aiStato.statoGlobale == ai::Stato::Occupato) movimento = true;
             }
-            else if (v.avvio == AVVIO_LOGI) disegnaIconaLogi(r, alfa, scuro);
+            else if (v.avvio == AVVIO_LOGI) {
+                disegnaIconaLogi(r, alfa, scuro);
+                if (logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
+            }
             else if (eWPlugin(v.avvio)) {
                 if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) disegnaIconaWPlugin(r, alfa, scuro, *pw);
                 else {
@@ -4477,33 +4480,56 @@ private:
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
         dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
-        const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.20f, 0.76f, 1.0f, alfa)
+        const float pulse = (chg && bat >= 0) ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
+        const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.16f + 0.10f * pulse, 0.80f + 0.10f * pulse, 0.98f, alfa)
             : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
             : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
             : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
-        if (bat >= 0) {
-            if (bat >= 100) {
-                pennello->SetColor(colRing);
-                dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
-            } else if (bat > 0) {
-                const float a0 = -(float)M_PI / 2.0f;
-                const float sweep = 2.0f * (float)M_PI * (bat / 100.0f);
-                const float a1 = a0 + sweep;
-                ID2D1PathGeometry* gArc = nullptr;
-                ID2D1GeometrySink* sArc = nullptr;
-                if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
-                    sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
-                    sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
-                                                  D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                                                  sweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
-                    sArc->EndFigure(D2D1_FIGURE_END_OPEN);
-                    if (SUCCEEDED(sArc->Close())) {
-                        pennello->SetColor(colRing);
-                        dc->DrawGeometry(gArc, pennello, sw, tratto);
-                    }
+        auto disegnaArcoLogi = [&](float aStart, float aSweep, float width, D2D1_COLOR_F col) {
+            if (aSweep <= 0.004f) return;
+            if (aSweep >= 2.0f * (float)M_PI - 0.01f) {
+                pennello->SetColor(col);
+                dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, width);
+                return;
+            }
+            const float aEnd = aStart + aSweep;
+            ID2D1PathGeometry* gArc = nullptr;
+            ID2D1GeometrySink* sArc = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+                sArc->BeginFigure({cx + ra * std::cos(aStart), cy + ra * std::sin(aStart)}, D2D1_FIGURE_BEGIN_HOLLOW);
+                sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(aEnd), cy + ra * std::sin(aEnd)}, {ra, ra}, 0,
+                                              D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                              aSweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+                sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(sArc->Close())) {
+                    pennello->SetColor(col);
+                    dc->DrawGeometry(gArc, pennello, width, tratto);
                 }
-                if (sArc) sArc->Release();
-                if (gArc) gArc->Release();
+            }
+            if (sArc) sArc->Release();
+            if (gArc) gArc->Release();
+        };
+        if (bat >= 0) {
+            const float a0 = -(float)M_PI / 2.0f;
+            const float sweep = (bat >= 100) ? (2.0f * (float)M_PI) : (2.0f * (float)M_PI * (bat / 100.0f));
+            if (chg && bat > 0) {
+                disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(0.18f, 0.86f, 1.0f, (0.14f + 0.14f * pulse) * alfa));
+            }
+            disegnaArcoLogi(a0, sweep, sw, colRing);
+            if (chg && sweep > 0.18f) {
+                const float phase = (float)std::fmod(ultimoT * 0.55, 1.0);
+                const float fadeIn = std::clamp(phase / 0.14f, 0.0f, 1.0f);
+                const float fadeOut = std::clamp((1.0f - phase) / 0.16f, 0.0f, 1.0f);
+                const float env = fadeIn * fadeOut;
+                const float tailLen = std::min(sweep * 0.45f, 0.52f);
+                const float headA = a0 + sweep * phase;
+                const float tailStart = std::max(a0, headA - tailLen);
+                const float tailSweep = headA - tailStart;
+                if (tailSweep > 0.02f) {
+                    disegnaArcoLogi(tailStart, tailSweep, sw * 1.15f, D2D1::ColorF(0.75f, 0.96f, 1.0f, 0.65f * env * alfa));
+                    const float tipLen = std::min(tailSweep, 0.14f);
+                    disegnaArcoLogi(headA - tipLen, tipLen, sw * 1.25f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * env * alfa));
+                }
             }
         }
         auto disegnaLogoG = [&](float gcx, float gcy, float R, D2D1_COLOR_F col) {
@@ -4533,8 +4559,11 @@ private:
 
         const float gR = d * 0.165f;
         const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
-        const D2D1_COLOR_F colG = scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
-                                        : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa);
+        const D2D1_COLOR_F colG = chg
+            ? (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
+                     : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa))
+            : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
+                     : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa));
         disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
     }
 
