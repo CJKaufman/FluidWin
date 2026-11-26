@@ -49,7 +49,7 @@ struct ConfigVoce {
 
 struct Widget {
     std::wstring id, nome, sottotitolo, tooltip, stato, piedeTesto, piedeUrl, filePath;
-    std::wstring iconaGlyph, iconaTesto;
+    std::wstring iconaGlyph, iconaTesto, iconaAnimazione;
     Colore iconaColore, statoColore;
     int iconaAnello = -1;
     bool abilitato = true;
@@ -525,6 +525,7 @@ inline bool ugualeWidget(const Widget& a, const Widget& b) {
         a.tooltip != b.tooltip || a.stato != b.stato || a.piedeTesto != b.piedeTesto ||
         a.piedeUrl != b.piedeUrl || a.filePath != b.filePath ||
         a.iconaGlyph != b.iconaGlyph || a.iconaTesto != b.iconaTesto ||
+        a.iconaAnimazione != b.iconaAnimazione ||
         a.iconaAnello != b.iconaAnello || a.abilitato != b.abilitato ||
         !ugualeColore(a.iconaColore, b.iconaColore) || !ugualeColore(a.statoColore, b.statoColore) ||
         a.elementi.size() != b.elementi.size() || a.config.size() != b.config.size()) {
@@ -628,6 +629,16 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
         out.iconaTesto = dettagli::troncaIconaTesto(dettagli::daUtf8(ic->str("text")));
         out.iconaColore = dettagli::parseColoreObj(ic->str("color"));
         out.iconaAnello = ic->optPercent("ring");
+        if (const auto* an = ic->trova("animate")) {
+            if (an->tipo == dettagli::Json::Str) {
+                const std::wstring anim = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(an->s)));
+                if (anim == L"pulse" || anim == L"breathe" || anim == L"wave" || anim == L"spin") {
+                    out.iconaAnimazione = anim;
+                }
+            } else if (an->tipo == dettagli::Json::Bool) {
+                out.iconaAnimazione = an->b ? L"pulse" : L"";
+            }
+        }
     }
 
     if (const auto* items = root.trova("items"); items && items->tipo == dettagli::Json::Arr) {
@@ -885,11 +896,12 @@ inline bool creaEsempio() {
         "  tooltip      Live hover label on the dock\n"
         "  status       Header status pill text\n"
         "  statusColor  #RRGGBB hex color for the status pill\n"
-        "  icon         { glyph, text, color, ring }\n"
-        "                 glyph: ring | battery | spark | cpu | thermometer | dot | text\n"
-        "                 text:  up to 4 chars shown inside the dock tile (e.g. \"42\\u00b0\", \"VPN\")\n"
-        "                 color: #RRGGBB hex accent color\n"
-        "                 ring:  0..100 outer progress arc\n"
+        "  icon         { glyph, text, color, ring, animate }\n"
+        "                 glyph:   ring | battery | spark | cpu | thermometer | tailscale | dot | text\n"
+        "                 text:    up to 4 chars shown inside the dock tile (e.g. \"42\\u00b0\", \"VPN\")\n"
+        "                 color:   #RRGGBB hex accent color\n"
+        "                 ring:    0..100 outer progress arc (omit for ringless icon)\n"
+        "                 animate: none | pulse | breathe | wave | spin\n"
         "  items        Array of cards: { title, subtitle, badge, color, progress, url, copy }\n"
         "                 color:    #RRGGBB dot & bar accent\n"
         "                 progress: 0..100 bottom bar\n"

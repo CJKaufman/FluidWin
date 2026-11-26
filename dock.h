@@ -2298,8 +2298,10 @@ private:
                 if (logiAnimCarica && logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
             }
             else if (eWPlugin(v.avvio)) {
-                if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) disegnaIconaWPlugin(r, alfa, scuro, *pw);
-                else {
+                if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) {
+                    disegnaIconaWPlugin(r, alfa, scuro, *pw);
+                    if (!pw->iconaAnimazione.empty() && pw->iconaAnimazione != L"none") movimento = true;
+                } else {
                     wplugin::Widget vuoto; vuoto.nome = v.nome; vuoto.id = idWPlugin(v.avvio);
                     disegnaIconaWPlugin(r, alfa, scuro, vuoto);
                 }
@@ -4114,11 +4116,34 @@ private:
         if (d <= 8.0f) return;
 
         const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-        const D2D1_COLOR_F acc = w.iconaColore.valido
+        const bool animPulse = (w.iconaAnimazione == L"pulse" || w.iconaAnimazione == L"breathe");
+        const bool animWave = (w.iconaAnimazione == L"wave");
+        const bool animSpin = (w.iconaAnimazione == L"spin");
+        const double sec = (animPulse || animWave || animSpin) ? (vetro::ms() / 1000.0) : 0.0;
+        const float pulse = animPulse ? (0.5f + 0.5f * (float)std::sin(sec * 2.4)) : 0.0f;
+
+        auto lerpCol = [](D2D1_COLOR_F a, D2D1_COLOR_F b, float t) -> D2D1_COLOR_F {
+            return D2D1::ColorF(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t);
+        };
+        const D2D1_COLOR_F baseAcc = w.iconaColore.valido
             ? D2D1::ColorF(w.iconaColore.r, w.iconaColore.g, w.iconaColore.b, alfa)
             : (scuro ? D2D1::ColorF(0.28f, 0.74f, 1.0f, alfa) : D2D1::ColorF(0.04f, 0.48f, 0.96f, alfa));
+        const float waveGeneric = (animWave && w.iconaGlyph != L"tailscale") ? (0.5f + 0.5f * (float)std::sin(sec * 2.8)) : 0.0f;
+        const D2D1_COLOR_F acc = animPulse
+            ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.18f * pulse)
+            : (waveGeneric > 0.0f ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.22f * waveGeneric) : baseAcc);
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.86f * alfa);
         const bool haAnello = w.iconaAnello >= 0;
+
+        if (animPulse) {
+            const float haloA = (0.10f + 0.12f * pulse) * alfa;
+            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.22f));
+            dc->FillEllipse({{cx, cy}, d * (0.37f + 0.035f * pulse), d * (0.37f + 0.035f * pulse)}, pennello);
+            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.34f));
+            dc->FillEllipse({{cx, cy}, d * (0.28f + 0.025f * pulse), d * (0.28f + 0.025f * pulse)}, pennello);
+            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.48f));
+            dc->FillEllipse({{cx, cy}, d * (0.19f + 0.015f * pulse), d * (0.19f + 0.015f * pulse)}, pennello);
+        }
 
         if (haAnello) {
             const float ra = d * 0.33f;
@@ -4140,10 +4165,12 @@ private:
                 const float maxW = d * (haAnello ? 0.44f : 0.72f);
                 const float maxH = d * (haAnello ? 0.40f : 0.56f);
                 const float scT = std::min(maxW / std::max(1.0f, tm.widthIncludingTrailingWhitespace),
-                                           maxH / std::max(1.0f, tm.height));
+                                           maxH / std::max(1.0f, tm.height)) * (animPulse ? (1.0f + 0.05f * pulse) : 1.0f);
                 D2D1_MATRIX_3X2_F orig{};
                 dc->GetTransform(&orig);
-                dc->SetTransform(D2D1::Matrix3x2F::Scale(scT, scT, {cx, cy}) * orig);
+                D2D1::Matrix3x2F mText = D2D1::Matrix3x2F::Scale(scT, scT, {cx, cy});
+                if (animSpin) mText = mText * D2D1::Matrix3x2F::Rotation((float)std::fmod(sec * 75.0, 360.0), {cx, cy});
+                dc->SetTransform(mText * orig);
                 pennello->SetColor((haAnello || !w.iconaColore.valido) ? ink : acc);
                 lay->SetMaxWidth(400);
                 lay->SetMaxHeight(100);
@@ -4152,6 +4179,21 @@ private:
                 lay->Release();
             }
             return;
+        }
+
+        D2D1_MATRIX_3X2_F orig{};
+        const bool haTrasfGlyph = animPulse || animSpin;
+        if (haTrasfGlyph) {
+            dc->GetTransform(&orig);
+            D2D1::Matrix3x2F xf = D2D1::Matrix3x2F::Identity();
+            if (animPulse) {
+                const float scP = 1.0f + 0.05f * pulse;
+                xf = xf * D2D1::Matrix3x2F::Scale(scP, scP, {cx, cy});
+            }
+            if (animSpin) {
+                xf = xf * D2D1::Matrix3x2F::Rotation((float)std::fmod(sec * 75.0, 360.0), {cx, cy});
+            }
+            dc->SetTransform(xf * orig);
         }
 
         const float s = haAnello ? 0.68f : 1.0f;
@@ -4204,6 +4246,44 @@ private:
             pennello->SetColor(acc);
             dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
             dc->FillEllipse({{cx, cy}, d * 0.08f, d * 0.08f}, pennello);
+        } else if (w.iconaGlyph == L"tailscale") {
+            const float step = d * 0.175f * s;
+            const float dotR = d * 0.058f * s;
+            const D2D1_COLOR_F muted = scuro ? D2D1::ColorF(1, 1, 1, 0.22f * alfa)
+                                             : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.18f * alfa);
+            const D2D1_COLOR_F white = D2D1::ColorF(1, 1, 1, alfa);
+            for (int row = 0; row < 3; row++) {
+                for (int col = 0; col < 3; col++) {
+                    const float px = cx + (col - 1) * step;
+                    const float py = cy + (row - 1) * step;
+                    const bool active = (row == 1) || (row == 2 && col == 1);
+                    if (!active) {
+                        pennello->SetColor(muted);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                        continue;
+                    }
+                    if (animWave) {
+                        const int idx = (row == 1) ? col : 3;
+                        const double phase = sec * 2.8 - idx * 0.65;
+                        const float wv = 0.5f + 0.5f * (float)std::sin(phase);
+                        const float glowR = dotR * (1.55f + 0.45f * wv);
+                        pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, (0.14f + 0.22f * wv) * alfa));
+                        dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
+                        const float rDot = dotR * (1.0f + 0.12f * wv);
+                        pennello->SetColor(lerpCol(baseAcc, white, 0.35f * wv));
+                        dc->FillEllipse({{px, py}, rDot, rDot}, pennello);
+                    } else if (animPulse) {
+                        const float glowR = dotR * (1.55f + 0.35f * pulse);
+                        pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, (0.12f + 0.16f * pulse) * alfa));
+                        dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
+                        pennello->SetColor(acc);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                    } else {
+                        pennello->SetColor(acc);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                    }
+                }
+            }
         } else {
             if (!haAnello) {
                 pennello->SetColor(D2D1::ColorF(acc.r, acc.g, acc.b, 0.22f * alfa));
@@ -4212,6 +4292,8 @@ private:
             pennello->SetColor(acc);
             dc->FillEllipse({{cx, cy}, d * (haAnello ? 0.12f : 0.16f), d * (haAnello ? 0.12f : 0.16f)}, pennello);
         }
+
+        if (haTrasfGlyph) dc->SetTransform(orig);
     }
 
     bool renderLauncher();
