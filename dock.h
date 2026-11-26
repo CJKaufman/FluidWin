@@ -310,6 +310,30 @@ static std::wstring aumidFinestra(HWND h) {
     return r;
 }
 
+// AppUserModelID del processo ospitato da ApplicationFrameHost (finestre UWP)
+static std::wstring aumidAppFrame(HWND h) {
+    struct Ctx { DWORD pid; std::wstring id; } ctx{};
+    GetWindowThreadProcessId(h, &ctx.pid);
+    EnumChildWindows(h, [](HWND c, LPARAM l) -> BOOL {
+        auto* q = (Ctx*)l;
+        DWORD p = 0; GetWindowThreadProcessId(c, &p);
+        if (!p || p == q->pid) return TRUE;
+        HANDLE hp = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, p);
+        if (!hp) return TRUE;
+        UINT32 n = 0;
+        if (GetApplicationUserModelId(hp, &n, nullptr) == ERROR_INSUFFICIENT_BUFFER && n > 1) {
+            std::wstring s(n, L'\0');
+            if (GetApplicationUserModelId(hp, &n, s.data()) == ERROR_SUCCESS) {
+                s.resize(wcslen(s.c_str()));
+                q->id = std::move(s);
+            }
+        }
+        CloseHandle(hp);
+        return q->id.empty() ? TRUE : FALSE;
+    }, (LPARAM)&ctx);
+    return ctx.id;
+}
+
 static std::wstring exeProcesso(HWND h) {
     DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
     HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -345,6 +369,15 @@ static std::wstring nomeExe(const std::wstring& exe) {
     const size_t p = f.rfind(L'.'); if (p != std::wstring::npos) f = f.substr(0, p);
     if (!f.empty()) f[0] = (wchar_t)towupper(f[0]);
     return f;
+}
+
+static std::wstring nomePacchetto(const std::wstring& avvio) {
+    IShellItem* si = nullptr;
+    if (FAILED(SHCreateItemFromParsingName(avvio.c_str(), nullptr, IID_PPV_ARGS(&si))) || !si) return L"";
+    std::wstring r; wchar_t* s = nullptr;
+    if (SUCCEEDED(si->GetDisplayName(SIGDN_NORMALDISPLAY, &s)) && s) { r = s; CoTaskMemFree(s); }
+    si->Release();
+    return r;
 }
 
 // Scorciatoia Win+tasto: apre i pannelli di sistema (widget, impostazioni rapide, notifiche) come le icone della barra
@@ -963,7 +996,7 @@ public:
         for (const auto& x : appNascoste) if (x.chiave == c) return;
         appNascoste.push_back({c, nome.empty() ? c : nome});
         salvaNascoste();
-        appDaAggiornare = true; dirty = true;
+        fissateOk = false; appDaAggiornare = true; dirty = true;
         aggiornaApp();
     }
     // (chiave per valore: dal sottomenu arriva appNascoste[k].chiave, e remove_if, spostando gli elementi, cambiava il
@@ -974,7 +1007,7 @@ public:
                                               [&](const AppNascosta& x) { return x.chiave == chiave; }),
                                appNascoste.end());
         salvaNascoste();
-        appDaAggiornare = true; dirty = true;
+        fissateOk = false; appDaAggiornare = true; dirty = true;
         aggiornaApp();
     }
 
@@ -1407,7 +1440,7 @@ private:
         return true;
     }
 
-    static std::wstring chiave(const Voce& v) { return v.exe.empty() ? v.avvio : v.exe; }
+    static std::wstring chiave(const Voce& v) { return (v.exe.empty() || v.avvio.rfind(L"shell:", 0) == 0) ? v.avvio : v.exe; }
     // cosa apre il clic: il pacchetto (collegamento dello Store vecchio), l'exe di adesso (Squirrel, versione
     // cancellata) o il collegamento
     static const std::wstring& daAprire(const Voce& v) { return !v.pacchetto.empty() ? v.pacchetto : !v.ripiego.empty() ? v.ripiego : v.avvio; }
@@ -1503,10 +1536,22 @@ private:
             for (auto& c : cand) {
                 Voce v; v.fissata = true;
                 if (c.lnk.empty()) {   // app di pacchetto fissata in Windows: si apre e prende l'icona dalla cartella delle app
-                    v.avvio = L"shell:AppsFolder\\" + c.aumid; v.aumid = c.aumid; v.nome = c.nome.empty() ? c.aumid : c.nome;
+                    v.avvio = L"shell:AppsFolder\\" + c.aumid; v.aumid = c.aumid;
+                    IShellItem* si = nullptr;
+                    if (FAILED(SHCreateItemFromParsingName(v.avvio.c_str(), nullptr, IID_PPV_ARGS(&si))) || !si) {
+                        diagFissate.scartate++; scrivi1("app di pacchetto non installata, scartata", v.avvio); continue;
+                    }
+                    v.nome = c.nome;
+                    if (v.nome.empty()) {
+                        wchar_t* s = nullptr;
+                        if (SUCCEEDED(si->GetDisplayName(SIGDN_NORMALDISPLAY, &s)) && s) { v.nome = s; CoTaskMemFree(s); }
+                    }
+                    si->Release();
+                    if (v.nome.empty()) v.nome = c.aumid;
+                    if (eNascosta(L"", c.aumid)) continue;
                     diagFissate.pacchetto++; scrivi1("app di pacchetto", v.avvio);
                     bool doppia = false;
-                    for (size_t k = 1; k < nuove.size(); k++) if (nuove[k].aumid == v.aumid) { doppia = true; break; }
+                    for (size_t k = 1; k < nuove.size(); k++) if (!nuove[k].aumid.empty() && !_wcsicmp(nuove[k].aumid.c_str(), v.aumid.c_str())) { doppia = true; break; }
                     if (doppia) { diagFissate.doppie++; scrivi1("doppia, scartata", v.avvio); continue; }
                     nuove.push_back(std::move(v));
                     continue;
@@ -1576,7 +1621,7 @@ private:
                 if (!v.aumid.empty())
                     for (size_t k = 1; k < nuove.size(); k++) {
                         const Voce& x = nuove[k];
-                        if (x.aumid != v.aumid) continue;
+                        if (x.aumid.empty() || _wcsicmp(x.aumid.c_str(), v.aumid.c_str()) != 0) continue;
                         if (vuota || morta(x) || (x.exe == v.exe && x.argomenti == v.argomenti)) { doppia = k; break; }
                     }
                 if (doppia) {
@@ -1610,8 +1655,10 @@ private:
             auto ef = exeFinestre.find(h);
             if (ef == exeFinestre.end() || ef->second.first != pid) ef = exeFinestre.insert_or_assign(h, std::make_pair(pid, exeProcesso(h))).first;
             const std::wstring& exe = ef->second.second;
-            const std::wstring id = aumidFinestra(h);
             if (exe.empty()) continue;
+            const bool appFrame = exe.find(L"applicationframehost") != std::wstring::npos;
+            std::wstring id = aumidFinestra(h);
+            if (id.empty() && appFrame) id = aumidAppFrame(h);
             Voce* trovata = nullptr;
             // app nascosta (PR #20): si aggancia solo a un'app aggiunta alla barra (quelle non si nascondono). Prima il
             // filtro veniva dopo la ricerca, e una nascosta che condivide l'exe con un'altra aperta ci finiva dentro,
@@ -1623,20 +1670,26 @@ private:
             if (!id.empty())
                 for (auto& v : nuove) {
                     if (nascosta && !v.fissata) continue;
-                    if (!v.aumid.empty() && id == v.aumid) { trovata = &v; break; }
+                    if (!v.aumid.empty() && !_wcsicmp(id.c_str(), v.aumid.c_str())) { trovata = &v; break; }
                 }
             if (!trovata)
                 for (auto& v : nuove) {
                     if (nascosta && !v.fissata) continue;
+                    if (appFrame && !id.empty() && ((!v.aumid.empty() && _wcsicmp(id.c_str(), v.aumid.c_str()) != 0) || v.avvio.rfind(L"shell:", 0) == 0)) continue;
                     if (stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
                 }
             if (!trovata && nascosta) { finestreNascoste.push_back(h); continue; }
             if (!trovata) {
                 Voce v; v.exe = exe; v.aumid = id;
-                auto nm = nomiExe.find(exe);   // il nome leggibile si legge dal file una volta sola
-                if (nm == nomiExe.end()) nm = nomiExe.emplace(exe, nomeExe(exe)).first;
+                v.avvio = (appFrame && !id.empty()) ? L"shell:AppsFolder\\" + id : exe;
+                const std::wstring& nk = (appFrame && !id.empty()) ? v.avvio : exe;
+                auto nm = nomiExe.find(nk);   // il nome leggibile si legge dal file una volta sola
+                if (nm == nomiExe.end()) {
+                    std::wstring n = (appFrame && !id.empty()) ? nomePacchetto(v.avvio) : L"";
+                    if (n.empty()) n = nomeExe(exe);
+                    nm = nomiExe.emplace(nk, std::move(n)).first;
+                }
                 v.nome = nm->second;
-                v.avvio = !id.empty() && exe.find(L"applicationframehost") != std::wstring::npos ? L"shell:AppsFolder\\" + id : exe;
                 nuove.push_back(std::move(v));
                 trovata = &nuove.back();
             }
@@ -1660,7 +1713,10 @@ private:
             for (size_t j = 0; j < voci.size(); j++) {
                 Voce& vecchia = voci[j];
                 if (ritrovata[j]) continue;   // anche una voce che si stava restringendo: se l'app si riapre torna a crescere
-                if (vecchia.avvio == v.avvio || (!v.exe.empty() && vecchia.exe == v.exe)) {
+                const bool vShell = v.avvio.rfind(L"shell:", 0) == 0;
+                const bool vecchiaShell = vecchia.avvio.rfind(L"shell:", 0) == 0;
+                const bool stessoAvvio = (vShell && vecchiaShell) ? !_wcsicmp(vecchia.avvio.c_str(), v.avvio.c_str()) : vecchia.avvio == v.avvio;
+                if (stessoAvvio || (!v.exe.empty() && !vShell && !vecchiaShell && vecchia.exe == v.exe)) {
                     v.icona = vecchia.icona; vecchia.icona = nullptr;
                     v.rimbalzoT0 = v.finestre.empty() ? vecchia.rimbalzoT0 : -1;   // l'app si e' aperta: fine del rimbalzo
                     v.sobbalzoT0 = vecchia.sobbalzoT0; v.sobbalzoDopo = vecchia.sobbalzoDopo; v.sobbalzoAmp = vecchia.sobbalzoAmp;
@@ -4548,8 +4604,9 @@ private:
             if (s == 2) { SHEmptyRecycleBinW(icone, nullptr, 0); cestinoPieno = false; giroCestino = 0; dirty = true; }   // (chiede conferma Windows)
             return;
         }
-        // eseguibile vero sul disco (non quelli protetti delle app dello Store)
-        const bool exeVero = !v.exe.empty() && v.exe.find(L"\\windowsapps\\") == std::wstring::npos &&
+        // eseguibile vero sul disco (non quelli protetti delle app dello Store ne' ApplicationFrameHost)
+        const bool appFrame = v.exe.find(L"applicationframehost") != std::wstring::npos;
+        const bool exeVero = !v.exe.empty() && !appFrame && v.exe.find(L"\\windowsapps\\") == std::wstring::npos &&
                              GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES;
         const bool store = v.avvio.rfind(L"shell:", 0) == 0;
         const bool collegamento = v.fissata && v.avvio.size() > 4 && minuscolo(v.avvio.substr(v.avvio.size() - 4)) == L".lnk";
@@ -4620,6 +4677,9 @@ private:
         else if (!v.fissata) {
             voci.push_back(menu::separatore());
             voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6));
+            voci.push_back(menu::voce(testi::t(L"Nascondi dal dock", L"Hide from dock"), 7));
+        } else if (store) {
+            voci.push_back(menu::separatore());
             voci.push_back(menu::voce(testi::t(L"Nascondi dal dock", L"Hide from dock"), 7));
         }
         if (!v.finestre.empty()) {
