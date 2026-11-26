@@ -3129,7 +3129,7 @@ inline auto Motore::leggiAppSfondo() -> void {
 
 inline auto Motore::sfondoRighePagina() const -> int {
     const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - TESTA - 10 - 52 - 28) / 86));
-    return std::max(1, std::min(4, entrano));
+    return std::max(1, std::min(5, entrano));
 }
 
 inline auto Motore::sfondoPagine() const -> int {
