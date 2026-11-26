@@ -641,7 +641,8 @@ inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring&
     IShellLinkW* sl = nullptr;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&sl)))) return;
     bool ok = false;
-    if (!exe.empty() && GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES) ok = SUCCEEDED(sl->SetPath(exe.c_str()));
+    if (avvio.rfind(L"shell:", 0) != 0 && !exe.empty() && GetFileAttributesW(exe.c_str()) != INVALID_FILE_ATTRIBUTES)
+        ok = SUCCEEDED(sl->SetPath(exe.c_str()));
     else {   // app dello Store: il collegamento punta alla voce della cartella App
         PIDLIST_ABSOLUTE pidl = nullptr;
         if (SUCCEEDED(SHParseDisplayName(avvio.c_str(), nullptr, &pidl, 0, nullptr))) { ok = SUCCEEDED(sl->SetIDList(pidl)); CoTaskMemFree(pidl); }
