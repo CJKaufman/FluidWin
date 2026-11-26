@@ -111,6 +111,7 @@ static const wchar_t* const AVVIO_LOGI = L"*logitech";         // widget Logitec
 static const wchar_t* const AVVIO_WPLUGIN_PREF = L"*wplugin:";
 static bool eWPlugin(const std::wstring& a) { return a.rfind(AVVIO_WPLUGIN_PREF, 0) == 0; }
 static std::wstring idWPlugin(const std::wstring& a) { return eWPlugin(a) ? a.substr(wcslen(AVVIO_WPLUGIN_PREF)) : std::wstring(); }
+static bool eWidgetDock(const std::wstring& a) { return a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a); }
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
 static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a) || a == AVVIO_CONTROLLO; }
 
@@ -467,6 +468,7 @@ public:
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
         leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
+        leggiOrdineWidget();
         caricaNascoste();       // (le app nascoste dal dock, PR #20)
         aiAvvisi = leggiAIAvvisi();
         aggiornaApp();
@@ -1224,6 +1226,7 @@ private:
     int trascinata = -1;             // indice della voce trascinata
     float presa = 0.5f;              // dove la si e' presa, 0..1 della larghezza dell'icona
     std::vector<std::wstring> ordineFissate;   // collegamenti delle app aggiunte, nell'ordine scelto (vuoto: quello di Windows)
+    std::vector<std::wstring> ordineWidget;    // ordine scelto trascinando i widget del dock
     RECT rettVetro{}, rettVetroStato{}, rettVetroOra{}, regioneDock{}, regioneIsola{}, regioneEtichetta{};
     D2D1_RECT_F rettEtichetta{};
     // etichetta (una sola, per il dock o per l'isola di stato)
@@ -1673,12 +1676,21 @@ private:
         // in fondo, come su macOS: la pila dei Download, il cestino e per ultimo il centro di controllo (disegnati dal dock)
         { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
-        if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); nuove.push_back(std::move(c)); }
-        if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; nuove.push_back(std::move(c)); }
-        for (const auto& w : wplugStato.widgets) {
-            if (!w.abilitato) continue;
-            Voce c; c.fissata = true; c.avvio = AVVIO_WPLUGIN_PREF + w.id; c.nome = w.nome;
-            nuove.push_back(std::move(c));
+        {
+            std::vector<Voce> widgets;
+            if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); widgets.push_back(std::move(c)); }
+            if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; widgets.push_back(std::move(c)); }
+            for (const auto& w : wplugStato.widgets) {
+                if (!w.abilitato) continue;
+                Voce c; c.fissata = true; c.avvio = AVVIO_WPLUGIN_PREF + w.id; c.nome = w.nome;
+                widgets.push_back(std::move(c));
+            }
+            if (!ordineWidget.empty()) {
+                std::stable_sort(widgets.begin(), widgets.end(), [&](const Voce& a, const Voce& b) {
+                    return std::find(ordineWidget.begin(), ordineWidget.end(), a.avvio) < std::find(ordineWidget.begin(), ordineWidget.end(), b.avvio);
+                });
+            }
+            for (auto& wv : widgets) nuove.push_back(std::move(wv));
         }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
@@ -1744,7 +1756,14 @@ private:
     std::vector<float> posizioniAdesso() const { return disponi(dimensioni(posizioniRiposo())); }
     // gruppo della voce i: [inizio, fine) delle aggiunte alla barra o delle altre aperte (vuoto: non si sposta)
     std::pair<size_t, size_t> gruppo(int i) const {
-        if (i < 1 || i >= (int)primaFine || voci[i].uscente) return {0, 0};
+        if (i < 1 || i >= (int)voci.size() || voci[i].uscente) return {0, 0};
+        if (i >= (int)primaFine) {
+            if (!eWidgetDock(voci[i].avvio)) return {0, 0};
+            size_t a = (size_t)i, b = (size_t)i + 1;
+            while (a > primaFine && !voci[a - 1].uscente && eWidgetDock(voci[a - 1].avvio)) a--;
+            while (b < voci.size() && !voci[b].uscente && eWidgetDock(voci[b].avvio)) b++;
+            return {a, b};
+        }
         return (size_t)i < primaNonFissata ? std::make_pair((size_t)1, primaNonFissata) : std::make_pair(primaNonFissata, primaFine);
     }
     bool trascinabile(int i) const { const auto [a, b] = gruppo(i); return b > a + 1; }
@@ -1801,6 +1820,10 @@ private:
         }
         if (pos == ordineAperte.size()) r.insert(r.end(), g.begin(), g.end());
         ordineAperte = std::move(r);
+        std::vector<std::wstring> w;
+        for (size_t i = primaFine; i < voci.size(); i++) if (!voci[i].uscente && eWidgetDock(voci[i].avvio)) w.push_back(voci[i].avvio);
+        for (const auto& k : ordineWidget) if (std::find(w.begin(), w.end(), k) == w.end()) w.push_back(k);
+        ordineWidget = std::move(w);
     }
 
     // fine: l'icona si posa al suo posto scivolando da dove la si e' lasciata; l'ordine delle aggiunte si salva
@@ -1810,8 +1833,10 @@ private:
         if (trascinata >= 0 && trascinata < (int)voci.size()) {
             voci[trascinata].dx = voci[trascinata].rett.left - posizioniAdesso()[trascinata];   // da dove la si vede
             const bool fissata = (size_t)trascinata < primaNonFissata;
+            const bool widget = eWidgetDock(voci[trascinata].avvio);
             if (registro) { char b[200]; snprintf(b, 200, "dock: %ls posata al posto %d", voci[trascinata].nome.c_str(), trascinata); scrivi(b); }
             if (fissata) salvaOrdineFissate();
+            if (widget) salvaOrdineWidget();
         }
         trascinata = -1; premuta = -1;
         if (GetCapture() == icone) ReleaseCapture();
@@ -1839,6 +1864,21 @@ private:
         DWORD cap = (DWORD)((b.size() - 2) * sizeof(wchar_t));
         if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &cap) != ERROR_SUCCESS) return;
         for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineFissate.emplace_back(p);
+    }
+    void salvaOrdineWidget() const {
+        std::wstring s;
+        for (const auto& k : ordineWidget) { s += k; s.push_back(L'\0'); }
+        s.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", REG_MULTI_SZ, s.data(), (DWORD)(s.size() * sizeof(wchar_t)));
+    }
+    void leggiOrdineWidget() {
+        ordineWidget.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < 4 || n > 256 * 1024) return;
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, L'\0');
+        DWORD cap = (DWORD)((b.size() - 2) * sizeof(wchar_t));
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &cap) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineWidget.emplace_back(p);
     }
 
     // ---- lato dello schermo (impostazione "Posizione", 1.3.0, Fase 3) ----
