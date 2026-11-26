@@ -53,6 +53,9 @@ struct Widget {
     Colore iconaColore, statoColore;
     int iconaAnello = -1;
     bool abilitato = true;
+    bool haToggle = false;
+    bool toggleStato = false;
+    std::wstring toggleChiave;
     std::vector<Elemento> elementi;
     std::vector<ConfigVoce> config;
 };
@@ -226,6 +229,11 @@ inline bool finisceConJson(const std::wstring& nome) {
 inline bool finisceConConfigJson(const std::wstring& nome) {
     if (nome.size() < 12) return false;
     return _wcsicmp(nome.c_str() + nome.size() - 12, L".config.json") == 0;
+}
+
+inline bool finisceConActionJson(const std::wstring& nome) {
+    if (nome.size() < 12) return false;
+    return _wcsicmp(nome.c_str() + nome.size() - 12, L".action.json") == 0;
 }
 
 inline Colore parseColoreObj(const std::string& s) {
@@ -527,6 +535,7 @@ inline bool ugualeWidget(const Widget& a, const Widget& b) {
         a.iconaGlyph != b.iconaGlyph || a.iconaTesto != b.iconaTesto ||
         a.iconaAnimazione != b.iconaAnimazione ||
         a.iconaAnello != b.iconaAnello || a.abilitato != b.abilitato ||
+        a.haToggle != b.haToggle || a.toggleStato != b.toggleStato || a.toggleChiave != b.toggleChiave ||
         !ugualeColore(a.iconaColore, b.iconaColore) || !ugualeColore(a.statoColore, b.statoColore) ||
         a.elementi.size() != b.elementi.size() || a.config.size() != b.config.size()) {
         return false;
@@ -583,6 +592,27 @@ inline std::wstring percorsoConfig(const std::wstring& id) {
     return dir + L"\\" + dettagli::sanificaId(id) + L".config.json";
 }
 
+inline std::wstring percorsoAzione(const std::wstring& id) {
+    const std::wstring dir = cartellaWidget();
+    if (dir.empty()) return L"";
+    return dir + L"\\" + dettagli::sanificaId(id) + L".action.json";
+}
+
+inline bool scriviAzioneToggle(const std::wstring& id, const std::wstring& chiave, bool valore) {
+    if (id.empty()) return false;
+    const std::wstring path = percorsoAzione(id);
+    if (path.empty()) return false;
+    const std::wstring k = dettagli::trim(chiave).empty() ? std::wstring(L"toggle") : chiave;
+    std::string json = "{\"action\":\"toggle\",\"key\":";
+    dettagli::escapeJsonStr(dettagli::inUtf8(k), json);
+    json += ",\"value\":";
+    json += (valore ? "true" : "false");
+    json += ",\"ts\":";
+    json += std::to_string((unsigned long long)GetTickCount64());
+    json += "}\n";
+    return dettagli::scriviAtomico(path, json);
+}
+
 namespace dettagli {
 
 inline bool salvaConfigVal(const std::wstring& id, const std::wstring& chiave, Json val) {
@@ -623,6 +653,30 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
     out.tooltip = dettagli::trim(dettagli::daUtf8(root.str("tooltip")));
     out.stato = dettagli::trim(dettagli::daUtf8(root.str("status")));
     out.statoColore = dettagli::parseColoreObj(root.str("statusColor"));
+
+    if (const auto* tg = root.trova("toggle"); tg && tg->tipo == dettagli::Json::Obj) {
+        out.haToggle = true;
+        std::wstring chiave;
+        for (wchar_t c : dettagli::trim(dettagli::daUtf8(tg->str("key")))) {
+            if (c >= 0x20 && c != 0x7F) chiave.push_back(c);
+        }
+        chiave = dettagli::trim(chiave);
+        if (chiave.size() > 48) {
+            chiave.resize(48);
+            if (chiave.back() >= 0xD800 && chiave.back() <= 0xDBFF) chiave.pop_back();
+        }
+        out.toggleChiave = chiave.empty() ? std::wstring(L"toggle") : std::move(chiave);
+
+        const auto* onVal = tg->trova("on");
+        const auto* valVal = tg->trova("value");
+        if (onVal && onVal->tipo == dettagli::Json::Bool) {
+            out.toggleStato = onVal->b;
+        } else if ((!onVal || onVal->tipo == dettagli::Json::Null) && valVal && valVal->tipo == dettagli::Json::Bool) {
+            out.toggleStato = valVal->b;
+        } else {
+            out.toggleStato = false;
+        }
+    }
 
     if (const auto* ic = root.trova("icon"); ic && ic->tipo == dettagli::Json::Obj) {
         out.iconaGlyph = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(ic->str("glyph"))));
@@ -749,7 +803,10 @@ inline Riepilogo caricaTutti(HANDLE stopEvent = nullptr) {
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         const std::wstring nome = fd.cFileName;
-        if (dettagli::finisceConJson(nome) && !dettagli::finisceConConfigJson(nome)) nomiFile.push_back(nome);
+        if (dettagli::finisceConJson(nome) && !dettagli::finisceConConfigJson(nome) &&
+            !dettagli::finisceConActionJson(nome)) {
+            nomiFile.push_back(nome);
+        }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 
@@ -896,6 +953,10 @@ inline bool creaEsempio() {
         "  tooltip      Live hover label on the dock\n"
         "  status       Header status pill text\n"
         "  statusColor  #RRGGBB hex color for the status pill\n"
+        "  toggle       { key, on } interactive switch in the flyout header:\n"
+        "                 key:     action key string (default \"toggle\", max 48 chars)\n"
+        "                 on:      boolean switch state (or fallback \"value\")\n"
+        "                 Clicking writes <id>.action.json without executing any shell command.\n"
         "  icon         { glyph, text, color, ring, animate }\n"
         "                 glyph:   ring | battery | spark | cpu | thermometer | tailscale | dot | text\n"
         "                 text:    up to 4 chars shown inside the dock tile (e.g. \"42\\u00b0\", \"VPN\")\n"

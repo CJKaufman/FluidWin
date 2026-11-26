@@ -3607,7 +3607,7 @@ private:
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
                   A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
                   A_LOGI_AGGIORNA, A_LOGI_GHUB,
-                  A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
+                  A_WPLUGIN_TOGGLE, A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
