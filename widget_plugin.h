@@ -26,6 +26,8 @@ namespace wplugin {
 static constexpr size_t MAX_FILE_BYTES = 256 * 1024;
 static constexpr size_t MAX_ITEMS = 32;
 static constexpr size_t MAX_WIDGETS = 16;
+static constexpr size_t MAX_CONFIG = 16;
+static constexpr size_t MAX_CONFIG_OPTIONS = 5;
 
 struct Colore {
     float r = 0, g = 0, b = 0;
@@ -38,13 +40,21 @@ struct Elemento {
     int progresso = -1;
 };
 
+struct ConfigVoce {
+    std::wstring chiave, titolo, spiega, tipo;
+    bool valBool = false;
+    std::wstring valStr;
+    std::vector<std::wstring> opzioni;
+};
+
 struct Widget {
-    std::wstring id, nome, sottotitolo, tooltip, stato, piedeTesto, piedeUrl;
+    std::wstring id, nome, sottotitolo, tooltip, stato, piedeTesto, piedeUrl, filePath;
     std::wstring iconaGlyph, iconaTesto;
     Colore iconaColore, statoColore;
     int iconaAnello = -1;
     bool abilitato = true;
     std::vector<Elemento> elementi;
+    std::vector<ConfigVoce> config;
 };
 
 struct Riepilogo {
@@ -213,6 +223,11 @@ inline bool finisceConJson(const std::wstring& nome) {
     return _wcsicmp(nome.c_str() + nome.size() - 5, L".json") == 0;
 }
 
+inline bool finisceConConfigJson(const std::wstring& nome) {
+    if (nome.size() < 12) return false;
+    return _wcsicmp(nome.c_str() + nome.size() - 12, L".config.json") == 0;
+}
+
 inline Colore parseColoreObj(const std::string& s) {
     Colore c;
     c.valido = parseColore(s, &c.r, &c.g, &c.b);
@@ -241,6 +256,13 @@ struct Json {
         if (tipo != Obj) return nullptr;
         for (const auto& [kk, vv] : obj) if (kk == k) return &vv;
         return nullptr;
+    }
+    void imposta(const std::string& k, Json v) {
+        if (tipo != Obj) { tipo = Obj; obj.clear(); }
+        for (auto& [kk, vv] : obj) {
+            if (kk == k) { vv = std::move(v); return; }
+        }
+        obj.emplace_back(k, std::move(v));
     }
     std::string str(const char* k, const char* def = "") const {
         const Json* v = trova(k);
@@ -391,6 +413,85 @@ inline bool parseVal(const std::string& in, size_t& p, Json& out, int depth) {
     return false;
 }
 
+inline void escapeJsonStr(const std::string& s, std::string& out) {
+    out.push_back('"');
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b"; break;
+            case '\f': out += "\\f"; break;
+            case '\n': out += "\\n"; break;
+            case '\r': out += "\\r"; break;
+            case '\t': out += "\\t"; break;
+            default:
+                if (c < 0x20) {
+                    char b[8];
+                    snprintf(b, 8, "\\u%04x", (unsigned)c);
+                    out += b;
+                } else {
+                    out.push_back((char)c);
+                }
+        }
+    }
+    out.push_back('"');
+}
+
+inline void dumpJsonImpl(const Json& v, std::string& out, bool pretty, int indent) {
+    auto nl = [&](int ind) {
+        out.push_back('\n');
+        out.append((size_t)ind * 2, ' ');
+    };
+    switch (v.tipo) {
+        case Json::Null: out += "null"; break;
+        case Json::Bool: out += (v.b ? "true" : "false"); break;
+        case Json::Num: {
+            char b[64];
+            if (std::isfinite(v.n) && std::floor(v.n) == v.n && std::abs(v.n) < 9e15) {
+                snprintf(b, 64, "%.0f", v.n);
+            } else {
+                snprintf(b, 64, "%.15g", v.n);
+            }
+            out += b;
+            break;
+        }
+        case Json::Str: escapeJsonStr(v.s, out); break;
+        case Json::Arr:
+            out.push_back('[');
+            if (!v.arr.empty()) {
+                for (size_t i = 0; i < v.arr.size(); i++) {
+                    if (i > 0) out.push_back(',');
+                    if (pretty) nl(indent + 1);
+                    dumpJsonImpl(v.arr[i], out, pretty, indent + 1);
+                }
+                if (pretty) nl(indent);
+            }
+            out.push_back(']');
+            break;
+        case Json::Obj:
+            out.push_back('{');
+            if (!v.obj.empty()) {
+                for (size_t i = 0; i < v.obj.size(); i++) {
+                    if (i > 0) out.push_back(',');
+                    if (pretty) nl(indent + 1);
+                    escapeJsonStr(v.obj[i].first, out);
+                    out += (pretty ? ": " : ":");
+                    dumpJsonImpl(v.obj[i].second, out, pretty, indent + 1);
+                }
+                if (pretty) nl(indent);
+            }
+            out.push_back('}');
+            break;
+    }
+}
+
+inline std::string dumpJson(const Json& v, bool pretty) {
+    std::string out;
+    dumpJsonImpl(v, out, pretty, 0);
+    if (pretty) out.push_back('\n');
+    return out;
+}
+
 inline bool parseJson(const std::string& in, Json& out) {
     size_t p = 0;
     if (in.size() >= 3 && (unsigned char)in[0] == 0xEF && (unsigned char)in[1] == 0xBB && (unsigned char)in[2] == 0xBF) p = 3;
@@ -413,17 +514,27 @@ inline bool ugualeElemento(const Elemento& a, const Elemento& b) {
            ugualeColore(a.colore, b.colore);
 }
 
+inline bool ugualeConfigVoce(const ConfigVoce& a, const ConfigVoce& b) {
+    return a.chiave == b.chiave && a.titolo == b.titolo && a.spiega == b.spiega &&
+           a.tipo == b.tipo && a.valBool == b.valBool && a.valStr == b.valStr &&
+           a.opzioni == b.opzioni;
+}
+
 inline bool ugualeWidget(const Widget& a, const Widget& b) {
     if (a.id != b.id || a.nome != b.nome || a.sottotitolo != b.sottotitolo ||
         a.tooltip != b.tooltip || a.stato != b.stato || a.piedeTesto != b.piedeTesto ||
-        a.piedeUrl != b.piedeUrl || a.iconaGlyph != b.iconaGlyph || a.iconaTesto != b.iconaTesto ||
+        a.piedeUrl != b.piedeUrl || a.filePath != b.filePath ||
+        a.iconaGlyph != b.iconaGlyph || a.iconaTesto != b.iconaTesto ||
         a.iconaAnello != b.iconaAnello || a.abilitato != b.abilitato ||
         !ugualeColore(a.iconaColore, b.iconaColore) || !ugualeColore(a.statoColore, b.statoColore) ||
-        a.elementi.size() != b.elementi.size()) {
+        a.elementi.size() != b.elementi.size() || a.config.size() != b.config.size()) {
         return false;
     }
     for (size_t i = 0; i < a.elementi.size(); i++) {
         if (!ugualeElemento(a.elementi[i], b.elementi[i])) return false;
+    }
+    for (size_t i = 0; i < a.config.size(); i++) {
+        if (!ugualeConfigVoce(a.config[i], b.config[i])) return false;
     }
     return true;
 }
@@ -463,6 +574,39 @@ inline void impostaWidgetAbilitato(const std::wstring& id, bool si) {
     const std::wstring sid = dettagli::sanificaId(id);
     const DWORD v = si ? 1 : 0;
     RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_WIDGET_PLUGIN, sid.c_str(), REG_DWORD, &v, sizeof(v));
+}
+
+inline std::wstring percorsoConfig(const std::wstring& id) {
+    const std::wstring dir = cartellaWidget();
+    if (dir.empty()) return L"";
+    return dir + L"\\" + dettagli::sanificaId(id) + L".config.json";
+}
+
+namespace dettagli {
+
+inline bool salvaConfigVal(const std::wstring& id, const std::wstring& chiave, Json val) {
+    if (id.empty() || chiave.empty()) return false;
+    const std::wstring dir = cartellaWidget();
+    if (dir.empty()) return false;
+    const std::wstring path = dir + L"\\" + sanificaId(id) + L".config.json";
+    Json root = Json::makeObj();
+    std::string raw;
+    if (leggiFile(path, raw)) {
+        Json parsed;
+        if (parseJson(raw, parsed) && parsed.tipo == Json::Obj) root = std::move(parsed);
+    }
+    root.imposta(inUtf8(chiave), std::move(val));
+    return scriviAtomico(path, dumpJson(root, true));
+}
+
+}  // namespace dettagli
+
+inline bool salvaConfigBool(const std::wstring& id, const std::wstring& chiave, bool val) {
+    return dettagli::salvaConfigVal(id, chiave, dettagli::Json::makeBool(val));
+}
+
+inline bool salvaConfigStr(const std::wstring& id, const std::wstring& chiave, const std::wstring& val) {
+    return dettagli::salvaConfigVal(id, chiave, dettagli::Json::makeStr(dettagli::inUtf8(val)));
 }
 
 inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fallbackId, Widget& out) {
@@ -508,6 +652,75 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
         out.piedeUrl = dettagli::trim(dettagli::daUtf8(ft->str("url")));
     }
 
+    if (const auto* cfg = root.trova("config"); cfg && cfg->tipo == dettagli::Json::Arr) {
+        for (const auto& it : cfg->arr) {
+            if (out.config.size() >= MAX_CONFIG) break;
+            if (it.tipo != dettagli::Json::Obj) continue;
+            const std::wstring chiave = dettagli::trim(dettagli::daUtf8(it.str("key")));
+            if (chiave.empty()) continue;
+            const bool dup = std::any_of(out.config.begin(), out.config.end(), [&](const ConfigVoce& x) {
+                return x.chiave == chiave;
+            });
+            if (dup) continue;
+            const std::wstring tipo = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(it.str("type"))));
+            if (tipo != L"toggle" && tipo != L"choice") continue;
+
+            ConfigVoce cv;
+            cv.chiave = chiave;
+            cv.titolo = dettagli::trim(dettagli::daUtf8(it.str("label")));
+            if (cv.titolo.empty()) cv.titolo = cv.chiave;
+            cv.spiega = dettagli::trim(dettagli::daUtf8(it.str("description")));
+            cv.tipo = tipo;
+
+            const auto* def = it.trova("default");
+            if (cv.tipo == L"toggle") {
+                cv.valBool = (def && def->tipo == dettagli::Json::Bool) ? def->b : false;
+            } else {
+                if (const auto* opts = it.trova("options"); opts && opts->tipo == dettagli::Json::Arr) {
+                    for (const auto& op : opts->arr) {
+                        if (cv.opzioni.size() >= MAX_CONFIG_OPTIONS) break;
+                        if (op.tipo != dettagli::Json::Str) continue;
+                        const std::wstring wop = dettagli::trim(dettagli::daUtf8(op.s));
+                        if (!wop.empty()) cv.opzioni.push_back(wop);
+                    }
+                }
+                const std::wstring defStr = (def && def->tipo == dettagli::Json::Str)
+                    ? dettagli::trim(dettagli::daUtf8(def->s))
+                    : L"";
+                if (!defStr.empty() && (cv.opzioni.empty() ||
+                    std::find(cv.opzioni.begin(), cv.opzioni.end(), defStr) != cv.opzioni.end())) {
+                    cv.valStr = defStr;
+                } else if (!cv.opzioni.empty()) {
+                    cv.valStr = cv.opzioni.front();
+                }
+            }
+            out.config.push_back(std::move(cv));
+        }
+    }
+
+    if (!out.config.empty()) {
+        const std::wstring cfgPath = percorsoConfig(out.id);
+        std::string cfgRaw;
+        dettagli::Json cfgJson;
+        if (!cfgPath.empty() && dettagli::leggiFile(cfgPath, cfgRaw) &&
+            dettagli::parseJson(cfgRaw, cfgJson) && cfgJson.tipo == dettagli::Json::Obj) {
+            for (auto& cv : out.config) {
+                const std::string keyUtf8 = dettagli::inUtf8(cv.chiave);
+                const auto* ov = cfgJson.trova(keyUtf8.c_str());
+                if (!ov) continue;
+                if (cv.tipo == L"toggle" && ov->tipo == dettagli::Json::Bool) {
+                    cv.valBool = ov->b;
+                } else if (cv.tipo == L"choice" && ov->tipo == dettagli::Json::Str) {
+                    const std::wstring wv = dettagli::trim(dettagli::daUtf8(ov->s));
+                    if (!wv.empty() && (cv.opzioni.empty() ||
+                        std::find(cv.opzioni.begin(), cv.opzioni.end(), wv) != cv.opzioni.end())) {
+                        cv.valStr = wv;
+                    }
+                }
+            }
+        }
+    }
+
     out.abilitato = widgetAbilitato(out.id);
     return true;
 }
@@ -525,7 +738,7 @@ inline Riepilogo caricaTutti(HANDLE stopEvent = nullptr) {
     do {
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
         const std::wstring nome = fd.cFileName;
-        if (dettagli::finisceConJson(nome)) nomiFile.push_back(nome);
+        if (dettagli::finisceConJson(nome) && !dettagli::finisceConConfigJson(nome)) nomiFile.push_back(nome);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
 
@@ -538,11 +751,13 @@ inline Riepilogo caricaTutti(HANDLE stopEvent = nullptr) {
     for (const std::wstring& fn : nomiFile) {
         if (out.widgets.size() >= MAX_WIDGETS) break;
         if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) break;
+        const std::wstring fullPath = dir + L"\\" + fn;
         std::string contenuto;
-        if (!dettagli::leggiFile(dir + L"\\" + fn, contenuto)) continue;
+        if (!dettagli::leggiFile(fullPath, contenuto)) continue;
         const std::wstring stem = fn.size() > 5 ? fn.substr(0, fn.size() - 5) : fn;
         Widget w;
         if (!parseWidgetJson(contenuto, stem, w)) continue;
+        w.filePath = fullPath;
         if (!visti.insert(w.id).second) continue;
         out.widgets.push_back(std::move(w));
     }
@@ -635,6 +850,23 @@ inline bool creaEsempio() {
         "      \"url\": \"https://github.com/clooudfn/FluidWin\"\n"
         "    }\n"
         "  ],\n"
+        "  \"config\": [\n"
+        "    {\n"
+        "      \"key\": \"compactMode\",\n"
+        "      \"label\": \"Compact mode\",\n"
+        "      \"description\": \"Show condensed service rows\",\n"
+        "      \"type\": \"toggle\",\n"
+        "      \"default\": false\n"
+        "    },\n"
+        "    {\n"
+        "      \"key\": \"unit\",\n"
+        "      \"label\": \"Temperature unit\",\n"
+        "      \"description\": \"Display unit for thermal metrics\",\n"
+        "      \"type\": \"choice\",\n"
+        "      \"default\": \"\\u00b0C\",\n"
+        "      \"options\": [\"\\u00b0C\", \"\\u00b0F\"]\n"
+        "    }\n"
+        "  ],\n"
         "  \"footer\": {\n"
         "    \"label\": \"Open widgets folder\"\n"
         "  }\n"
@@ -663,6 +895,12 @@ inline bool creaEsempio() {
         "                 progress: 0..100 bottom bar\n"
         "                 copy:     text copied to clipboard on click\n"
         "                 url:      http://, https://, or existing local file/folder path\n"
+        "  config       Array (max 16) rendered in Settings > Widgets > <widget>:\n"
+        "                 { key, label, description, type, default, options }\n"
+        "                 type:    \"toggle\" (bool default) | \"choice\" (string default)\n"
+        "                 options: string array (max 5) for type \"choice\"\n"
+        "                 User changes persist to <id>.config.json ({ \"<key>\": value })\n"
+        "                 in this folder and override defaults on reload.\n"
         "  footer       { label, url } (defaults to opening this folder if url is omitted)\n";
 
     const bool okJson = dettagli::scriviAtomico(dir + L"\\example-status.json", SAMPLE_JSON);
