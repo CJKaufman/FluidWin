@@ -2073,8 +2073,8 @@ private:
                 nuove.push_back(std::move(p));
             }
         }
-        { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
-        { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
+        if (!eNascosta(L"", AVVIO_PILA)) { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
+        if (!eNascosta(L"", AVVIO_CESTINO)) { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
         {
             std::vector<Voce> widgets;
             if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); widgets.push_back(std::move(c)); }
@@ -2130,7 +2130,7 @@ private:
             if (vecchia.uscente && vecchia.scala < 0.02) continue;
             vecchia.uscente = true; vecchia.finestre.clear(); vecchia.rimbalzoT0 = -1;
             size_t pos = std::min(j, nuove.size());
-            if (vecchia.fissata) { pos = std::min(pos, fissateTot); fissateTot++; }
+            if (vecchia.fissata && !voceDiFondo(vecchia.avvio)) { pos = std::min(pos, fissateTot); fissateTot++; }
             else pos = std::max(pos, fissateTot);
             Voce u = std::move(vecchia); vecchia.icona = nullptr;   // l'icona passa alla voce uscente: non va liberata qui sotto
             nuove.insert(nuove.begin() + pos, std::move(u));
@@ -5375,10 +5375,13 @@ private:
             const bool c = v.avvio == AVVIO_CESTINO;
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
             if (c) { auto x = menu::voce(testi::t(L"Svuota il cestino…", L"Empty Recycle Bin…"), 2); x.disattivata = !cestinoPieno; vv.push_back(menu::separatore()); vv.push_back(x); }
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Nascondi dal dock", L"Hide from dock"), 3));
             SetForegroundWindow(icone);
             const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
             if (s == 1) ShellExecuteW(nullptr, L"open", c ? L"shell:RecycleBinFolder" : cartellaDownload().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             if (s == 2) { SHEmptyRecycleBinW(icone, nullptr, 0); cestinoPieno = false; giroCestino = 0; dirty = true; }   // (chiede conferma Windows)
+            if (s == 3) nascondiApp(L"", v.avvio, v.nome);
             return;
         }
         // eseguibile vero sul disco (non quelli protetti delle app dello Store ne' ApplicationFrameHost)
