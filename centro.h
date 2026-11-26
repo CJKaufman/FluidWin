@@ -111,7 +111,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
     // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
     // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
-    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : tipo == P_LOGI ? rettLogi() : rettCentro());
+    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : tipo == P_LOGI ? rettLogi() : tipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
     const int stacco = (int)std::round(PAD + 10 * dpi);
     int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
     if (lato == 1) y1 = ic.bottom + stacco;
@@ -154,6 +154,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
     else if (tipo == P_AI) { aiStato = aiMon.copia(); aiVer = aiMon.versione.load(); aiLetto = true; aiScroll = 0; dirty = true; }
     else if (tipo == P_LOGI) { logiStato = logiMon.copia(); logiVer = logiMon.versione.load(); logiScroll = 0; logiMon.aggiornaOra(); dirty = true; }
+    else if (tipo == P_WPLUGIN) { wplugStato = wplugMon.copia(); wplugVer = wplugMon.versione.load(); wplugScroll = 0; dirty = true; }
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -168,6 +169,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_WIFI) h = altezzaWifi() + testa;
     else if (tipo == P_AI) h = altezzaAI();
     else if (tipo == P_LOGI) h = altezzaLogi();
+    else if (tipo == P_WPLUGIN) h = altezzaWPlugin();
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -177,7 +179,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
 inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     if (pannelloTipo == P_NESSUNO || pChiusura || tipo == pannelloTipo) return;
     vistaPrima = pannelloTipo; phPrima = PH;
-    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI && tipo != P_LOGI;
+    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI && tipo != P_LOGI && tipo != P_WPLUGIN;
     if (vistaAvanti) origineVista = origineRitorno = origine;
     preparaVista(tipo);
     pannelloTipo = tipo;
@@ -188,7 +190,7 @@ inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     pAnimazione = true; pDirty = true;
 }
 
-inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
+inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
 
 inline auto Motore::inTransizione() const -> bool { return tVista >= 0; }
 
@@ -340,7 +342,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
     {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : pannelloTipo == P_LOGI ? rettLogi() : rettCentro());
+        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : pannelloTipo == P_LOGI ? rettLogi() : pannelloTipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
         const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
         const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
         m = D2D1::Matrix3x2F::Scale(s, s, p);
@@ -488,6 +490,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
     if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
     else if (tipo == P_AI) disegnaAI(scuro, ink);
     else if (tipo == P_LOGI) disegnaLogi(scuro, ink);
+    else if (tipo == P_WPLUGIN) disegnaWPlugin(scuro, ink);
     else {
         const float testa = std::round(TESTA * dpi);
         disegnaTesta(tipo, scuro, ink);
@@ -1873,6 +1876,224 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
     evidenzia(aggiungi(rPiede, A_LOGI_GHUB, 0), rPiede, scuro, 6 * dpi);
     pennello->SetColor(ink);
     scrivi(testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
+}
+
+// ---- Widget personalizzati (JSON) ----
+static constexpr float WP_TESTA = 62, WP_TESTA_COMP = 52, WP_SCHEDA = 70, WP_PIEDE = 48;
+
+inline auto Motore::sincronizzaWPlugin() -> void {
+    const uint64_t v = wplugMon.versione.load(std::memory_order_relaxed);
+    if (v == wplugVer) return;
+    wplugin::Riepilogo nuovo = wplugMon.copia();
+    auto attivaFirma = [](const wplugin::Riepilogo& r) {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        for (const auto& w : r.widgets) if (w.abilitato) out.emplace_back(w.id, w.nome);
+        return out;
+    };
+    const bool listaCambiata = attivaFirma(nuovo) != attivaFirma(wplugStato);
+    wplugStato = std::move(nuovo);
+    wplugVer = v;
+    if (listaCambiata && attivo) aggiornaApp();
+    dirty = true;
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_WPLUGIN && !pChiusura) {
+        const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+        if (!pw || !pw->abilitato) {
+            chiudiPannello();
+        } else {
+            const float nuova = altezzaVista(P_WPLUGIN);
+            if (nuova != PH) { PH = nuova; pAnimazione = true; }
+            pSopra = pPremuto = -1;
+            evidP.clear();
+            pDirty = true;
+        }
+    }
+    usa(s);
+}
+
+inline auto Motore::apriWPlugin(const std::wstring& id) -> void {
+    if (!attivo || nascostoSchermoIntero || id.empty()) return;
+    if (lAperto) {
+        wplugIdAperto = id;
+        if (!lChiusura) chiudiLauncher();
+        if (dopo != 2) apriDopo(2, P_WPLUGIN);
+        return;
+    }
+    usa(0);
+    if (pannelloTipo == P_WPLUGIN && !pChiusura && wplugIdAperto == id) {
+        chiudiPannello();
+        return;
+    }
+    if (pannelloTipo != P_NESSUNO && !(pannelloTipo == P_WPLUGIN && pChiusura && wplugIdAperto == id)) {
+        nascondiPannello();
+    }
+    wplugIdAperto = id;
+    wplugScroll = 0;
+    apriPannello(P_WPLUGIN);
+}
+
+inline auto Motore::altezzaWPlugin() const -> float {
+    const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+    const float testa = (pw && !pw->sottotitolo.empty()) ? WP_TESTA : WP_TESTA_COMP;
+    const float corpo = (!pw || pw->elementi.empty()) ? 74.0f : (float)pw->elementi.size() * WP_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((testa + corpo + WP_PIEDE) * dpi));
+}
+
+inline auto Motore::disegnaWPlugin(bool scuro, D2D1_COLOR_F ink) -> void {
+    const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+    if (!pw) return;
+    const wplugin::Widget& w = *pw;
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+    const float testaH = w.sottotitolo.empty() ? WP_TESTA_COMP : WP_TESTA;
+
+    float pwPill = 0;
+    D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+    D2D1_COLOR_F pillFg = tenue;
+    if (!w.stato.empty()) {
+        pwPill = std::min(larghezzaTesto(w.stato, fmtNome) + 16 * dpi, (PW - 2 * m) * 0.45f);
+        if (w.statoColore.valido) {
+            pillFg = D2D1::ColorF(w.statoColore.r, w.statoColore.g, w.statoColore.b, 1.0f);
+            pillBg = D2D1::ColorF(pillFg.r, pillFg.g, pillFg.b, scuro ? 0.20f : 0.14f);
+        } else {
+            pillFg = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1.0f) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1.0f);
+            pillBg = D2D1::ColorF(pillFg.r, pillFg.g, pillFg.b, scuro ? 0.20f : 0.14f);
+        }
+    }
+
+    const float titleTop = w.sottotitolo.empty() ? 14 * dpi : 10 * dpi;
+    const float titleBot = titleTop + 24 * dpi;
+    const float maxTitleW = std::max(40 * dpi, PW - 2 * m - (pwPill >= 24 * dpi ? pwPill + 12 * dpi : 0));
+    const float lt = std::min(larghezzaTesto(w.nome, fmtTitolo), maxTitleW);
+    pennello->SetColor(ink);
+    scrivi(w.nome, fmtTitolo, {m, titleTop, m + lt + 6 * dpi, titleBot});
+
+    if (pwPill >= 24 * dpi) {
+        const float px0 = m + lt + 12 * dpi;
+        const float pTop = w.sottotitolo.empty() ? 17 * dpi : 13 * dpi;
+        const D2D1_RECT_F rpPill = {px0, pTop, std::min(PW - m, px0 + pwPill), pTop + 18 * dpi};
+        if (rpPill.right - rpPill.left >= 20 * dpi) {
+            pennello->SetColor(pillBg);
+            dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+            pennello->SetColor(pillFg);
+            scrivi(w.stato, fmtNome, rpPill);
+        }
+    }
+
+    if (!w.sottotitolo.empty()) {
+        pennello->SetColor(tenue);
+        scrivi(w.sottotitolo, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
+    }
+
+    const float listTop = testaH * dpi;
+    const float listBottom = PH - WP_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    if (w.elementi.empty()) {
+        wplugScroll = 0;
+        wplugScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 68 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(testi::t(L"Nessun elemento", L"No items"), fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Aggiorna il file JSON per mostrare dati", L"Update the JSON file to display items"),
+               fmtSotto, {re.left + 14 * dpi, re.top + 31 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const float contentH = (float)w.elementi.size() * WP_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        wplugScrollMax = std::max(0.0f, contentH - viewH);
+        wplugScroll = std::clamp(wplugScroll, 0.0f, wplugScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        const size_t zona0 = elementi.size();
+        for (size_t i = 0; i < w.elementi.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * WP_SCHEDA * dpi - wplugScroll;
+            if (cy0 + (WP_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const wplugin::Elemento& el = w.elementi[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (WP_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+            if (!el.url.empty() || !el.copia.empty()) {
+                evidenzia(aggiungi(r, A_WPLUGIN_ITEM, (int)i), r, scuro, rp);
+            }
+
+            float tx = r.left + 14 * dpi;
+            if (el.colore.valido) {
+                pennello->SetColor(D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f));
+                dc->FillEllipse({{r.left + 16 * dpi, r.top + 20 * dpi}, 4.0f * dpi, 4.0f * dpi}, pennello);
+                tx = r.left + 28 * dpi;
+            }
+
+            float limTit = r.right - 12 * dpi;
+            if (!el.badge.empty()) {
+                const float tw = std::clamp(larghezzaTesto(el.badge, fmtNome) + 14 * dpi, 34 * dpi, 120 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                const D2D1_COLOR_F bc = el.colore.valido ? D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f) : tenue;
+                pennello->SetColor(el.colore.valido
+                                   ? D2D1::ColorF(bc.r, bc.g, bc.b, scuro ? 0.20f : 0.14f)
+                                   : (scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f)));
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(bc);
+                scrivi(el.badge, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+            }
+
+            if (!el.titolo.empty()) {
+                pennello->SetColor(ink);
+                scrivi(el.titolo, fmtVoce, {tx, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+            }
+            if (!el.sotto.empty()) {
+                pennello->SetColor(tenue);
+                scrivi(el.sotto, fmtSotto, {tx, r.top + 31 * dpi, r.right - 12 * dpi, r.top + 49 * dpi});
+            }
+
+            if (el.progresso >= 0) {
+                const D2D1_RECT_F track = {r.left + 12 * dpi, r.bottom - 7.5f * dpi, r.right - 12 * dpi, r.bottom - 4.5f * dpi};
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+                dc->FillRoundedRectangle({track, 1.5f * dpi, 1.5f * dpi}, pennello);
+                if (el.progresso > 0) {
+                    const float fw = std::max(3.0f * dpi, (track.right - track.left) * (std::clamp(el.progresso, 0, 100) / 100.0f));
+                    const D2D1_COLOR_F barCol = el.colore.valido
+                        ? D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f)
+                        : D2D1::ColorF(0.04f, 0.52f, 1.0f, 1.0f);
+                    pennello->SetColor(barCol);
+                    dc->FillRoundedRectangle({{track.left, track.top, track.left + fw, track.bottom}, 1.5f * dpi, 1.5f * dpi}, pennello);
+                }
+            }
+        }
+        dc->PopAxisAlignedClip();
+
+        for (size_t k = zona0; k < elementi.size();) {
+            D2D1_RECT_F& zr = elementi[k].r;
+            zr.top = std::max(zr.top, listTop);
+            zr.bottom = std::min(zr.bottom, listBottom);
+            if (zr.bottom <= zr.top) elementi.erase(elementi.begin() + (std::ptrdiff_t)k);
+            else k++;
+        }
+
+        if (wplugScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (wplugScroll / wplugScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_WPLUGIN_FOOTER, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    const std::wstring lbl = !w.piedeTesto.empty() ? w.piedeTesto : std::wstring(testi::t(L"Apri cartella widget", L"Open widgets folder"));
+    scrivi(lbl, fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
     chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
 }
 
@@ -3484,6 +3705,24 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             chiudiPannello();
             logitech::apriGHub();
             break;
+        case A_WPLUGIN_ITEM:
+            if (const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto)) {
+                if (e.indice >= 0 && e.indice < (int)pw->elementi.size()) {
+                    const std::wstring url = pw->elementi[e.indice].url;
+                    const std::wstring copia = pw->elementi[e.indice].copia;
+                    chiudiPannello();
+                    wplugin::eseguiAzione(url, copia, icone);
+                }
+            }
+            break;
+        case A_WPLUGIN_FOOTER: {
+            const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+            const std::wstring url = pw ? pw->piedeUrl : std::wstring();
+            chiudiPannello();
+            if (!url.empty()) wplugin::eseguiAzione(url, L"", icone);
+            else wplugin::apriCartellaWidget();
+            break;
+        }
     }
 }
 
@@ -3605,6 +3844,10 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 d->logiScroll = std::clamp(d->logiScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->logiScrollMax);
                 d->pDirty = true;
             }
+            else if (d->pannelloTipo == P_WPLUGIN) {
+                d->wplugScroll = std::clamp(d->wplugScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->wplugScrollMax);
+                d->pDirty = true;
+            }
             return 0;
         // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
         case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;
@@ -3649,7 +3892,7 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
                 // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
                 POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo(), ia = d->rettAISchermo(), il = d->rettLogiSchermo();
-                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt))) return 0;
+                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || d->suIconaWPluginSchermo(pt))) return 0;
                 d->chiudiTutte();
             }
             return 0;
@@ -3700,6 +3943,15 @@ inline auto Motore::rettLogi() const -> D2D1_RECT_F {
     return {x, yb - S, x + S, yb};
 }
 
+inline auto Motore::rettWPlugin(const std::wstring& id) const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    const std::wstring av = AVVIO_WPLUGIN_PREF + id;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == av) { x = pos[i]; break; }
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
 // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
 inline auto Motore::rettIsolaSchermo() const -> RECT {
     const D2D1_RECT_F r = rettCentro();
@@ -3718,6 +3970,22 @@ inline auto Motore::rettLogiSchermo() const -> RECT {
     return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
 }
 
+inline auto Motore::rettWPluginSchermo(const std::wstring& id) const -> RECT {
+    const wplugin::Widget* pw = trovaWPlugin(id);
+    if (!pw || !pw->abilitato) return RECT{};
+    const D2D1_RECT_F r = rettWPlugin(id);
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
+inline auto Motore::suIconaWPluginSchermo(POINT pt) const -> bool {
+    for (const auto& w : wplugStato.widgets) {
+        if (!w.abilitato) continue;
+        const RECT r = rettWPluginSchermo(w.id);
+        if (PtInRect(&r, pt)) return true;
+    }
+    return false;
+}
+
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
@@ -3731,8 +3999,8 @@ inline auto Motore::apriCentro(int tipo) -> void {
     if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
     usa(0);
     if (pannelloTipo != P_NESSUNO && !pChiusura) {
-        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI)) { chiudiPannello(); return; }
-        if (tipo == P_AI || pannelloTipo == P_AI || tipo == P_LOGI || pannelloTipo == P_LOGI) { nascondiPannello(); apriPannello(tipo); return; }
+        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN)) { chiudiPannello(); return; }
+        if (tipo == P_AI || pannelloTipo == P_AI || tipo == P_LOGI || pannelloTipo == P_LOGI || tipo == P_WPLUGIN || pannelloTipo == P_WPLUGIN) { nascondiPannello(); apriPannello(tipo); return; }
         cambiaVista(tipo, {PW / 2, PH / 2});   // (da fuori: la vista nuova si apre dal centro)
         return;
     }

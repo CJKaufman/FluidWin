@@ -184,6 +184,10 @@ public:
     std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
     std::function<std::vector<std::pair<std::wstring, std::wstring>>()> elencoNascoste;
     std::function<void(const std::wstring&)> mostraNascosta;
+    std::function<std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>()> elencoWPlugin;
+    std::function<void(const std::wstring&, bool)> impostaWPlugin;
+    std::function<void()> apriCartellaWPlugin;
+    std::function<void()> creaEsempioWPlugin;
 
     // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
@@ -564,7 +568,7 @@ private:
 
     // app nascoste dal dock (PR #20): "Mostra tutte", poi una riga per app da Z_MOSTRA_APP in su, senza limite (prima 651..699,
     // e dalla cinquantesima le righe non c'erano: R20261120-022133-S4)
-    static constexpr int Z_MOSTRA_TUTTE = 650, Z_MOSTRA_APP = 10000;
+    static constexpr int Z_MOSTRA_TUTTE = 650, Z_WPLUG_CARTELLA = 800, Z_WPLUG_ESEMPIO = 801, Z_MOSTRA_APP = 10000, Z_WPLUG_APP = 20000;
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
     // ---- sfondi (Generale, Fase 3): Z_SFONDO "Il tuo sfondo", Z_SFONDO + 1 + i gli sfondi di FluidWin (sfondi.h)
@@ -751,13 +755,31 @@ private:
             disegna();
             return;
         }
+        if (id == Z_WPLUG_CARTELLA) {
+            if (apriCartellaWPlugin) apriCartellaWPlugin();
+            return;
+        }
+        if (id == Z_WPLUG_ESEMPIO) {
+            if (creaEsempioWPlugin) creaEsempioWPlugin();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_WPLUG_APP) {
+            const auto wp = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
+            const size_t k = (size_t)(id - Z_WPLUG_APP);
+            if (k < wp.size() && impostaWPlugin) impostaWPlugin(wp[k].first, !wp[k].second.second);
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
         if (id == Z_MOSTRA_TUTTE) {
             if (mostraNascosta) mostraNascosta(L"");
             vetro::battito(v.fin, 1);
             disegna();
             return;
         }
-        if (id >= Z_MOSTRA_APP) {
+        if (id >= Z_MOSTRA_APP && id < Z_WPLUG_APP) {
             const auto nasc = elencoNascoste ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
             const size_t k = (size_t)(id - Z_MOSTRA_APP);
             if (k < nasc.size() && mostraNascosta) mostraNascosta(nasc[k].first);
@@ -1322,6 +1344,47 @@ private:
                     v.testo(tb, fCentro, rb, inkS);
                     v.testo(nascDock[k].second, fVoce, {ra.left + 16 * d, ra.top + 7 * d, rb.left - 12 * d, ra.top + 29 * d}, inkS);
                     v.testo(testi::t(L"Nascosta nel dock", L"Hidden in dock"), fSotto, {ra.left + 16 * d, ra.top + 28 * d, rb.left - 12 * d, ra.top + 48 * d}, tenueS);
+                    y += 60 * d;
+                }
+            }
+        }
+        if (sezione == S_WIDGET) {
+            const D2D1_RECT_F rh = {L, y, R, y + 92 * d};
+            riquadro(rh, false);
+            v.testo(testi::t(L"Widget personalizzati", L"Custom widgets"), fVoce, {rh.left + 16 * d, rh.top + 7 * d, rh.right - 16 * d, rh.top + 29 * d}, inkS);
+            v.testo(L"%LOCALAPPDATA%\\FluidWin\\widgets\\*.json", fSotto, {rh.left + 16 * d, rh.top + 27 * d, rh.right - 16 * d, rh.top + 47 * d}, tenueS);
+            const float yb = rh.top + 52 * d;
+            const std::wstring tb1 = testi::t(L"Apri cartella widget", L"Open widgets folder");
+            const float lw1 = v.larghezza(tb1, fCentro) + 26 * d;
+            const D2D1_RECT_F rb1 = {rh.left + 16 * d, yb, rh.left + 16 * d + lw1, yb + 30 * d};
+            aggiungiZona(rb1, Z_WPLUG_CARTELLA);
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == Z_WPLUG_CARTELLA ? 0.16f : 0.08f) * (float)e)
+                                    : D2D1::ColorF(0, 0, 0, (sopra == Z_WPLUG_CARTELLA ? 0.10f : 0.05f) * (float)e));
+            v.rt->FillRoundedRectangle({rb1, 15 * d, 15 * d}, v.pen);
+            v.testo(tb1, fCentro, rb1, inkS);
+
+            const std::wstring tb2 = testi::t(L"Crea widget di esempio", L"Create sample widget");
+            const float lw2 = v.larghezza(tb2, fCentro) + 26 * d;
+            const D2D1_RECT_F rb2 = {rb1.right + 10 * d, yb, std::min(rh.right - 16 * d, rb1.right + 10 * d + lw2), yb + 30 * d};
+            aggiungiZona(rb2, Z_WPLUG_ESEMPIO);
+            v.pen->SetColor(D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == Z_WPLUG_ESEMPIO ? 1.0f : 0.88f) * (float)e));
+            v.rt->FillRoundedRectangle({rb2, 15 * d, 15 * d}, v.pen);
+            v.testo(tb2, fCentro, rb2, D2D1::ColorF(1, 1, 1, (float)e));
+            y += 98 * d;
+
+            const auto wplugs = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
+            if (wplugs.empty()) {
+                riga(testi::t(L"Nessun widget personalizzato", L"No custom widgets found"),
+                     testi::t(L"Crea un esempio o aggiungi file .json nella cartella widget", L"Create a sample or drop .json files into the widgets folder"));
+            } else {
+                for (int k = 0; k < (int)wplugs.size(); k++) {
+                    const D2D1_RECT_F ra = {L, y, R, y + 54 * d};
+                    const int id = Z_WPLUG_APP + k;
+                    aggiungiZona(ra, id);
+                    riquadro(ra, sopra == id);
+                    v.testo(wplugs[k].second.first, fVoce, {ra.left + 16 * d, ra.top + 7 * d, ra.right - 74 * d, ra.top + 29 * d}, inkS);
+                    v.testo(wplugs[k].first + L".json", fSotto, {ra.left + 16 * d, ra.top + 28 * d, ra.right - 74 * d, ra.top + 48 * d}, tenueS);
+                    levetta(ra.right - 58 * d, (ra.top + ra.bottom) / 2, wplugs[k].second.second ? 1.0f : 0.0f, (float)e);
                     y += 60 * d;
                 }
             }

@@ -71,6 +71,7 @@
 #include "appunti.h"
 #include "ai.h"
 #include "logitech.h"
+#include "widget_plugin.h"
 #include <ole2.h>
 #include <commdlg.h>
 #include <knownfolders.h>
@@ -116,8 +117,11 @@ static std::wstring percorsoPilaPers(const std::wstring& a) { return ePilaPers(a
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
 static const wchar_t* const AVVIO_AI = L"*ai";                 // monitor AI (tra cestino e centro di controllo)
 static const wchar_t* const AVVIO_LOGI = L"*logitech";         // widget Logitech G HUB (tra monitor AI e centro di controllo)
+static const wchar_t* const AVVIO_WPLUGIN_PREF = L"*wplugin:";
+static bool eWPlugin(const std::wstring& a) { return a.rfind(AVVIO_WPLUGIN_PREF, 0) == 0; }
+static std::wstring idWPlugin(const std::wstring& a) { return eWPlugin(a) ? a.substr(wcslen(AVVIO_WPLUGIN_PREF)) : std::wstring(); }
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a) || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -370,7 +374,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
-    ~Motore() { aiMon.ferma(); logiMon.ferma(); }
+    ~Motore() { aiMon.ferma(); logiMon.ferma(); wplugMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -489,6 +493,7 @@ public:
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
         if (mostraAI) aiMon.avvia(icone, WM_AI_AGGIORNATO);
         if (mostraLogi) logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
+        wplugMon.avvia(icone, WM_WPLUGIN_AGGIORNATO);
         return true;
     }
 
@@ -503,7 +508,8 @@ public:
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
         const bool d = aiMon.ferma(ms);
         const bool e = logiMon.ferma(ms);
-        return a && b && c && d && e;
+        const bool f = wplugMon.ferma(ms);
+        return a && b && c && d && e && f;
     }
 
     void chiudi() {
@@ -665,6 +671,7 @@ public:
         }
         sincronizzaAI();
         sincronizzaLogi();
+        sincronizzaWPlugin();
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
         if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
@@ -920,6 +927,30 @@ public:
         const DWORD v = si ? 1 : 0;
         RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
                         REG_DWORD, &v, sizeof(v));
+    }
+    std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> elencoWPlugin() const {
+        std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> r;
+        r.reserve(wplugStato.widgets.size());
+        for (const auto& w : wplugStato.widgets) r.emplace_back(w.id, std::make_pair(w.nome, w.abilitato));
+        return r;
+    }
+    void impostaWPlugin(const std::wstring& id, bool si) {
+        wplugMon.impostaAbilitazione(id, si);
+        for (auto& w : wplugStato.widgets) if (w.id == id) w.abilitato = si;
+        wplugVer = wplugMon.versione.load(std::memory_order_relaxed);
+        if (!si) {
+            const int s = slotCorrente;
+            usa(0);
+            if (pannelloTipo == P_WPLUGIN && wplugIdAperto == id) chiudiPannello();
+            usa(s);
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
+    void ricaricaWPlugin() {
+        wplugMon.sincronizzaSubito();
+        sincronizzaWPlugin();
     }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
     // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
@@ -1955,6 +1986,11 @@ private:
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
         if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); nuove.push_back(std::move(c)); }
         if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; nuove.push_back(std::move(c)); }
+        for (const auto& w : wplugStato.widgets) {
+            if (!w.abilitato) continue;
+            Voce c; c.fissata = true; c.avvio = AVVIO_WPLUGIN_PREF + w.id; c.nome = w.nome;
+            nuove.push_back(std::move(c));
+        }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
@@ -1973,11 +2009,13 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI && !eWPlugin(v.avvio)) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
                 if (!vecchiaTrovata && !primaVolta) v.scala = 0;   // voce nuova: cresce da zero
+            } else if (!vecchiaTrovata && !primaVolta && eWPlugin(v.avvio)) {
+                v.scala = 0;
             }
             if (!vecchiaTrovata && !primaVolta && v.avvio == AVVIO_GIOCHI) v.scala = 0;
         }
@@ -2233,7 +2271,7 @@ private:
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
         const RECT is = rettIsolaSchermo(), ia = rettAISchermo(), il = rettLogiSchermo();
-        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt)) return;   // l'icona del centro, AI o Logitech: decide il suo clic
+        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || suIconaWPluginSchermo(pt)) return;   // l'icona del centro, AI, Logitech o widget: decide il suo clic
         HWND hw = WindowFromPoint(pt);
         if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
         if (pMenuTray) { pMenuTray = false; return; }
@@ -2509,6 +2547,13 @@ private:
                 if (aiStato.statoGlobale == ai::Stato::Occupato) movimento = true;
             }
             else if (v.avvio == AVVIO_LOGI) disegnaIconaLogi(r, alfa, scuro);
+            else if (eWPlugin(v.avvio)) {
+                if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) disegnaIconaWPlugin(r, alfa, scuro, *pw);
+                else {
+                    wplugin::Widget vuoto; vuoto.nome = v.nome; vuoto.id = idWPlugin(v.avvio);
+                    disegnaIconaWPlugin(r, alfa, scuro, vuoto);
+                }
+            }
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
@@ -2532,10 +2577,11 @@ private:
             };
             const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
             const bool logiAttivo = v.avvio == AVVIO_LOGI && schedaAperta(P_LOGI);
+            const bool wplugAttivo = eWPlugin(v.avvio) && schedaAperta(P_WPLUGIN) && wplugIdAperto == idWPlugin(v.avvio);
             const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
-                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI) ||
-                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI));
-            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI && altra.pannelloTipo != P_WPLUGIN));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || wplugAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -2640,6 +2686,9 @@ private:
                 } else {
                     etichettaTesto = L"Logitech";
                 }
+            } else if (eWPlugin(v.avvio)) {
+                const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio));
+                etichettaTesto = (pw && !pw->tooltip.empty()) ? pw->tooltip : (pw && !pw->nome.empty() ? pw->nome : v.nome);
             } else {
                 etichettaTesto = v.nome;
             }
@@ -3415,9 +3464,10 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI, P_WPLUGIN };
     static const UINT WM_AI_AGGIORNATO = WM_APP + 33;
     static const UINT WM_LOGI_AGGIORNATO = WM_APP + 52;
+    static const UINT WM_WPLUGIN_AGGIORNATO = WM_APP + 53;
     ai::Monitor aiMon;
     ai::Riepilogo aiStato;
     uint64_t aiVer = 0;
@@ -3436,6 +3486,20 @@ private:
     void sincronizzaLogi();
     float altezzaLogi() const;
     void disegnaLogi(bool scuro, D2D1_COLOR_F ink);
+    wplugin::Monitor wplugMon;
+    wplugin::Riepilogo wplugStato;
+    uint64_t wplugVer = 0;
+    std::wstring wplugIdAperto;
+    float wplugScroll = 0;
+    float wplugScrollMax = 0;
+    const wplugin::Widget* trovaWPlugin(const std::wstring& id) const {
+        for (const auto& w : wplugStato.widgets) if (w.id == id) return &w;
+        return nullptr;
+    }
+    void sincronizzaWPlugin();
+    float altezzaWPlugin() const;
+    void disegnaWPlugin(bool scuro, D2D1_COLOR_F ink);
+    void apriWPlugin(const std::wstring& id);
     // reti Wi-Fi (vista P_WIFI, wifi.h): ultima copia del thread, per il disegno
     wifi::Wifi wlan;
     std::vector<wifi::Rete> wlReti;
@@ -3462,7 +3526,8 @@ private:
                   A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
                   A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
-                  A_LOGI_AGGIORNA, A_LOGI_GHUB };
+                  A_LOGI_AGGIORNA, A_LOGI_GHUB,
+                  A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -4116,9 +4181,12 @@ public:
     D2D1_RECT_F rettCentro() const;
     D2D1_RECT_F rettAI() const;
     D2D1_RECT_F rettLogi() const;
+    D2D1_RECT_F rettWPlugin(const std::wstring& id) const;
     RECT rettIsolaSchermo() const;
     RECT rettAISchermo() const;
     RECT rettLogiSchermo() const;
+    RECT rettWPluginSchermo(const std::wstring& id) const;
+    bool suIconaWPluginSchermo(POINT pt) const;
     bool isolaVisibile() const;
 
     void apriPannelloIsola(int tipo);
@@ -4263,6 +4331,51 @@ private:
         }
     }
 
+    void disegnaArcoAnello(float cx, float cy, float ra, float sw, float a0, float sweep, D2D1_COLOR_F col) {
+        if (sweep >= 2.0f * (float)M_PI - 0.001f) {
+            pennello->SetColor(col);
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            return;
+        }
+        if (sweep <= 0.001f) return;
+        const float a1 = a0 + sweep;
+        ID2D1PathGeometry* gArc = nullptr;
+        ID2D1GeometrySink* sArc = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+            sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+            sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
+                                          D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                          sweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+            sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sArc->Close())) {
+                pennello->SetColor(col);
+                dc->DrawGeometry(gArc, pennello, sw, tratto);
+            }
+        }
+        if (sArc) sArc->Release();
+        if (gArc) gArc->Release();
+    }
+
+    void disegnaScintilla(float cx, float cy, float rs, D2D1_COLOR_F col) {
+        const float k = rs * 0.17f;
+        ID2D1PathGeometry* g = nullptr;
+        ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            s->BeginFigure({cx, cy - rs}, D2D1_FIGURE_BEGIN_FILLED);
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy - k}, {cx + rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy + k}, {cx, cy + rs}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy + k}, {cx - rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy - k}, {cx, cy - rs}));
+            s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(s->Close())) {
+                pennello->SetColor(col);
+                dc->FillGeometry(g, pennello);
+            }
+        }
+        if (s) s->Release();
+        if (g) g->Release();
+    }
+
     void disegnaIconaAI(const D2D1_RECT_F& r, float alfa, bool scuro) {
         const float d = r.right - r.left;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
@@ -4281,50 +4394,18 @@ private:
             dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
             const float a0 = (float)std::fmod(ultimoT * 2.8, 2.0 * M_PI);
-            const float sweep = (float)(1.35 * M_PI);
-            const float a1 = a0 + sweep;
             const float pulse = 0.5f + 0.5f * std::sin((float)ultimoT * 3.8f);
             const D2D1_COLOR_F colArc = D2D1::ColorF(0.16f + 0.38f * pulse, 0.78f - 0.30f * pulse, 1.0f, (0.78f + 0.22f * pulse) * alfa);
-            ID2D1PathGeometry* gArc = nullptr;
-            ID2D1GeometrySink* sArc = nullptr;
-            if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
-                sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
-                sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
-                                              D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-                sArc->EndFigure(D2D1_FIGURE_END_OPEN);
-                if (SUCCEEDED(sArc->Close())) {
-                    pennello->SetColor(colArc);
-                    dc->DrawGeometry(gArc, pennello, sw, tratto);
-                }
-            }
-            if (sArc) sArc->Release();
-            if (gArc) gArc->Release();
+            disegnaArcoAnello(cx, cy, ra, sw, a0, (float)(1.35 * M_PI), colArc);
         }
 
         const float rs = d * (busy ? 0.21f : 0.25f);
-        const float k = rs * 0.17f;
         D2D1_COLOR_F colSpark = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.85f * alfa);
         if (busy) colSpark = scuro ? D2D1::ColorF(0.48f, 0.85f, 1.0f, alfa) : D2D1::ColorF(0.22f, 0.42f, 0.98f, alfa);
         else if (st == ai::Stato::InAttesa) colSpark = D2D1::ColorF(0.96f, 0.62f, 0.10f, alfa);
         else if (st == ai::Stato::Errore) colSpark = D2D1::ColorF(0.95f, 0.28f, 0.24f, alfa);
         else if (st == ai::Stato::Completato && !aiLetto) colSpark = D2D1::ColorF(0.20f, 0.78f, 0.36f, alfa);
-
-        ID2D1PathGeometry* g = nullptr;
-        ID2D1GeometrySink* s = nullptr;
-        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
-            s->BeginFigure({cx, cy - rs}, D2D1_FIGURE_BEGIN_FILLED);
-            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy - k}, {cx + rs, cy}));
-            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy + k}, {cx, cy + rs}));
-            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy + k}, {cx - rs, cy}));
-            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy - k}, {cx, cy - rs}));
-            s->EndFigure(D2D1_FIGURE_END_CLOSED);
-            if (SUCCEEDED(s->Close())) {
-                pennello->SetColor(colSpark);
-                dc->FillGeometry(g, pennello);
-            }
-        }
-        if (s) s->Release();
-        if (g) g->Release();
+        disegnaScintilla(cx, cy, rs, colSpark);
 
         if (aiStato.occupati > 1 && d > 10.0f) {
             wchar_t b[12];
@@ -4417,6 +4498,115 @@ private:
         disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
     }
 
+    void disegnaIconaWPlugin(const D2D1_RECT_F& r, float alfa, bool scuro, const wplugin::Widget& w) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        if (d <= 8.0f) return;
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const D2D1_COLOR_F acc = w.iconaColore.valido
+            ? D2D1::ColorF(w.iconaColore.r, w.iconaColore.g, w.iconaColore.b, alfa)
+            : (scuro ? D2D1::ColorF(0.28f, 0.74f, 1.0f, alfa) : D2D1::ColorF(0.04f, 0.48f, 0.96f, alfa));
+        const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.86f * alfa);
+        const bool haAnello = w.iconaAnello >= 0;
+
+        if (haAnello) {
+            const float ra = d * 0.33f;
+            const float sw = std::max(1.8f, d * 0.075f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            const float sweep = 2.0f * (float)M_PI * (std::clamp(w.iconaAnello, 0, 100) / 100.0f);
+            disegnaArcoAnello(cx, cy, ra, sw, -(float)M_PI / 2.0f, sweep, acc);
+        }
+
+        if (!w.iconaTesto.empty()) {
+            IDWriteTextLayout* lay = nullptr;
+            if (SUCCEEDED(fdw->CreateTextLayout(w.iconaTesto.c_str(), (UINT32)w.iconaTesto.size(), fmtVoce, 400, 100, &lay))) {
+                lay->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                lay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                lay->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                DWRITE_TEXT_METRICS tm{};
+                lay->GetMetrics(&tm);
+                const float maxW = d * (haAnello ? 0.44f : 0.72f);
+                const float maxH = d * (haAnello ? 0.40f : 0.56f);
+                const float scT = std::min(maxW / std::max(1.0f, tm.widthIncludingTrailingWhitespace),
+                                           maxH / std::max(1.0f, tm.height));
+                D2D1_MATRIX_3X2_F orig{};
+                dc->GetTransform(&orig);
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(scT, scT, {cx, cy}) * orig);
+                pennello->SetColor((haAnello || !w.iconaColore.valido) ? ink : acc);
+                lay->SetMaxWidth(400);
+                lay->SetMaxHeight(100);
+                dc->DrawTextLayout({cx - 200.0f, cy - 50.0f}, lay, pennello);
+                dc->SetTransform(orig);
+                lay->Release();
+            }
+            return;
+        }
+
+        const float s = haAnello ? 0.68f : 1.0f;
+        if (w.iconaGlyph == L"spark") {
+            disegnaScintilla(cx, cy, d * (haAnello ? 0.19f : 0.25f), acc);
+        } else if (w.iconaGlyph == L"battery") {
+            const float bw = d * 0.42f * s, bh = d * 0.24f * s, swB = std::max(1.2f, d * 0.045f * s);
+            const D2D1_RECT_F rb = {cx - bw * 0.5f - d * 0.02f * s, cy - bh * 0.5f, cx + bw * 0.5f - d * 0.02f * s, cy + bh * 0.5f};
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({rb, bh * 0.22f, bh * 0.22f}, pennello, swB);
+            dc->FillRoundedRectangle({{rb.right + swB * 0.5f, cy - bh * 0.22f, rb.right + swB * 0.5f + d * 0.045f * s, cy + bh * 0.22f},
+                                      1.0f * dpi, 1.0f * dpi}, pennello);
+            const float pad = swB * 1.15f;
+            const float lvl = (haAnello ? std::clamp(w.iconaAnello, 0, 100) : 75) / 100.0f;
+            const float fw = std::max(0.0f, (rb.right - rb.left - 2.0f * pad) * lvl);
+            if (fw > 0.5f) {
+                pennello->SetColor(acc);
+                dc->FillRoundedRectangle({{rb.left + pad, rb.top + pad, rb.left + pad + fw, rb.bottom - pad},
+                                          bh * 0.10f, bh * 0.10f}, pennello);
+            }
+        } else if (w.iconaGlyph == L"thermometer") {
+            const float swT = std::max(1.2f, d * 0.042f * s), stemW = d * 0.11f * s;
+            const float topY = cy - d * 0.24f * s, bulbY = cy + d * 0.15f * s, bulbR = d * 0.105f * s;
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({{cx - stemW * 0.5f, topY, cx + stemW * 0.5f, bulbY}, stemW * 0.5f, stemW * 0.5f}, pennello, swT);
+            dc->DrawEllipse({{cx, bulbY}, bulbR, bulbR}, pennello, swT);
+            pennello->SetColor(acc);
+            dc->FillEllipse({{cx, bulbY}, bulbR * 0.68f, bulbR * 0.68f}, pennello);
+            const float fillFrac = (haAnello ? std::clamp(w.iconaAnello, 15, 100) : 65) / 100.0f;
+            const float mercTop = bulbY - (bulbY - topY - stemW * 0.4f) * fillFrac;
+            dc->DrawLine({cx, bulbY}, {cx, mercTop}, pennello, std::max(1.2f, stemW * 0.48f), tratto);
+        } else if (w.iconaGlyph == L"cpu") {
+            const float hw = d * 0.18f * s, swC = std::max(1.2f, d * 0.042f * s), pinL = d * 0.075f * s;
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({{cx - hw, cy - hw, cx + hw, cy + hw}, d * 0.045f * s, d * 0.045f * s}, pennello, swC);
+            for (int k : {-1, 1}) {
+                const float off = k * hw * 0.48f;
+                dc->DrawLine({cx + off, cy - hw}, {cx + off, cy - hw - pinL}, pennello, swC, tratto);
+                dc->DrawLine({cx + off, cy + hw}, {cx + off, cy + hw + pinL}, pennello, swC, tratto);
+                dc->DrawLine({cx - hw, cy + off}, {cx - hw - pinL, cy + off}, pennello, swC, tratto);
+                dc->DrawLine({cx + hw, cy + off}, {cx + hw + pinL, cy + off}, pennello, swC, tratto);
+            }
+            pennello->SetColor(acc);
+            dc->FillRoundedRectangle({{cx - hw * 0.46f, cy - hw * 0.46f, cx + hw * 0.46f, cy + hw * 0.46f},
+                                      d * 0.02f * s, d * 0.02f * s}, pennello);
+        } else if (w.iconaGlyph == L"ring" && !haAnello) {
+            const float ra = d * 0.28f, sw = std::max(1.8f, d * 0.07f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            pennello->SetColor(acc);
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            dc->FillEllipse({{cx, cy}, d * 0.08f, d * 0.08f}, pennello);
+        } else {
+            if (!haAnello) {
+                pennello->SetColor(D2D1::ColorF(acc.r, acc.g, acc.b, 0.22f * alfa));
+                dc->FillEllipse({{cx, cy}, d * 0.24f, d * 0.24f}, pennello);
+            }
+            pennello->SetColor(acc);
+            dc->FillEllipse({{cx, cy}, d * (haAnello ? 0.12f : 0.16f), d * (haAnello ? 0.12f : 0.16f)}, pennello);
+        }
+    }
+
     bool renderLauncher();
 
     static LRESULT CALLBACK procLauncher(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -4481,6 +4671,7 @@ private:
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
         if (v.avvio == AVVIO_AI) { aiLetto = true; dirty = true; apriCentro(P_AI); return; }
         if (v.avvio == AVVIO_LOGI) { apriCentro(P_LOGI); return; }
+        if (eWPlugin(v.avvio)) { apriWPlugin(idWPlugin(v.avvio)); return; }
         if (v.avvio == AVVIO_PILA || ePilaPers(v.avvio)) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
@@ -4658,7 +4849,7 @@ private:
         const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
-                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI;
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI && !eWPlugin(voci[s].avvio);
         if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
         if (ant.aperta()) {
             ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
@@ -4910,6 +5101,26 @@ private:
             else if (s == 3) logitech::apriGHub();
             return;
         }
+        if (eWPlugin(v.avvio)) {
+            const std::wstring id = idWPlugin(v.avvio);
+            const std::wstring nome = v.nome;
+            std::vector<menu::Voce> vv = {
+                menu::titolo(nome),
+                menu::voce(testi::t(L"Apri ", L"Open ") + nome, 1),
+                menu::voce(testi::t(L"Nascondi widget", L"Hide widget"), 2),
+                menu::separatore(),
+                menu::voce(testi::t(L"Apri cartella widget", L"Open widgets folder"), 3),
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) {
+                usa(0);
+                if (!(pannelloTipo == P_WPLUGIN && !pChiusura && wplugIdAperto == id)) apriWPlugin(id);
+            }
+            else if (s == 2) impostaWPlugin(id, false);
+            else if (s == 3) wplugin::apriCartellaWidget();
+            return;
+        }
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
             const bool c = v.avvio == AVVIO_CESTINO;
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
@@ -5159,6 +5370,7 @@ private:
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
             case WM_AI_AGGIORNATO: d->sincronizzaAI(); return 0;
             case WM_LOGI_AGGIORNATO: d->sincronizzaLogi(); return 0;
+            case WM_WPLUGIN_AGGIORNATO: d->sincronizzaWPlugin(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
