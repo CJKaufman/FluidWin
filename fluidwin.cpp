@@ -4812,6 +4812,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };
     gImpostazioni.elencoNascoste = [] { return gDockOk ? gDock.elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{}; };
     gImpostazioni.mostraNascosta = [](const std::wstring& c) { if (gDockOk) gDock.mostraAppNascosta(c); };
+    gImpostazioni.elencoWPlugin = [] { return gDockOk ? gDock.elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{}; };
+    gImpostazioni.impostaWPlugin = [](const std::wstring& id, bool si) { if (gDockOk) gDock.impostaWPlugin(id, si); };
+    gImpostazioni.apriCartellaWPlugin = [] { wplugin::apriCartellaWidget(); };
+    gImpostazioni.creaEsempioWPlugin = [] { wplugin::creaEsempio(); if (gDockOk) gDock.ricaricaWPlugin(); };
     affianca::registro() = [](const char* s) { logf("%s", s); };   // (prima di applicaImpostazioni, che spegne lo Snap)
     gAffRiquadro.scelto = [](HWND h, const RECT& z, HMONITOR) { logf("affianca %p: casella dal riquadro dei layout", h); affiancaInRett(h, false, z, "riquadro dei layout"); };
     applicaImpostazioni();
