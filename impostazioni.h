@@ -51,6 +51,7 @@ struct Valori {
     bool dockAI = false;          // icona Monitor AI nel dock
     bool dockLogi = false;        // widget Logitech G HUB nel dock
     bool logiAnimCarica = true;   // animazione di ricarica sull'anello Logitech
+    DWORD logiGlowColore = 0;     // colore bagliore ricarica Logitech: 0 automatico (ciano), altrimenti 0x00RRGGBB
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -148,6 +149,7 @@ inline void carica() {
     v.dockAI = leggiDword(L"DockAI", 0);
     v.dockLogi = leggiDword(L"DockLogi", 0);
     v.logiAnimCarica = leggiDword(L"LogiAnimCarica", 1);
+    v.logiGlowColore = leggiDword(L"LogiGlowColore", 0) & 0xFFFFFFu;
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -169,7 +171,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockGioco", v.dockGioco); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -603,7 +605,19 @@ private:
     static constexpr int Z_W_INDIETRO = 900, Z_W_APRI_AI = 901, Z_W_APRI_LOGI = 902, Z_W_MOSTRA_DOCK = 903,
                          Z_W_AI_AVVISI = 904, Z_W_AI_HOOK_AGY = 905, Z_W_AI_HOOK_CLAUDE = 906, Z_W_AI_CARTELLA = 907,
                          Z_W_LOGI_ANIM = 908, Z_W_LOGI_GHUB = 909, Z_W_WPLUG_CARTELLA = 910, Z_W_WPLUG_JSON = 911,
+                         Z_W_LOGI_GLOW = 912,
                          Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
+    struct GlowSwatch { DWORD rgb; const wchar_t* nome; };
+    static constexpr GlowSwatch LOGI_GLOW_PALETTE[] = {
+        {0x000000, L"Auto"},
+        {0x30D158, L"Emerald"},
+        {0x32D2FF, L"Cyan"},
+        {0x0A84FF, L"Blue"},
+        {0xBF5AF2, L"Purple"},
+        {0xFF9F0A, L"Amber"},
+        {0xFF453A, L"Coral"},
+    };
+    static constexpr int N_LOGI_GLOW = (int)(sizeof(LOGI_GLOW_PALETTE) / sizeof(LOGI_GLOW_PALETTE[0]));
     int sliderWPlugDrag = -1;
     D2D1_RECT_F sliderWPlugTrack[wplugin::MAX_CONFIG]{};
     void aggiornaSliderWPlug(int idx, float mouseX) {
@@ -876,6 +890,14 @@ private:
             disegna();
             return;
         }
+        if (id >= Z_W_LOGI_GLOW && id < Z_W_LOGI_GLOW + N_LOGI_GLOW) {
+            valori().logiGlowColore = LOGI_GLOW_PALETTE[id - Z_W_LOGI_GLOW].rgb;
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
         if (id == Z_W_LOGI_GHUB) {
             if (apriGHub) apriGHub();
             return;
@@ -913,7 +935,9 @@ private:
                 const int rel = id - Z_W_CFG_OPT;
                 const size_t idx = (size_t)(rel / 8);
                 const size_t j = (size_t)(rel % 8);
-                if (dettagliWPlugin(wid, w) && idx < w.config.size() && w.config[idx].tipo == L"choice" && j < w.config[idx].opzioni.size()) {
+                if (dettagliWPlugin(wid, w) && idx < w.config.size() &&
+                    (w.config[idx].tipo == L"choice" || w.config[idx].tipo == L"color") &&
+                    j < w.config[idx].opzioni.size()) {
                     impostaConfigWPluginStr(wid, w.config[idx].chiave, w.config[idx].opzioni[j]);
                 }
             }
@@ -1607,6 +1631,74 @@ private:
             }
         }
         if (sezione == S_WIDGET && widgetSubAperto) {
+            struct SwatchVoce {
+                int zid = -1;
+                bool isAuto = false;
+                bool attivo = false;
+                D2D1_COLOR_F col{};
+            };
+            auto rigaSwatch = [&](const std::wstring& titolo, const std::wstring& sub, const std::vector<SwatchVoce>& swatches) {
+                if (swatches.empty()) return;
+                const float fe = (float)e;
+                const float cardH = (!sub.empty() ? 78.0f : 68.0f) * d;
+                const D2D1_RECT_F ra = {L, y, R, y + cardH};
+                bool anyHover = false;
+                for (const auto& sw : swatches) if (sopra == sw.zid) { anyHover = true; break; }
+                riquadro(ra, anyHover);
+
+                if (!sub.empty()) {
+                    v.testo(titolo, fVoce, {ra.left + 16 * d, ra.top + 8 * d, ra.right - 16 * d, ra.top + 28 * d}, inkS);
+                    v.testo(sub, fSotto, {ra.left + 16 * d, ra.top + 27 * d, ra.right - 16 * d, ra.top + 45 * d}, tenueS);
+                } else {
+                    v.testo(titolo, fVoce, {ra.left + 16 * d, ra.top + 9 * d, ra.right - 16 * d, ra.top + 31 * d}, inkS);
+                }
+
+                const float rBase = 10.0f * d;
+                const float passo = 28.0f * d;
+                const float xStart = ra.left + 16.0f * d + rBase;
+                const float cy = ra.bottom - 18.0f * d;
+                const float zTop = std::max(ra.top, cy - 16.0f * d);
+                const float zBot = std::min(ra.bottom, cy + 16.0f * d);
+
+                for (size_t j = 0; j < swatches.size(); j++) {
+                    const SwatchVoce& sw = swatches[j];
+                    const float cx = xStart + passo * (float)j;
+                    aggiungiZona({cx - passo * 0.5f, zTop, cx + passo * 0.5f, zBot}, sw.zid);
+
+                    const bool hovered = (sopra == sw.zid);
+                    const float r = hovered ? (rBase + 1.0f * d) : rBase;
+                    if (hovered) {
+                        const D2D1_COLOR_F halo = sw.isAuto
+                            ? D2D1::ColorF(0.20f, 0.85f, 0.90f, 0.24f * fe)
+                            : D2D1::ColorF(sw.col.r, sw.col.g, sw.col.b, 0.26f * fe);
+                        v.pen->SetColor(halo);
+                        v.rt->FillEllipse({{cx, cy}, r + 4.5f * d, r + 4.5f * d}, v.pen);
+                    }
+
+                    const D2D1_ELLIPSE el = {{cx, cy}, r, r};
+                    if (sw.isAuto) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.14f * fe) : D2D1::ColorF(0, 0, 0, 0.08f * fe));
+                        v.rt->FillEllipse(el, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.32f * fe) : D2D1::ColorF(0, 0, 0, 0.24f * fe));
+                        v.rt->DrawEllipse(el, v.pen, 1.0f);
+                        v.pen->SetColor(D2D1::ColorF(0.20f, 0.85f, 1.0f, 0.82f * fe));
+                        v.rt->DrawEllipse({{cx, cy}, r * 0.62f, r * 0.62f}, v.pen, 1.5f * d);
+                        v.pen->SetColor(D2D1::ColorF(0.19f, 0.82f, 0.35f, 0.92f * fe));
+                        v.rt->FillEllipse({{cx, cy}, r * 0.30f, r * 0.30f}, v.pen);
+                    } else {
+                        v.pen->SetColor(D2D1::ColorF(sw.col.r, sw.col.g, sw.col.b, fe));
+                        v.rt->FillEllipse(el, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * fe) : D2D1::ColorF(0, 0, 0, 0.16f * fe));
+                        v.rt->DrawEllipse(el, v.pen, 1.0f);
+                    }
+
+                    if (sw.attivo) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.96f * fe) : D2D1::ColorF(0.10f, 0.12f, 0.16f, 0.90f * fe));
+                        v.rt->DrawEllipse({{cx, cy}, r + 3.0f * d, r + 3.0f * d}, v.pen, 2.0f * d);
+                    }
+                }
+                y += cardH + 6 * d;
+            };
             if (widgetAperto == L"ai") {
                 rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
                             testi::t(L"Aggiunge l'icona di Monitor AI al dock", L"Add the AI Monitor icon to the dock"), animCampo(&Valori::dockAI));
@@ -1629,6 +1721,18 @@ private:
                             testi::t(L"Bagliore animato e impulso sull'anello della batteria durante la ricarica",
                                      L"Animated glow and pulse on the battery ring while charging"),
                             valori().logiAnimCarica ? 1.0f : 0.0f);
+                {
+                    std::vector<SwatchVoce> logiSwatches;
+                    logiSwatches.reserve(N_LOGI_GLOW);
+                    for (int j = 0; j < N_LOGI_GLOW; j++) {
+                        const DWORD rgb = LOGI_GLOW_PALETTE[j].rgb;
+                        logiSwatches.push_back({Z_W_LOGI_GLOW + j, rgb == 0, valori().logiGlowColore == rgb, colore(rgb)});
+                    }
+                    rigaSwatch(testi::t(L"Colore del bagliore", L"Glow color"),
+                               testi::t(L"Colore dell'anello e del bagliore durante la ricarica",
+                                        L"Accent color for the charging glow and shimmer"),
+                               logiSwatches);
+                }
                 rigaConPulsante(Z_W_LOGI_GHUB, L"Logitech G HUB",
                                 testi::t(L"Avvia o porta in primo piano Logitech G HUB", L"Launch or focus Logitech G HUB"),
                                 testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), false);
@@ -1667,6 +1771,18 @@ private:
                             v.testo(cv.opzioni[j], fCentro, rOpt, inkS);
                         }
                         y += 70 * d;
+                    } else if (cv.tipo == L"color" && !cv.opzioni.empty()) {
+                        const int nOpt = std::min<int>((int)cv.opzioni.size(), (int)wplugin::MAX_CONFIG_COLOR_OPTIONS);
+                        std::vector<SwatchVoce> cfgSwatches;
+                        cfgSwatches.reserve((size_t)nOpt);
+                        for (int j = 0; j < nOpt; j++) {
+                            const std::wstring& opt = cv.opzioni[(size_t)j];
+                            const bool isAuto = (opt == L"auto");
+                            float cr = 0, cg = 0, cb = 0;
+                            if (!isAuto) wplugin::parseColore(wplugin::dettagli::inUtf8(opt), &cr, &cg, &cb);
+                            cfgSwatches.push_back({Z_W_CFG_OPT + (int)i * 8 + j, isAuto, cv.valStr == opt, D2D1::ColorF(cr, cg, cb, 1.0f)});
+                        }
+                        rigaSwatch(cv.titolo, cv.spiega, cfgSwatches);
                     } else if (cv.tipo == L"slider") {
                         const int zid = Z_W_CFG_SLIDER + (int)i;
                         const bool dragging = (sliderWPlugDrag == (int)i);

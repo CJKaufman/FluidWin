@@ -969,6 +969,13 @@ public:
         logiAnimCarica = si;
         dirty = true;
     }
+    DWORD logiGlowColore = 0;
+    void impostaLogiGlowColore(DWORD rgb) {
+        rgb &= 0xFFFFFFu;
+        if (rgb == logiGlowColore) return;
+        logiGlowColore = rgb;
+        dirty = true;
+    }
     std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> elencoWPlugin() const {
         std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> r;
         r.reserve(wplugStato.widgets.size());
@@ -999,7 +1006,7 @@ public:
         for (auto& w : wplugStato.widgets) {
             if (w.id != sid) continue;
             for (auto& cv : w.config) {
-                if (cv.chiave == key && cv.tipo == L"choice") cv.valStr = val;
+                if (cv.chiave == key && (cv.tipo == L"choice" || cv.tipo == L"color")) cv.valStr = val;
             }
         }
         wplugMon.ricaricaOra();
@@ -4595,6 +4602,10 @@ private:
         dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
         const float pulse = animChg ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
+        const bool customGlow = animChg && logiGlowColore != 0;
+        const float gr = customGlow ? (((logiGlowColore >> 16) & 255) / 255.0f) : 0.20f;
+        const float gg = customGlow ? (((logiGlowColore >> 8) & 255) / 255.0f) : 0.90f;
+        const float gb = customGlow ? ((logiGlowColore & 255) / 255.0f) : 1.0f;
         const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.16f + 0.10f * pulse, 0.80f + 0.10f * pulse, 0.98f, alfa)
             : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
             : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
@@ -4627,7 +4638,7 @@ private:
             const float a0 = -(float)M_PI / 2.0f;
             const float sweep = (bat >= 100) ? (2.0f * (float)M_PI) : (2.0f * (float)M_PI * (bat / 100.0f));
             if (animChg && bat > 0) {
-                disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(0.18f, 0.86f, 1.0f, (0.14f + 0.14f * pulse) * alfa));
+                disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(gr, gg, gb, (0.14f + 0.14f * pulse) * alfa));
             }
             disegnaArcoLogi(a0, sweep, sw, colRing);
             if (animChg && sweep > 0.18f) {
@@ -4640,7 +4651,10 @@ private:
                 const float tailStart = std::max(a0, headA - tailLen);
                 const float tailSweep = headA - tailStart;
                 if (tailSweep > 0.02f) {
-                    disegnaArcoLogi(tailStart, tailSweep, sw * 1.15f, D2D1::ColorF(0.75f, 0.96f, 1.0f, 0.65f * env * alfa));
+                    const D2D1_COLOR_F trailCol = customGlow
+                        ? D2D1::ColorF(gr + (1.0f - gr) * 0.45f, gg + (1.0f - gg) * 0.45f, gb + (1.0f - gb) * 0.45f, 0.68f * env * alfa)
+                        : D2D1::ColorF(0.75f, 0.96f, 1.0f, 0.65f * env * alfa);
+                    disegnaArcoLogi(tailStart, tailSweep, sw * 1.15f, trailCol);
                     const float tipLen = std::min(tailSweep, 0.14f);
                     disegnaArcoLogi(headA - tipLen, tipLen, sw * 1.25f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * env * alfa));
                 }
@@ -4673,9 +4687,14 @@ private:
 
         const float gR = d * 0.165f;
         const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
+        const float sh = 0.32f + 0.28f * pulse;
         const D2D1_COLOR_F colG = animChg
-            ? (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
-                     : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa))
+            ? (customGlow
+                ? (scuro
+                    ? D2D1::ColorF(0.88f + (gr - 0.88f) * sh, 0.90f + (gg - 0.90f) * sh, 0.93f + (gb - 0.93f) * sh, inkA * alfa)
+                    : D2D1::ColorF(0.14f + (gr * 0.85f - 0.14f) * sh, 0.16f + (gg * 0.85f - 0.16f) * sh, 0.20f + (gb * 0.85f - 0.20f) * sh, inkA * alfa))
+                : (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
+                         : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa)))
             : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
                      : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa));
         disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
@@ -4706,16 +4725,19 @@ private:
         const D2D1_COLOR_F acc = animPulse
             ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.18f * pulse)
             : (waveGeneric > 0.0f ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.22f * waveGeneric) : baseAcc);
+        const D2D1_COLOR_F glowAcc = w.iconaGlow.valido
+            ? D2D1::ColorF(w.iconaGlow.r, w.iconaGlow.g, w.iconaGlow.b, alfa)
+            : acc;
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.86f * alfa);
         const bool haAnello = w.iconaAnello >= 0;
 
         if (animPulse) {
             const float haloA = (0.10f + 0.12f * pulse) * alfa;
-            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.22f));
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.22f));
             dc->FillEllipse({{cx, cy}, d * (0.37f + 0.035f * pulse), d * (0.37f + 0.035f * pulse)}, pennello);
-            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.34f));
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.34f));
             dc->FillEllipse({{cx, cy}, d * (0.28f + 0.025f * pulse), d * (0.28f + 0.025f * pulse)}, pennello);
-            pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, haloA * 0.48f));
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.48f));
             dc->FillEllipse({{cx, cy}, d * (0.19f + 0.015f * pulse), d * (0.19f + 0.015f * pulse)}, pennello);
         }
 
@@ -4841,14 +4863,15 @@ private:
                         const double phase = sec * 2.8 - idx * 0.65;
                         const float wv = 0.5f + 0.5f * (float)std::sin(phase);
                         const float glowR = dotR * (1.55f + 0.45f * wv);
-                        pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, (0.14f + 0.22f * wv) * alfa));
+                        pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, (0.14f + 0.22f * wv) * alfa));
                         dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
                         const float rDot = dotR * (1.0f + 0.12f * wv);
-                        pennello->SetColor(lerpCol(baseAcc, white, 0.35f * wv));
+                        const D2D1_COLOR_F crest = w.iconaGlow.valido ? lerpCol(glowAcc, white, 0.22f) : white;
+                        pennello->SetColor(lerpCol(acc, crest, (w.iconaGlow.valido ? 0.50f : 0.35f) * wv));
                         dc->FillEllipse({{px, py}, rDot, rDot}, pennello);
                     } else if (animPulse) {
                         const float glowR = dotR * (1.55f + 0.35f * pulse);
-                        pennello->SetColor(D2D1::ColorF(baseAcc.r, baseAcc.g, baseAcc.b, (0.12f + 0.16f * pulse) * alfa));
+                        pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, (0.12f + 0.16f * pulse) * alfa));
                         dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
                         pennello->SetColor(acc);
                         dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
