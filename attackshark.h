@@ -553,7 +553,11 @@ private:
         out.connesso = !out.dispositivi.empty();
         for (const auto& d : out.dispositivi) {
             if (!d.online) continue;
-            const int sogliaPieno = (d.tipo == L"Keyboard" || d.tipo == L"keyboard") ? 94 : 100;
+            const bool eMouse = (d.tipo == L"Mouse" || d.tipo == L"mouse");
+            const int sogliaPieno = eMouse ? 100 : 94;
+            const bool usbConnesso = (!eMouse && d.inCarica && d.batteria >= sogliaPieno) ||
+                                     (!d.inCarica && d.connessione == L"USB");
+            if (usbConnesso) continue;
             if (d.inCarica && (d.batteria < 0 || d.batteria < sogliaPieno)) out.alcunoInCarica = true;
             if (d.batteria >= 0 && (out.batteriaMin < 0 || d.batteria < out.batteriaMin)) {
                 out.batteriaMin = d.batteria;
