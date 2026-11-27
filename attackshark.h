@@ -298,31 +298,18 @@ inline TrovatiHid enumeraDispositivi(const HidApi& hid) {
     return res;
 }
 
-inline std::wstring interrogaNomeTastiera(const HidApi& hid, HANDLE hFeat, USHORT featLen) {
-    const ULONG len = std::max<ULONG>(64, featLen);
-    std::vector<BYTE> feat(len, 0);
-    feat[0] = 0x00;
-    feat[1] = 0x8F;
-    feat[8] = 0x70;
-    if (hid.setFeature(hFeat, feat.data(), len)) {
-        std::fill(feat.begin(), feat.end(), 0);
-        feat[0] = 0x00;
-        if (hid.getFeature(hFeat, feat.data(), len)) {
-            const uint16_t devId = (uint16_t)feat[2] | ((uint16_t)feat[3] << 8);
-            if (devId == 0x0490) return L"Attack Shark RK86";
-        }
-    }
-    return L"Attack Shark Keyboard";
-}
-
 struct StatoTastieraCache {
     bool nomeLetto = false;
-    std::wstring nome = L"Attack Shark Keyboard";
+    std::wstring nome = L"Attack Shark RK86";
     int batteria = -1;
 };
 
-inline bool interrogaTastiera(const HidApi& hid, const TrovatiHid::TastieraCol& col,
-                              StatoTastieraCache& cache, HANDLE stopEvent, Dispositivo& out) {
+// Passive-only detection for ROYUAN keyboards (3151:4015/4011/4010):
+// Never send SetFeature (e.g. 0x05 / 0x8F) because ROYUAN firmware treats
+// 0x05 with zero payload as an RGB lighting/mode reset that momentarily
+// turns off keyboard LEDs and drops the USB link.
+inline bool interrogaTastiera(const HidApi&, const TrovatiHid::TastieraCol& col,
+                              StatoTastieraCache& cache, HANDLE, Dispositivo& out) {
     wchar_t idBuf[24];
     swprintf(idBuf, 24, L"3151:%04X", (unsigned)col.pid);
     out = Dispositivo{};
@@ -330,111 +317,10 @@ inline bool interrogaTastiera(const HidApi& hid, const TrovatiHid::TastieraCol& 
     out.nome = cache.nome;
     out.tipo = L"Keyboard";
     out.connessione = (col.pid == PID_RK86_WIRED) ? L"USB" : L"2.4G Wireless";
-    out.batteria = (col.pid == PID_RK86_WIRED) ? -1 : cache.batteria;
-
-    HANDLE hIn = apriHidConRipiego(col.inPath, true, true);
-    HANDLE hFeat = apriHidConRipiego(col.featPath, false, false);
-    if (hIn == INVALID_HANDLE_VALUE || hFeat == INVALID_HANDLE_VALUE) {
-        if (hIn != INVALID_HANDLE_VALUE) CloseHandle(hIn);
-        if (hFeat != INVALID_HANDLE_VALUE) CloseHandle(hFeat);
-        if (col.pid == PID_RK86_WIRED) {
-            out.online = true;
-            out.attivo = true;
-        }
-        return true;
-    }
-
-    if (!cache.nomeLetto) {
-        cache.nome = interrogaNomeTastiera(hid, hFeat, col.featLen);
-        cache.nomeLetto = true;
-        out.nome = cache.nome;
-    }
-
-    bool risposto = false;
-    const ULONG featLen = std::max<ULONG>(64, col.featLen);
-    std::vector<BYTE> feat(featLen, 0);
-    feat[0] = 0x00;
-    feat[1] = 0x05;
-    feat[8] = 0xFA;
-
-    if (hid.setFeature(hFeat, feat.data(), featLen)) {
-        HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (ev) {
-            const DWORD inLen = std::max<DWORD>(4, col.inLen);
-            std::vector<BYTE> inBuf(inLen, 0);
-            const ULONGLONG scadenza = GetTickCount64() + KB_POLL_TIMEOUT_MS;
-
-            for (;;) {
-                const ULONGLONG ora = GetTickCount64();
-                if (ora >= scadenza) break;
-                const DWORD attesaMs = (DWORD)(scadenza - ora);
-
-                OVERLAPPED ov{};
-                ov.hEvent = ev;
-                ResetEvent(ev);
-                DWORD letti = 0;
-                BOOL ok = ReadFile(hIn, inBuf.data(), inLen, &letti, &ov);
-                if (!ok) {
-                    if (GetLastError() != ERROR_IO_PENDING) break;
-                    HANDLE waits[2] = {stopEvent, ev};
-                    const DWORD w = WaitForMultipleObjects(2, waits, FALSE, attesaMs);
-                    if (w == WAIT_OBJECT_0 || w == WAIT_FAILED) {
-                        CancelIoEx(hIn, &ov);
-                        GetOverlappedResult(hIn, &ov, &letti, TRUE);
-                        CloseHandle(ev);
-                        CloseHandle(hFeat);
-                        CloseHandle(hIn);
-                        return false;
-                    }
-                    if (w == WAIT_TIMEOUT) {
-                        CancelIoEx(hIn, &ov);
-                        GetOverlappedResult(hIn, &ov, &letti, TRUE);
-                        break;
-                    }
-                    if (!GetOverlappedResult(hIn, &ov, &letti, FALSE)) break;
-                }
-
-                if (letti >= 4 && inBuf[0] == 0x05) {
-                    const BYTE b1 = inBuf[1];
-                    const BYTE b2 = inBuf[2];
-                    if ((b1 == 0x0F && b2 == 0x01) || col.pid == PID_RK86_WIRED) {
-                        out.connessione = L"USB";
-                        out.batteria = -1;
-                        out.inCarica = false;
-                        out.online = true;
-                        out.attivo = true;
-                    } else if (b1 >= 1 && b1 <= 100) {
-                        out.connessione = L"2.4G Wireless";
-                        out.batteria = (int)b1;
-                        out.inCarica = (b2 == 1);
-                        out.online = true;
-                        out.attivo = true;
-                        cache.batteria = out.batteria;
-                    } else {
-                        out.connessione = L"2.4G Wireless";
-                        out.batteria = cache.batteria;
-                        out.inCarica = false;
-                        out.online = false;
-                        out.attivo = false;
-                    }
-                    risposto = true;
-                    break;
-                }
-            }
-            CloseHandle(ev);
-        }
-    }
-
-    CloseHandle(hFeat);
-    CloseHandle(hIn);
-
-    if (!risposto && col.pid == PID_RK86_WIRED) {
-        out.connessione = L"USB";
-        out.batteria = -1;
-        out.inCarica = false;
-        out.online = true;
-        out.attivo = true;
-    }
+    out.batteria = -1;
+    out.inCarica = false;
+    out.online = true;
+    out.attivo = true;
     return true;
 }
 
