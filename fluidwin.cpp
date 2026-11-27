@@ -4008,8 +4008,8 @@ static std::wstring diagnostica() {
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
-    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, ai %d, logi %d, logiAnim %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
-         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockAI, v.dockLogi, v.logiAnimCarica, v.dockLato);
+    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, ai %d, logi %d, logiAnim %d, aShark %d, aSharkAnim %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
+         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockAI, v.dockLogi, v.logiAnimCarica, v.dockAShark, v.aSharkAnimCarica, v.dockLato);
     // icone fissate del dock (solo conteggi, niente nomi di app): per le segnalazioni di icone doppie, vuote o mancanti
     if (gDockOk) { const auto& f = gDock.diagFissate;
         riga(L"Dock, app fissate: lista di Windows %ls, collegamenti %d, app di pacchetto %d, Squirrel di versioni cancellate %d, senza destinazione %d, file dell'icona mancante %d, doppie %d, scartate %d",
@@ -4064,6 +4064,7 @@ static void applicaImpostazioni() {
         logf("angoli: %s", v.angoli == 0 ? "arrotondati" : v.angoli == 1 ? "poco arrotondati" : "squadrati");
     }
     if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime); gDock.impostaAI(v.dockAI); gDock.impostaLogi(v.dockLogi); gDock.impostaLogiAnimCarica(v.logiAnimCarica); gDock.impostaLogiGlowColore(v.logiGlowColore);
+                   gDock.impostaAShark(v.dockAShark); gDock.impostaASharkAnimCarica(v.aSharkAnimCarica); gDock.impostaASharkGlowColore(v.aSharkGlowColore);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
     // Arabo acceso o spento: i formati di testo prendono la direzione (da destra a sinistra) quando nascono, e molti
     // vivono quanto FluidWin. Riavviare e' il modo sicuro di rifarli tutti
@@ -4740,6 +4741,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.impostaLogi(impostazioni::valori().dockLogi);
     gDock.impostaLogiAnimCarica(impostazioni::valori().logiAnimCarica);
     gDock.impostaLogiGlowColore(impostazioni::valori().logiGlowColore);
+    gDock.impostaAShark(impostazioni::valori().dockAShark);
+    gDock.impostaASharkAnimCarica(impostazioni::valori().aSharkAnimCarica);
+    gDock.impostaASharkGlowColore(impostazioni::valori().aSharkGlowColore);
     gDockOk = gDock.inizializza(inst);
     if (!gDockOk) { gDock.chiudi(); ripristinaBarra(); }
     else { mostraBarreWindows(false); gDock.controllaFinestre(); }
@@ -4838,6 +4842,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         }
     };
     gImpostazioni.apriGHub = [] { logitech::apriGHub(); };
+    gImpostazioni.apriAShark = [] { attackshark::apriSoftware(); };
     gImpostazioni.dettagliWPlugin = [](const std::wstring& id, wplugin::Widget& out) {
         return gDockOk && gDock.widgetWPlugin(id, out);
     };
