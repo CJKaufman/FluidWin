@@ -22,8 +22,8 @@ where you can drag files to delete them.
 
 Rest the mouse on an app to see **live previews** of its windows, rising from behind the icon. Right-click an app for
 its **commands** (new window, recent files and so on, the same ones Windows shows), drag icons to **reorder** them,
-and hide the apps you don't want to see. The dock can sit at the **bottom, top, left or right** of the screen, and it
-has buttons to show the desktop and bring your windows back.
+and hide the apps you don't want to see. The dock can sit at the **bottom, top, left or right** of the screen (hold
+**Alt** and drag it to another edge), and it has buttons to show the desktop and bring your windows back.
 
 If you use more than one screen, bring the mouse to the edge of the other screen and the dock moves there.
 
@@ -113,13 +113,33 @@ Windows cursors come back. It also works on Windows builds where the Windows set
 ### Settings
 
 Every feature can be turned on or off from the settings, divided into simple sections. You also choose the
-language (seven of them), the shape of the corners, where the dock sits, and one of FluidWin's own wallpapers.
+language (seven of them), the shape of the corners, how the dock glass looks, and one of FluidWin's own wallpapers.
 
 <p align="center">
   <img src="docs/gif/impostazioni.gif" width="560" alt="The settings window">
 </p>
 
 ...and a lot more.
+
+## What's new in 1.4.0
+
+The dock is now one piece of glass that grows into everything else.
+
+- **New dock glass:** the dock blurs and tints what is behind it, like real glass. Blur, tint, saturation and edge
+  light can be adjusted in Settings > Dock.
+- **The control center and the launcher grow out of the dock:** press the control center icon or the Windows key and
+  the dock glass stretches into the panel, then shrinks back when you close it.
+- **Settings inside the control center:** the FluidWin tile opens the settings right in the panel, with larger text
+  and controls.
+- **Move the dock by dragging it:** hold Alt and drag the dock to the bottom, top, left or right edge of the screen.
+- **Dock on the left or right:** the control center and the settings fill the whole height of the dock, with larger
+  controls and even spacing.
+- **Open windows are shown with small lines** under each icon (one line per window, up to three), always inside the
+  glass.
+- **Brightness for laptop screens** in the control center, and an **Energy saver** button that switches it directly.
+- **Time and date in the dock** fade in and out smoothly when you turn them on or off.
+- Settings are tidier: nothing is cut off any more (languages, corners, minimize style, long descriptions), and the
+  settings icon is easier to read.
 
 ## What's new in 1.3.1
 

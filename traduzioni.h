@@ -7,6 +7,12 @@
 namespace traduzioni {
 
 inline constexpr const wchar_t* RIGHE[][6] = {
+    // ---- centro di controllo: risparmio energia (1.4.0) ----
+    {L"Energy saver", L"Ahorro de energía", L"Économiseur d’énergie", L"Energiesparmodus", L"Economia de energia", L"موفر الطاقة"},
+    {L"Energy saver ✓", L"Ahorro de energía ✓", L"Économiseur d’énergie ✓", L"Energiesparmodus ✓", L"Economia de energia ✓", L"موفر الطاقة ✓"},
+    {L"Hold Alt and drag the dock to another edge of the screen", L"Mantén Alt y arrastra el dock a otro borde de la pantalla",
+     L"Maintenez Alt et faites glisser le dock vers un autre bord de l’écran", L"Alt halten und das Dock an einen anderen Bildschirmrand ziehen",
+     L"Segure Alt e arraste o dock para outra borda da tela", L"اضغط Alt مع الاستمرار واسحب الشريط إلى حافة أخرى من الشاشة"},
     // ---- aggiornamenti ----
     {L"Open the page", L"Abrir la página", L"Ouvrir la page", L"Seite öffnen", L"Abrir a página", L"فتح الصفحة"},
     {L"Close", L"Cerrar", L"Fermer", L"Schließen", L"Fechar", L"إغلاق"},
@@ -232,7 +238,10 @@ inline constexpr const wchar_t* RIGHE[][6] = {
     {L"The Windows menu, even with the FluidWin menu on", L"El menú de Windows, aun con el de FluidWin activado", L"Le menu Windows, même avec celui de FluidWin activé", L"Das Windows-Menü, auch wenn das FluidWin-Menü an ist", L"O menu do Windows, mesmo com o do FluidWin ligado", L"قائمة Windows، حتى مع تفعيل قائمة FluidWin"},
     {L"Win key opens the launcher", L"La tecla Win abre las apps", L"La touche Win ouvre les apps", L"Win-Taste öffnet die Apps", L"A tecla Win abre os apps", L"مفتاح Win يفتح التطبيقات"},
     {L"Your wallpaper", L"Tu fondo", L"Votre fond d'écran", L"Dein Hintergrund", L"Seu papel de parede", L"خلفيتك"},
-    {L"The dock's glass; icons stay solid", L"Solo el cristal del dock", L"Le verre du dock seulement", L"Nur das Dock-Glas", L"Só o vidro do dock", L"زجاج شريط الإرساء فقط"},
+    {L"Softens detail behind the dock", L"Suaviza los detalles detrás del dock", L"Adoucit les détails derrière le dock", L"Zeichnet Details hinter dem Dock weich", L"Suaviza os detalhes atrás do dock", L"ينعّم التفاصيل خلف شريط الإرساء"},
+    {L"How much tint covers the glass", L"Cuánto color cubre el cristal", L"Intensité de la teinte du verre", L"Wie stark die Tönung das Glas bedeckt", L"Quanto a cor cobre o vidro", L"مقدار تغطية اللون للزجاج"},
+    {L"Color intensity of the backdrop", L"Intensidad del color del fondo", L"Intensité des couleurs de l’arrière-plan", L"Farbstärke des Hintergrunds", L"Intensidade das cores do fundo", L"شدة ألوان الخلفية"},
+    {L"Strength of the rim highlight", L"Intensidad del reflejo en el borde", L"Intensité du reflet sur le bord", L"Stärke des Lichtreflexes am Rand", L"Intensidade do reflexo na borda", L"شدة انعكاس الضوء على الحافة"},
     {L"Settings · ", L"Configuración · ", L"Paramètres · ", L"Einstellungen · ", L"Configurações · ", L"الإعدادات · "},
     {L"Top", L"Arriba", L"En haut", L"Oben", L"Em cima", L"أعلى"},
     {L"Bottom", L"Abajo", L"En bas", L"Unten", L"Embaixo", L"أسفل"},
@@ -262,7 +271,10 @@ inline constexpr const wchar_t* RIGHE[][6] = {
     {L"Notch", L"Notch", L"Encoche", L"Notch", L"Notch", L"النتوء"},
     {L"FluidWin notifications", L"Notificaciones de FluidWin", L"Notifications FluidWin", L"FluidWin-Benachrichtigungen", L"Notificações do FluidWin", L"إشعارات FluidWin"},
     {L"Search light wave", L"Onda de luz de la búsqueda", L"Onde lumineuse de la recherche", L"Lichtwelle der Suche", L"Onda de luz da pesquisa", L"موجة ضوء البحث"},
-    {L"Opacity", L"Opacidad", L"Opacité", L"Deckkraft", L"Opacidade", L"العتامة"},
+    {L"Blur", L"Desenfoque", L"Flou", L"Weichzeichnung", L"Desfoque", L"التمويه"},
+    {L"Tint opacity", L"Opacidad del tinte", L"Opacité de la teinte", L"Deckkraft der Tönung", L"Opacidade da tonalidade", L"عتامة الصبغة"},
+    {L"Saturation", L"Saturación", L"Saturation", L"Sättigung", L"Saturação", L"التشبع"},
+    {L"Edge light", L"Luz del borde", L"Lumière du bord", L"Randlicht", L"Luz da borda", L"إضاءة الحافة"},
     {L"Time and date in the dock", L"Hora y fecha en el dock", L"Heure et date dans le dock", L"Uhrzeit und Datum im Dock", L"Hora e data no dock", L"الوقت والتاريخ في شريط الإرساء"},
     {L"Overview from the corner", L"Vista general desde la esquina", L"Vue d'ensemble depuis le coin", L"Übersicht aus der Ecke", L"Visão geral pelo canto", L"العرض العام من الزاوية"},
     {L"Slightly rounded", L"Suaves", L"Peu arrondis", L"Leicht rund", L"Suaves", L"مستديرة قليلًا"},

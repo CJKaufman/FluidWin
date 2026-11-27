@@ -3,7 +3,7 @@
 //  - tema: modalita' chiara/scura (le due chiavi che cambia Impostazioni > Personalizzazione > Colori);
 //  - uscite audio: elenco dei dispositivi e scelta di quello predefinito (IPolicyConfig, l'interfaccia che usa
 //    il pannello Audio di Windows; non documentata ma stabile da Windows 7, usata da EarTrumpet e SoundSwitch);
-//  - luminosita': del monitor via DDC/CI (dxva2), se il monitor la supporta.
+//  - luminosita': DDC/CI per i monitor compatibili, WMI per i display esposti da Windows.
 // Le operazioni lente (radio, DDC/CI) girano in un thread a parte: l'interfaccia legge solo valori gia' pronti.
 #pragma once
 #ifndef NOMINMAX
@@ -17,6 +17,10 @@
 #include <propsys.h>
 #include <physicalmonitorenumerationapi.h>
 #include <highlevelmonitorconfigurationapi.h>
+#include <wbemidl.h>
+#include <wrl/client.h>
+#include <algorithm>
+#include <memory>
 #include <string>
 #include <vector>
 #include <atomic>
@@ -53,7 +57,9 @@ public:
     // x nei 32 bit alti e y nei bassi; scritto dal thread principale, letto da quello della luminosita'
     std::atomic<long long> centroSchermo{0};
     void schermo(const RECT& r) {
-        centroSchermo = ((long long)((r.left + r.right) / 2) << 32) | (unsigned)((r.top + r.bottom) / 2);
+        const auto c = (long long)((uint64_t)(unsigned)((r.left + r.right) / 2) << 32 |
+                                   (unsigned)((r.top + r.bottom) / 2));
+        if (centroSchermo.exchange(c) != c) { luminosita = -1; if (evento) rileggi(); }
     }
 
     void avvia() {
@@ -75,6 +81,22 @@ public:
     // valore e schermo si prendono insieme: prima due atomiche separate, e un gesto su un altro schermo durante il
     // lavoro faceva scrivere il valore del primo sul secondo (R20261121-120053 su S12)
     void impostaLuminosita(int v) { luminosita = v; { std::lock_guard<std::mutex> g(mLum); lum = {v, centroSchermo.load()}; } SetEvent(evento); }
+
+    static bool risparmioEnergia() {
+        SYSTEM_POWER_STATUS stato{};
+        return GetSystemPowerStatus(&stato) && stato.SystemStatusFlag == 1;
+    }
+
+    static bool cambiaRisparmioEnergia(bool attiva) {
+        // Comando di override usato da Windows per il Risparmio energia. Lo stato arriva
+        // separatamente via GUID_ENERGY_SAVER_STATUS e la soglia automatica non viene scritta.
+        using Pubblica = LONG (NTAPI*)(ULONGLONG, const void*, const void*, ULONG, const void*);
+        static const auto pubblica = reinterpret_cast<Pubblica>(
+            GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlPublishWnfStateData"));
+        constexpr ULONGLONG overrideRisparmio = 0x41C6013DA3BC3075ULL;
+        const DWORD comando = attiva ? 1 : 2;
+        return pubblica && pubblica(overrideRisparmio, nullptr, &comando, sizeof(comando), nullptr) >= 0;
+    }
 
     // ---- tema ----
     static bool temaScuro() {
@@ -206,22 +228,116 @@ private:
         wifi = w; bluetooth = b;
     }
 
-    // luminosita' del monitor del dock (DDC/CI): legge, e imposta se v >= 0
-    void monitor(int v, long long c) {
-        // (una richiesta per uno schermo scollegato intanto non finisce sul principale: si scarta)
-        HMONITOR mon = MonitorFromPoint({(LONG)(c >> 32), (LONG)(int)(c & 0xFFFFFFFF)}, v >= 0 ? MONITOR_DEFAULTTONULL : MONITOR_DEFAULTTOPRIMARY);
-        // (scartata: si rilegge lo schermo di adesso, invece di lasciare nel pannello il valore chiesto, R20261121-123247-S2)
-        if (!mon) { monitor(-1, centroSchermo.load()); return; }
+    int monitorDDC(HMONITOR mon, int v) {
         DWORD n = 0;
-        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(mon, &n) || !n) { luminosita = -1; return; }
+        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(mon, &n) || !n) return -1;
         std::vector<PHYSICAL_MONITOR> pm(n);
-        if (!GetPhysicalMonitorsFromHMONITOR(mon, n, pm.data())) { luminosita = -1; return; }
-        DWORD mi = 0, cur = 0, ma = 0;
-        if (GetMonitorBrightness(pm[0].hPhysicalMonitor, &mi, &cur, &ma) && ma > mi) {
-            if (v >= 0) { SetMonitorBrightness(pm[0].hPhysicalMonitor, mi + (ma - mi) * (DWORD)v / 100); cur = mi + (ma - mi) * (DWORD)v / 100; }
-            luminosita = (int)((cur - mi) * 100 / (ma - mi));
-        } else luminosita = -1;
+        if (!GetPhysicalMonitorsFromHMONITOR(mon, n, pm.data())) return -1;
+        int esito = -1;
+        for (const auto& p : pm) {
+            DWORD mi = 0, cur = 0, ma = 0;
+            if (!GetMonitorBrightness(p.hPhysicalMonitor, &mi, &cur, &ma) || ma <= mi) continue;
+            const DWORD obiettivo = mi + (ma - mi) * (DWORD)std::max(v, 0) / 100;
+            if (v >= 0 && SetMonitorBrightness(p.hPhysicalMonitor, obiettivo)) cur = obiettivo;
+            esito = (int)((std::clamp(cur, mi, ma) - mi) * 100 / (ma - mi));
+            break;
+        }
         DestroyPhysicalMonitors(n, pm.data());
+        return esito;
+    }
+
+    using Bstr = std::unique_ptr<OLECHAR, decltype(&SysFreeString)>;
+    static Bstr testoWmi(const wchar_t* s) { return Bstr(SysAllocString(s), SysFreeString); }
+    Microsoft::WRL::ComPtr<IWbemServices> wmi;
+
+    bool collegaWmi() {
+        if (wmi) return true;
+        Microsoft::WRL::ComPtr<IWbemLocator> locator;
+        if (FAILED(CoCreateInstance(__uuidof(WbemLocator), nullptr, CLSCTX_INPROC_SERVER,
+                                    IID_PPV_ARGS(locator.GetAddressOf())))) return false;
+        const auto spazio = testoWmi(L"ROOT\\WMI");
+        if (FAILED(locator->ConnectServer(spazio.get(), nullptr, nullptr, nullptr,
+                                          WBEM_FLAG_CONNECT_USE_MAX_WAIT, nullptr, nullptr, &wmi))) return false;
+        if (FAILED(CoSetProxyBlanket(wmi.Get(), RPC_C_AUTHN_WINNT, RPC_C_AUTHZ_NONE, nullptr,
+                                     RPC_C_AUTHN_LEVEL_CALL, RPC_C_IMP_LEVEL_IMPERSONATE,
+                                     nullptr, EOAC_NONE))) wmi.Reset();
+        return bool(wmi);
+    }
+
+    // Il percorso Win32 usa # al posto delle barre. Il provider WMI aggiunge _0 (o un altro indice).
+    static std::vector<std::wstring> istanzeMonitor(HMONITOR mon) {
+        MONITORINFOEXW info{}; info.cbSize = sizeof(info);
+        std::vector<std::wstring> nomi;
+        if (!GetMonitorInfoW(mon, &info)) return nomi;
+        for (DWORD i = 0; ; ++i) {
+            DISPLAY_DEVICEW d{}; d.cb = sizeof(d);
+            if (!EnumDisplayDevicesW(info.szDevice, i, &d, EDD_GET_DEVICE_INTERFACE_NAME)) break;
+            if (!(d.StateFlags & DISPLAY_DEVICE_ACTIVE)) continue;
+            std::wstring nome(d.DeviceID);
+            const auto guida = nome.rfind(L"#{");
+            if (nome.rfind(L"\\\\?\\", 0) != 0 || guida == std::wstring::npos || guida <= 4) continue;
+            nome = nome.substr(4, guida - 4);
+            std::replace(nome.begin(), nome.end(), L'#', L'\\');
+            nomi.push_back(nome + L"_");
+        }
+        return nomi;
+    }
+
+    bool scriviWmi(const std::wstring& nome, int v) {
+        using Microsoft::WRL::ComPtr;
+        std::wstring percorso = L"WmiMonitorBrightnessMethods.InstanceName=\"";
+        for (wchar_t c : nome) { if (c == L'\\' || c == L'"') percorso += L'\\'; percorso += c; }
+        percorso += L'"';
+        const auto classe = testoWmi(L"WmiMonitorBrightnessMethods");
+        const auto istanza = testoWmi(percorso.c_str());
+        const auto metodo = testoWmi(L"WmiSetBrightness");
+        ComPtr<IWbemClassObject> definizione, parametri, ingresso;
+        if (FAILED(wmi->GetObject(classe.get(), 0, nullptr, &definizione, nullptr)) ||
+            FAILED(definizione->GetMethod(metodo.get(), 0, &parametri, nullptr)) ||
+            FAILED(parametri->SpawnInstance(0, &ingresso))) return false;
+        VARIANT valore{};
+        valore.vt = VT_I4; valore.lVal = 0;
+        if (FAILED(ingresso->Put(L"Timeout", 0, &valore, 0))) return false;
+        valore.vt = VT_UI1; valore.bVal = (BYTE)v;
+        if (FAILED(ingresso->Put(L"Brightness", 0, &valore, 0))) return false;
+        return SUCCEEDED(wmi->ExecMethod(istanza.get(), metodo.get(), 0, nullptr, ingresso.Get(), nullptr, nullptr));
+    }
+
+    int monitorWmi(HMONITOR mon, int v) {
+        using Microsoft::WRL::ComPtr;
+        const auto nomi = istanzeMonitor(mon);
+        if (nomi.empty() || !collegaWmi()) return -1;
+        const auto classe = testoWmi(L"WmiMonitorBrightness");
+        ComPtr<IEnumWbemClassObject> elenco;
+        if (FAILED(wmi->CreateInstanceEnum(classe.get(), WBEM_FLAG_FORWARD_ONLY | WBEM_FLAG_RETURN_IMMEDIATELY,
+                                           nullptr, &elenco))) { wmi.Reset(); return -1; }
+        for (;;) {
+            ComPtr<IWbemClassObject> riga;
+            ULONG lette = 0;
+            if (FAILED(elenco->Next(1000, 1, &riga, &lette)) || !lette) break;
+            VARIANT attivo{}, nome{}, valore{};
+            riga->Get(L"Active", 0, &attivo, nullptr, nullptr);
+            riga->Get(L"InstanceName", 0, &nome, nullptr, nullptr);
+            riga->Get(L"CurrentBrightness", 0, &valore, nullptr, nullptr);
+            int corrente = -1;
+            std::wstring istanza;
+            if (attivo.vt == VT_BOOL && attivo.boolVal && nome.vt == VT_BSTR && nome.bstrVal &&
+                std::any_of(nomi.begin(), nomi.end(), [&](const auto& n) { return !_wcsnicmp(nome.bstrVal, n.c_str(), n.size()); })) {
+                corrente = valore.vt == VT_UI1 ? valore.bVal : valore.vt == VT_I4 ? valore.lVal : -1;
+                istanza = nome.bstrVal;
+            }
+            VariantClear(&attivo); VariantClear(&nome); VariantClear(&valore);
+            if (corrente >= 0 && corrente <= 100) return v >= 0 && scriviWmi(istanza, v) ? v : corrente;
+        }
+        return -1;
+    }
+
+    void monitor(int v, long long c) {
+        HMONITOR mon = MonitorFromPoint({(LONG)(c >> 32), (LONG)c}, MONITOR_DEFAULTTONULL);
+        const int ddc = mon ? monitorDDC(mon, v) : -1;
+        const int risultato = ddc >= 0 || !mon ? ddc : monitorWmi(mon, v);
+        std::lock_guard<std::mutex> g(mLum);
+        if (c == centroSchermo.load() && (lum.v < 0 || lum.schermo != c)) luminosita = risultato;
     }
 };
 
