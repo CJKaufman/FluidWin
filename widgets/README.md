@@ -37,5 +37,7 @@ Drop any UTF-8 JSON file (max 256 KB, up to 32 items) into `%LOCALAPPDATA%\Fluid
   - `animate`: `none` | `pulse` | `breathe` | `wave` | `spin`
 - `toggle`: `{ key, on }` (renders an interactive switch in the flyout header that writes `<id>.action.json`)
 - `items`: `[{ title, subtitle, badge, color, progress, copy, url }]`
-- `config`: `[{ key, label, description, type, default, options }]` (rendered in **Settings > Widgets > <widget>** and saved to `<id>.config.json`)
+- `config`: `[{ key, label, description, type, default, options, min, max, step, unit }]` (rendered in **Settings > Widgets > <widget>** and saved to `<id>.config.json`)
+  - `type`: `toggle` (boolean default) | `choice` (string default + `options` array, max 5) | `slider` (numeric default)
+  - `slider` fields: `min` (number, default `0`), `max` (number, default `100`), `step` (number, default `1`), `default` (number, default `min`), `unit` (optional string, max 8 chars)
 - `footer`: `{ label, url }`

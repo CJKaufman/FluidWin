@@ -202,6 +202,7 @@ public:
     std::function<bool(const std::wstring&, wplugin::Widget&)> dettagliWPlugin;
     std::function<void(const std::wstring&, const std::wstring&, bool)> impostaConfigWPluginBool;
     std::function<void(const std::wstring&, const std::wstring&, const std::wstring&)> impostaConfigWPluginStr;
+    std::function<void(const std::wstring&, const std::wstring&, double)> impostaConfigWPluginNum;
 
     // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
@@ -261,6 +262,7 @@ public:
         rileggiPacchetti();
         anim.clear();
         widgetAperto.clear();
+        sliderWPlugDrag = -1;
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
         // (lo sfondo puo' essere cambiato da fuori: si rilegge, e la miniatura del tuo si rifa')
         sfondoAttuale = -2; sfondoErrore = false; provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; }
@@ -279,6 +281,7 @@ public:
             if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }   // (spostata trascinandola: rientra da li')
             else if (morph > 0) giraMorph(-1);
             if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); }
             vetro::battito(v.fin, 1);
             return;
         }
@@ -288,6 +291,7 @@ public:
             if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }
             else if (morph > 0) giraMorph(-1);
             if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); }
             vetro::battito(v.fin, 1);
             return;
         }
@@ -364,26 +368,37 @@ public:
             case WM_MOUSEMOVE: {
                 if (morph) return true;   // mentre cresce o rientra non si tocca niente
                 if (trascina >= 0) { valoreDa(trascina, (float)GET_X_LPARAM(l)); return true; }
+                if (sliderWPlugDrag >= 0) { aggiornaSliderWPlug(sliderWPlugDrag, (float)GET_X_LPARAM(l)); return true; }
                 if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; }
                 const int s = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (s != sopra) { sopra = s; disegna(); }
                 return true;
             }
-            case WM_MOUSELEAVE: dentro = false; if (trascina < 0) sopra = -1; disegna(); return true;
+            case WM_MOUSELEAVE: dentro = false; if (trascina < 0 && sliderWPlugDrag < 0) sopra = -1; disegna(); return true;
             case WM_LBUTTONDOWN: {   // su un cursore: si trascina (anche fuori dal binario, finche' non si lascia)
                 if (morph) return true;
                 const int z = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (z >= Z_CURSORE && z < Z_CURSORE + (int)cursori.size()) {
                     trascina = z - Z_CURSORE; SetCapture(v.fin); valoreDa(trascina, (float)GET_X_LPARAM(l));
+                } else if (z >= Z_W_CFG_SLIDER && z < Z_W_CFG_SLIDER + (int)wplugin::MAX_CONFIG) {
+                    sliderWPlugDrag = z - Z_W_CFG_SLIDER;
+                    SetCapture(v.fin);
+                    aggiornaSliderWPlug(sliderWPlugDrag, (float)GET_X_LPARAM(l));
+                    vetro::battito(v.fin, 1);
+                    disegna();
                 }
                 return true;
             }
             case WM_LBUTTONUP:
                 if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); disegna(); return true; }
+                if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); disegna(); return true; }
                 if (morph) return true;
                 clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)));
                 return true;
-            case WM_CAPTURECHANGED: if (trascina >= 0) { trascina = -1; salva(); disegna(); } return true;
+            case WM_CAPTURECHANGED:
+                if (trascina >= 0) { trascina = -1; salva(); disegna(); }
+                if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; disegna(); }
+                return true;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) chiudi();
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
@@ -588,7 +603,28 @@ private:
     static constexpr int Z_W_INDIETRO = 900, Z_W_APRI_AI = 901, Z_W_APRI_LOGI = 902, Z_W_MOSTRA_DOCK = 903,
                          Z_W_AI_AVVISI = 904, Z_W_AI_HOOK_AGY = 905, Z_W_AI_HOOK_CLAUDE = 906, Z_W_AI_CARTELLA = 907,
                          Z_W_LOGI_ANIM = 908, Z_W_LOGI_GHUB = 909, Z_W_WPLUG_CARTELLA = 910, Z_W_WPLUG_JSON = 911,
-                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000;
+                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
+    int sliderWPlugDrag = -1;
+    D2D1_RECT_F sliderWPlugTrack[wplugin::MAX_CONFIG]{};
+    void aggiornaSliderWPlug(int idx, float mouseX) {
+        if (idx < 0 || idx >= (int)wplugin::MAX_CONFIG) return;
+        if (widgetAperto.rfind(L"wplugin:", 0) != 0 || !dettagliWPlugin) return;
+        const std::wstring wid = widgetAperto.substr(8);
+        wplugin::Widget w;
+        if (!dettagliWPlugin(wid, w) || (size_t)idx >= w.config.size()) return;
+        const wplugin::ConfigVoce& cfg = w.config[(size_t)idx];
+        if (cfg.tipo != L"slider") return;
+        const D2D1_RECT_F& tr = sliderWPlugTrack[idx];
+        const float width = tr.right - tr.left;
+        if (width <= 1.0f) return;
+        const double frac = std::clamp((double)(mouseX - tr.left) / (double)width, 0.0, 1.0);
+        const double rawVal = cfg.minNum + frac * (cfg.maxNum - cfg.minNum);
+        const double val = wplugin::dettagli::snapSlider(rawVal, cfg.minNum, cfg.maxNum, cfg.stepNum);
+        if (std::abs(val - cfg.valNum) > 1e-6 && impostaConfigWPluginNum) {
+            impostaConfigWPluginNum(wid, cfg.chiave, val);
+            disegna();
+        }
+    }
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
     // ---- sfondi (Generale, Fase 3): Z_SFONDO "Il tuo sfondo", Z_SFONDO + 1 + i gli sfondi di FluidWin (sfondi.h)
@@ -749,6 +785,7 @@ private:
 
     void apriPaginaWidget(std::wstring id) {
         widgetAperto = std::move(id);
+        sliderWPlugDrag = -1;
         kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
         vetro::battito(v.fin, 1);
         disegna();
@@ -756,7 +793,7 @@ private:
 
     void vaiASezione(int s) {
         if (s == sezione && widgetAperto.empty()) return;
-        sezione = s; widgetAperto.clear(); kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0; rotella = 0;
+        sezione = s; widgetAperto.clear(); sliderWPlugDrag = -1; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0; rotella = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -765,6 +802,7 @@ private:
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
         if (id >= Z_CURSORE && id < Z_COLORE) return;   // (i cursori si usano trascinando: WM_LBUTTONDOWN)
+        if (id >= Z_W_CFG_SLIDER && id < Z_W_CFG_SLIDER + (int)wplugin::MAX_CONFIG) return;
         if (id >= Z_COLORE && id <= Z_COLORE_MIO) {
             scegliColore(id);
             salva();
@@ -1027,7 +1065,7 @@ private:
         if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
         if (v.fin && fuori) SetWindowPos(v.fin, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (daCentro && dockSu) dockSu(false);   // (dopo tornaAlCentro: col pannello gia' aperto il dock non scende)
-        aperta = false; daCentro = false; daPunto = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+        aperta = false; daCentro = false; daPunto = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false; sliderWPlugDrag = -1;
     }
 
     // forma del vetro 0..1 (0 = rettangolo del centro di controllo, 1 = impostazioni). Tutte e due le direzioni
@@ -1119,7 +1157,7 @@ private:
             } else if (widgetAperto.rfind(L"wplugin:", 0) == 0) {
                 const std::wstring wid = widgetAperto.substr(8);
                 if (dettagliWPlugin && dettagliWPlugin(wid, wpSub)) widgetSubAperto = true;
-                else widgetAperto.clear();
+                else { widgetAperto.clear(); sliderWPlugDrag = -1; }
             } else {
                 widgetAperto.clear();
             }
@@ -1629,6 +1667,73 @@ private:
                             v.testo(cv.opzioni[j], fCentro, rOpt, inkS);
                         }
                         y += 70 * d;
+                    } else if (cv.tipo == L"slider") {
+                        const int zid = Z_W_CFG_SLIDER + (int)i;
+                        const bool dragging = (sliderWPlugDrag == (int)i);
+                        const bool hovered = (sopra == zid);
+                        const float cardH = (!cv.spiega.empty() ? 78.0f : 68.0f) * d;
+                        const D2D1_RECT_F ra = {L, y, R, y + cardH};
+                        riquadro(ra, dragging || hovered);
+
+                        wchar_t buf[64]{};
+                        const double rVal = std::round(cv.valNum);
+                        std::wstring valText;
+                        if (std::abs(cv.valNum - rVal) < 1e-4) {
+                            swprintf(buf, 64, L"%.0f", rVal == 0.0 ? 0.0 : rVal);
+                            valText = buf;
+                        } else {
+                            swprintf(buf, 64, L"%.2f", cv.valNum);
+                            valText = buf;
+                            while (!valText.empty() && valText.back() == L'0') valText.pop_back();
+                            if (!valText.empty() && valText.back() == L'.') valText.pop_back();
+                            if (valText == L"-0") valText = L"0";
+                        }
+                        valText += cv.unita;
+                        const std::wstring valDisp = testi::isola(valText);
+                        const float valW = v.larghezza(valDisp, fVoce);
+                        const float valLeft = std::max(ra.left + 16 * d, ra.right - 16 * d - valW - 2 * d);
+                        const D2D1_COLOR_F iosBlu = v.scuro
+                            ? D2D1::ColorF(0.04f, 0.52f, 1.0f, 1.0f)
+                            : D2D1::ColorF(0.0f, 0.48f, 1.0f, 1.0f);
+                        const D2D1_COLOR_F valCol = (dragging || hovered)
+                            ? D2D1::ColorF(iosBlu.r, iosBlu.g, iosBlu.b, (float)e)
+                            : D2D1::ColorF(ink.r, ink.g, ink.b, 0.78f * (float)e);
+
+                        v.testo(cv.titolo, fVoce, {ra.left + 16 * d, ra.top + 10 * d, std::max(ra.left + 16 * d, valLeft - 10 * d), ra.top + 32 * d}, inkS);
+                        v.testo(valDisp, fVoce, {valLeft, ra.top + 10 * d, ra.right - 14 * d, ra.top + 32 * d}, valCol);
+                        if (!cv.spiega.empty()) {
+                            v.testo(cv.spiega, fSotto, {ra.left + 16 * d, ra.top + 30 * d, ra.right - 16 * d, ra.top + 48 * d}, tenueS);
+                        }
+
+                        const float trackL = ra.left + 16 * d, trackR = ra.right - 16 * d;
+                        const float trackH = 4.5f * d;
+                        const float trackCy = ra.bottom - 17.0f * d;
+                        const float trackTop = trackCy - trackH * 0.5f, trackBot = trackCy + trackH * 0.5f;
+                        sliderWPlugTrack[i] = {trackL, trackTop, trackR, trackBot};
+                        aggiungiZona({ra.left, std::max(ra.top, trackCy - 14 * d), ra.right, std::min(ra.bottom, trackCy + 14 * d)}, zid);
+
+                        const double span = (cv.maxNum > cv.minNum) ? (cv.maxNum - cv.minNum) : 1.0;
+                        const float frac = (float)std::clamp((cv.valNum - cv.minNum) / span, 0.0, 1.0);
+                        const float thumbX = trackL + (trackR - trackL) * frac;
+
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.16f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+                        v.rt->FillRoundedRectangle({{trackL, trackTop, trackR, trackBot}, trackH * 0.5f, trackH * 0.5f}, v.pen);
+                        if (thumbX > trackL + 0.5f) {
+                            v.pen->SetColor(D2D1::ColorF(iosBlu.r, iosBlu.g, iosBlu.b, (float)e));
+                            v.rt->FillRoundedRectangle({{trackL, trackTop, thumbX, trackBot}, trackH * 0.5f, trackH * 0.5f}, v.pen);
+                        }
+
+                        const float thumbR = (dragging ? 10.5f : 9.5f) * d;
+                        v.pen->SetColor(D2D1::ColorF(0, 0, 0, 0.08f * (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy + 1.5f * d}, thumbR + 3.0f * d, thumbR + 3.0f * d}, v.pen);
+                        v.pen->SetColor(D2D1::ColorF(0, 0, 0, (v.scuro ? 0.34f : 0.18f) * (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy + 1.5f * d}, thumbR + 1.5f * d, thumbR + 1.5f * d}, v.pen);
+                        v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy}, thumbR, thumbR}, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.25f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+                        v.rt->DrawEllipse({{thumbX, trackCy}, thumbR, thumbR}, v.pen, 1.0f);
+
+                        y += cardH + 6 * d;
                     }
                 }
                 {

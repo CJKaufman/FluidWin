@@ -44,6 +44,8 @@ struct ConfigVoce {
     std::wstring chiave, titolo, spiega, tipo;
     bool valBool = false;
     std::wstring valStr;
+    double valNum = 0.0, minNum = 0.0, maxNum = 100.0, stepNum = 1.0;
+    std::wstring unita;
     std::vector<std::wstring> opzioni;
 };
 
@@ -454,11 +456,16 @@ inline void dumpJsonImpl(const Json& v, std::string& out, bool pretty, int inden
         case Json::Null: out += "null"; break;
         case Json::Bool: out += (v.b ? "true" : "false"); break;
         case Json::Num: {
+            if (!std::isfinite(v.n)) {
+                out += "null";
+                break;
+            }
+            const double val = (v.n == 0.0) ? 0.0 : v.n;
             char b[64];
-            if (std::isfinite(v.n) && std::floor(v.n) == v.n && std::abs(v.n) < 9e15) {
-                snprintf(b, 64, "%.0f", v.n);
+            if (std::floor(val) == val && std::abs(val) < 9e15) {
+                snprintf(b, 64, "%.0f", val);
             } else {
-                snprintf(b, 64, "%.15g", v.n);
+                snprintf(b, 64, "%.15g", val);
             }
             out += b;
             break;
@@ -522,9 +529,32 @@ inline bool ugualeElemento(const Elemento& a, const Elemento& b) {
            ugualeColore(a.colore, b.colore);
 }
 
+inline double snapSlider(double val, double mn, double mx, double step) {
+    if (!std::isfinite(mn)) mn = 0.0;
+    if (!std::isfinite(mx) || mx <= mn) mx = mn + 100.0;
+    if (!std::isfinite(step) || step <= 0.0) step = 1.0;
+    if (!std::isfinite(val)) val = mn;
+    double v = std::clamp(val, mn, mx);
+    v = mn + std::round((v - mn) / step) * step;
+    v = std::clamp(v, mn, mx);
+    if (std::abs(v - std::round(v)) < 1e-6 && step >= 1e-4) {
+        v = std::round(v);
+    } else if (step >= 1e-5 && std::abs(v) < 1e9) {
+        v = std::round(v * 1e6) / 1e6;
+    }
+    v = std::clamp(v, mn, mx);
+    if (v == 0.0) v = 0.0;
+    return v;
+}
+
 inline bool ugualeConfigVoce(const ConfigVoce& a, const ConfigVoce& b) {
     return a.chiave == b.chiave && a.titolo == b.titolo && a.spiega == b.spiega &&
            a.tipo == b.tipo && a.valBool == b.valBool && a.valStr == b.valStr &&
+           std::abs(a.valNum - b.valNum) <= 1e-6 &&
+           std::abs(a.minNum - b.minNum) <= 1e-6 &&
+           std::abs(a.maxNum - b.maxNum) <= 1e-6 &&
+           std::abs(a.stepNum - b.stepNum) <= 1e-6 &&
+           a.unita == b.unita &&
            a.opzioni == b.opzioni;
 }
 
@@ -640,6 +670,11 @@ inline bool salvaConfigStr(const std::wstring& id, const std::wstring& chiave, c
     return dettagli::salvaConfigVal(id, chiave, dettagli::Json::makeStr(dettagli::inUtf8(val)));
 }
 
+inline bool salvaConfigNum(const std::wstring& id, const std::wstring& chiave, double valore) {
+    if (!std::isfinite(valore)) return false;
+    return dettagli::salvaConfigVal(id, chiave, dettagli::Json::makeNum(valore == 0.0 ? 0.0 : valore));
+}
+
 inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fallbackId, Widget& out) {
     dettagli::Json root;
     if (!dettagli::parseJson(jsonText, root) || root.tipo != dettagli::Json::Obj) return false;
@@ -728,7 +763,7 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
             });
             if (dup) continue;
             const std::wstring tipo = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(it.str("type"))));
-            if (tipo != L"toggle" && tipo != L"choice") continue;
+            if (tipo != L"toggle" && tipo != L"choice" && tipo != L"slider") continue;
 
             ConfigVoce cv;
             cv.chiave = chiave;
@@ -740,7 +775,7 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
             const auto* def = it.trova("default");
             if (cv.tipo == L"toggle") {
                 cv.valBool = (def && def->tipo == dettagli::Json::Bool) ? def->b : false;
-            } else {
+            } else if (cv.tipo == L"choice") {
                 if (const auto* opts = it.trova("options"); opts && opts->tipo == dettagli::Json::Arr) {
                     for (const auto& op : opts->arr) {
                         if (cv.opzioni.size() >= MAX_CONFIG_OPTIONS) break;
@@ -758,6 +793,23 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
                 } else if (!cv.opzioni.empty()) {
                     cv.valStr = cv.opzioni.front();
                 }
+            } else {
+                const auto* pMin = it.trova("min");
+                const auto* pMax = it.trova("max");
+                const auto* pStep = it.trova("step");
+                cv.minNum = (pMin && pMin->tipo == dettagli::Json::Num && std::isfinite(pMin->n)) ? pMin->n : 0.0;
+                cv.maxNum = (pMax && pMax->tipo == dettagli::Json::Num && std::isfinite(pMax->n)) ? pMax->n : 100.0;
+                if (cv.maxNum <= cv.minNum) cv.maxNum = cv.minNum + 100.0;
+                cv.stepNum = (pStep && pStep->tipo == dettagli::Json::Num && std::isfinite(pStep->n)) ? pStep->n : 1.0;
+                if (cv.stepNum <= 0.0) cv.stepNum = 1.0;
+                const double defNum = (def && def->tipo == dettagli::Json::Num && std::isfinite(def->n)) ? def->n : cv.minNum;
+                cv.valNum = dettagli::snapSlider(defNum, cv.minNum, cv.maxNum, cv.stepNum);
+                std::wstring u = dettagli::trim(dettagli::daUtf8(it.str("unit")));
+                if (u.size() > 8) {
+                    u.resize(8);
+                    if (u.back() >= 0xD800 && u.back() <= 0xDBFF) u.pop_back();
+                }
+                cv.unita = std::move(u);
             }
             out.config.push_back(std::move(cv));
         }
@@ -781,6 +833,8 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
                         std::find(cv.opzioni.begin(), cv.opzioni.end(), wv) != cv.opzioni.end())) {
                         cv.valStr = wv;
                     }
+                } else if (cv.tipo == L"slider" && ov->tipo == dettagli::Json::Num && std::isfinite(ov->n)) {
+                    cv.valNum = dettagli::snapSlider(ov->n, cv.minNum, cv.maxNum, cv.stepNum);
                 }
             }
         }
@@ -969,9 +1023,10 @@ inline bool creaEsempio() {
         "                 copy:     text copied to clipboard on click\n"
         "                 url:      http://, https://, or existing local file/folder path\n"
         "  config       Array (max 16) rendered in Settings > Widgets > <widget>:\n"
-        "                 { key, label, description, type, default, options }\n"
-        "                 type:    \"toggle\" (bool default) | \"choice\" (string default)\n"
+        "                 { key, label, description, type, default, options, min, max, step, unit }\n"
+        "                 type:    \"toggle\" (bool) | \"choice\" (string) | \"slider\" (number)\n"
         "                 options: string array (max 5) for type \"choice\"\n"
+        "                 slider:  min (0), max (100), step (1), default (min), unit (max 8 chars)\n"
         "                 User changes persist to <id>.config.json ({ \"<key>\": value })\n"
         "                 in this folder and override defaults on reload.\n"
         "  footer       { label, url } (defaults to opening this folder if url is omitted)\n";
