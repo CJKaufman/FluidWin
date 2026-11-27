@@ -1772,12 +1772,13 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
 
             float limTit = r.right - 12 * dpi;
             if (dv.batteria >= 0) {
+                const bool chgVis = dv.inCarica && dv.batteria <= 99;
                 wchar_t pb[24];
-                swprintf(pb, 24, dv.inCarica ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
+                swprintf(pb, 24, chgVis ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
                 const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
                 const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
-                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, true);
-                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, false);
+                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, chgVis, scuro, true);
+                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, chgVis, scuro, false);
                 pennello->SetColor(D2D1::ColorF(colBar.r, colBar.g, colBar.b, scuro ? 0.20f : 0.14f));
                 dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
                 pennello->SetColor(colFg);
@@ -1801,13 +1802,17 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
                     riga2 += ob;
                 }
             } else if (dv.inCarica) {
-                if (dv.batteria >= 0) {
+                if (dv.batteria > 99) {
+                    riga2 = testi::t(L"USB connesso", L"USB Connected");
+                } else if (dv.batteria >= 0) {
                     wchar_t cb[48];
                     swprintf(cb, 48, testi::t(L"In carica \u00b7 %d%%", L"Charging \u00b7 %d%%"), dv.batteria);
                     riga2 = cb;
                 } else {
                     riga2 = testi::t(L"In carica", L"Charging");
                 }
+            } else if (dv.connessione == L"USB" && dv.batteria < 0) {
+                riga2 = testi::t(L"USB connesso", L"USB Connected");
             } else {
                 if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
                 if (dv.oreRestanti > 0.0) {
@@ -1961,12 +1966,13 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
 
             float limTit = r.right - 12 * dpi;
             if (dv.batteria >= 0) {
+                const bool chgVis = dv.inCarica && dv.batteria <= 99;
                 wchar_t pb[24];
-                swprintf(pb, 24, dv.inCarica ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
+                swprintf(pb, 24, chgVis ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
                 const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
                 const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
-                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, true);
-                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, false);
+                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, chgVis, scuro, true);
+                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, chgVis, scuro, false);
                 pennello->SetColor(D2D1::ColorF(colBar.r, colBar.g, colBar.b, scuro ? 0.20f : 0.14f));
                 dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
                 pennello->SetColor(colFg);
@@ -1985,13 +1991,13 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
                 riga2 += testi::t(L"In riposo", L"Asleep");
             } else if (dv.inCarica) {
-                if (dv.batteria >= 0) {
-                    wchar_t cb[48];
-                    swprintf(cb, 48, testi::t(L"In carica \u00b7 %d%%", L"Charging \u00b7 %d%%"), dv.batteria);
-                    riga2 = cb;
+                if (dv.batteria > 99) {
+                    riga2 = testi::t(L"USB connesso", L"USB Connected");
                 } else {
-                    riga2 = testi::t(L"In carica", L"Charging");
+                    riga2 = testi::t(L"Base - In carica", L"Dock - Charging");
                 }
+            } else if (dv.connessione == L"USB") {
+                riga2 = testi::t(L"USB connesso", L"USB Connected");
             } else {
                 if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
                 riga2 += testi::t(L"Connesso", L"Connected");
