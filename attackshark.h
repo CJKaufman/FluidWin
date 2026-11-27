@@ -553,7 +553,8 @@ private:
         out.connesso = !out.dispositivi.empty();
         for (const auto& d : out.dispositivi) {
             if (!d.online) continue;
-            if (d.inCarica && (d.batteria < 0 || d.batteria <= 99)) out.alcunoInCarica = true;
+            const int sogliaPieno = (d.tipo == L"Keyboard" || d.tipo == L"keyboard") ? 94 : 100;
+            if (d.inCarica && (d.batteria < 0 || d.batteria < sogliaPieno)) out.alcunoInCarica = true;
             if (d.batteria >= 0 && (out.batteriaMin < 0 || d.batteria < out.batteriaMin)) {
                 out.batteriaMin = d.batteria;
             }

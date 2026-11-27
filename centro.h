@@ -1964,9 +1964,11 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
             disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
                                   r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
 
+            const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
+            const int sogliaPieno = eMouse ? 100 : 94;
             float limTit = r.right - 12 * dpi;
             if (dv.batteria >= 0) {
-                const bool chgVis = dv.inCarica && dv.batteria <= 99;
+                const bool chgVis = dv.inCarica && dv.batteria < sogliaPieno;
                 wchar_t pb[24];
                 swprintf(pb, 24, chgVis ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
                 const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
@@ -1991,8 +1993,7 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
                 riga2 += testi::t(L"In riposo", L"Asleep");
             } else if (dv.inCarica) {
-                const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
-                if (dv.batteria > 99) {
+                if (dv.batteria >= sogliaPieno) {
                     riga2 = eMouse ? testi::t(L"Base - Carico", L"Dock - Charged")
                                    : testi::t(L"USB connesso", L"USB Connected");
                 } else {
