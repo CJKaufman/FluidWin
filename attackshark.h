@@ -304,11 +304,10 @@ struct StatoTastieraCache {
     int batteria = -1;
 };
 
-// Passive-only detection for ROYUAN keyboards (3151:4015/4011/4010):
-// Never send SetFeature (e.g. 0x05 / 0x8F) because ROYUAN firmware treats
-// 0x05 with zero payload as an RGB lighting/mode reset that momentarily
-// turns off keyboard LEDs and drops the USB link.
-inline bool interrogaTastiera(const HidApi&, const TrovatiHid::TastieraCol& col,
+// For wired USB (3151:4015): 100% passive, zero HID writes.
+// For 2.4G wireless dongles (3151:4011 / 4010): safe read-only 0xF7 status
+// poll via SetFeature/GetFeature (never send 0x05, which resets RGB on wired).
+inline bool interrogaTastiera(const HidApi& hid, const TrovatiHid::TastieraCol& col,
                               StatoTastieraCache& cache, HANDLE, Dispositivo& out) {
     wchar_t idBuf[24];
     swprintf(idBuf, 24, L"3151:%04X", (unsigned)col.pid);
@@ -316,11 +315,48 @@ inline bool interrogaTastiera(const HidApi&, const TrovatiHid::TastieraCol& col,
     out.id = idBuf;
     out.nome = cache.nome;
     out.tipo = L"Keyboard";
-    out.connessione = (col.pid == PID_RK86_WIRED) ? L"USB" : L"2.4G Wireless";
-    out.batteria = -1;
-    out.inCarica = false;
-    out.online = true;
-    out.attivo = true;
+    if (col.pid == PID_RK86_WIRED) {
+        out.connessione = L"USB";
+        out.batteria = -1;
+        out.inCarica = false;
+        out.online = true;
+        out.attivo = true;
+        return true;
+    }
+
+    out.connessione = L"2.4G Wireless";
+    out.batteria = cache.batteria;
+    HANDLE hFeat = apriHidConRipiego(col.featPath, false, false);
+    if (hFeat == INVALID_HANDLE_VALUE) {
+        out.online = false;
+        out.attivo = false;
+        return true;
+    }
+
+    const ULONG len = std::max<ULONG>(64, col.featLen);
+    std::vector<BYTE> feat(len, 0);
+    feat[0] = 0x00;
+    feat[1] = 0xF7;
+    if (hid.setFeature(hFeat, feat.data(), len)) {
+        Sleep(50);
+        std::vector<BYTE> resp(len, 0);
+        resp[0] = 0x00;
+        if (hid.getFeature(hFeat, resp.data(), len) && resp.size() >= 8) {
+            const int bat = (int)resp[2];
+            const bool linkOk = (resp[5] != 0 || resp[6] != 0 || resp[7] != 0);
+            if (bat >= 1 && bat <= 100) {
+                out.batteria = bat;
+                cache.batteria = bat;
+                out.inCarica = (resp[3] == 1 || resp[4] == 1);
+                out.online = true;
+                out.attivo = linkOk || true;
+            } else {
+                out.online = linkOk;
+                out.attivo = linkOk;
+            }
+        }
+    }
+    CloseHandle(hFeat);
     return true;
 }
 
@@ -511,7 +547,7 @@ private:
         out.connesso = !out.dispositivi.empty();
         for (const auto& d : out.dispositivi) {
             if (!d.online) continue;
-            if (d.inCarica) out.alcunoInCarica = true;
+            if (d.inCarica && (d.batteria < 0 || d.batteria <= 99)) out.alcunoInCarica = true;
             if (d.batteria >= 0 && (out.batteriaMin < 0 || d.batteria < out.batteriaMin)) {
                 out.batteriaMin = d.batteria;
             }
