@@ -111,7 +111,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
     // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
     // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
-    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : tipo == P_LOGI ? rettLogi() : tipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
+    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : tipo == P_LOGI ? rettLogi() : tipo == P_ASHARK ? rettAShark() : tipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
     const int stacco = (int)std::round(PAD + 10 * dpi);
     int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
     if (lato == 1) y1 = ic.bottom + stacco;
@@ -157,6 +157,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
     else if (tipo == P_AI) { aiStato = aiMon.copia(); aiVer = aiMon.versione.load(); aiLetto = true; aiScroll = 0; dirty = true; }
     else if (tipo == P_LOGI) { logiStato = logiMon.copia(); logiVer = logiMon.versione.load(); logiScroll = 0; logiMon.aggiornaOra(); dirty = true; }
+    else if (tipo == P_ASHARK) { aSharkStato = aSharkMon.copia(); aSharkVer = aSharkMon.versione.load(); aSharkScroll = 0; aSharkMon.aggiornaOra(); dirty = true; }
     else if (tipo == P_WPLUGIN) { wplugStato = wplugMon.copia(); wplugVer = wplugMon.versione.load(); wplugScroll = 0; dirty = true; }
 }
 
@@ -172,6 +173,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_WIFI) h = altezzaWifi() + testa;
     else if (tipo == P_AI) h = altezzaAI();
     else if (tipo == P_LOGI) h = altezzaLogi();
+    else if (tipo == P_ASHARK) h = altezzaAShark();
     else if (tipo == P_WPLUGIN) h = altezzaWPlugin();
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
@@ -182,7 +184,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
 inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     if (pannelloTipo == P_NESSUNO || pChiusura || tipo == pannelloTipo) return;
     vistaPrima = pannelloTipo; phPrima = PH;
-    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI && tipo != P_LOGI && tipo != P_WPLUGIN;
+    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI && tipo != P_LOGI && tipo != P_ASHARK && tipo != P_WPLUGIN;
     if (vistaAvanti) origineVista = origineRitorno = origine;
     preparaVista(tipo);
     pannelloTipo = tipo;
@@ -193,7 +195,7 @@ inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     pAnimazione = true; pDirty = true;
 }
 
-inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
+inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_ASHARK && pannelloTipo != P_WPLUGIN && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
 
 inline auto Motore::inTransizione() const -> bool { return tVista >= 0; }
 
@@ -345,7 +347,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
     {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : pannelloTipo == P_LOGI ? rettLogi() : pannelloTipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
+        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : pannelloTipo == P_LOGI ? rettLogi() : pannelloTipo == P_ASHARK ? rettAShark() : pannelloTipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
         const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
         const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
         m = D2D1::Matrix3x2F::Scale(s, s, p);
@@ -504,6 +506,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
     if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
     else if (tipo == P_AI) disegnaAI(scuro, ink);
     else if (tipo == P_LOGI) disegnaLogi(scuro, ink);
+    else if (tipo == P_ASHARK) disegnaAShark(scuro, ink);
     else if (tipo == P_WPLUGIN) disegnaWPlugin(scuro, ink);
     else {
         const float testa = std::round(TESTA * dpi);
@@ -1714,8 +1717,93 @@ inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
     chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
 }
 
-// ---- Logitech G HUB ----
+// ---- Logitech G HUB e Attack Shark ----
 static constexpr float LOGI_TESTA = 56, LOGI_SCHEDA = 72, LOGI_PIEDE = 48;
+
+enum class TipoIconaPerif { Mouse, Cuffie, Tastiera, Altro };
+
+inline D2D1_COLOR_F coloreBatteriaPerif(int bat, bool chg, bool scuro, bool testo) {
+    if (chg) return testo && !scuro ? D2D1::ColorF(0.04f, 0.54f, 0.80f, 1.0f) : D2D1::ColorF(0.20f, 0.76f, 1.0f, 1.0f);
+    if (bat > 30) return testo && !scuro ? D2D1::ColorF(0.10f, 0.62f, 0.28f, 1.0f) : D2D1::ColorF(0.20f, 0.80f, 0.38f, 1.0f);
+    if (bat >= 16) return testo && !scuro ? D2D1::ColorF(0.82f, 0.50f, 0.04f, 1.0f) : D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f);
+    return testo && !scuro ? D2D1::ColorF(0.86f, 0.22f, 0.20f, 1.0f) : D2D1::ColorF(0.95f, 0.28f, 0.25f, 1.0f);
+}
+
+inline void disegnaIconaTipoPerif(ID2D1DeviceContext* dc, ID2D1Factory1* f2d, ID2D1SolidColorBrush* pennello,
+                                  ID2D1StrokeStyle* tratto, float d, TipoIconaPerif tipo, float cx, float cy, D2D1_COLOR_F col) {
+    pennello->SetColor(col);
+    switch (tipo) {
+        case TipoIconaPerif::Mouse: {
+            dc->DrawRoundedRectangle({{cx - 5.5f * d, cy - 8.5f * d, cx + 5.5f * d, cy + 8.5f * d}, 5.5f * d, 5.5f * d}, pennello, 1.5f * d);
+            dc->DrawLine({cx, cy - 5.0f * d}, {cx, cy - 1.5f * d}, pennello, 1.5f * d, tratto);
+            break;
+        }
+        case TipoIconaPerif::Cuffie: {
+            ID2D1PathGeometry* g = nullptr;
+            ID2D1GeometrySink* s = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+                s->BeginFigure({cx - 7.5f * d, cy + 1.0f * d}, D2D1_FIGURE_BEGIN_HOLLOW);
+                s->AddArc(D2D1::ArcSegment({cx + 7.5f * d, cy + 1.0f * d}, {7.5f * d, 7.5f * d}, 0,
+                                           D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                s->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(s->Close())) dc->DrawGeometry(g, pennello, 1.5f * d, tratto);
+            }
+            if (s) s->Release();
+            if (g) g->Release();
+            dc->FillRoundedRectangle({{cx - 9.0f * d, cy + 0.5f * d, cx - 5.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
+            dc->FillRoundedRectangle({{cx + 5.5f * d, cy + 0.5f * d, cx + 9.0f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
+            break;
+        }
+        case TipoIconaPerif::Tastiera: {
+            dc->DrawRoundedRectangle({{cx - 9.5f * d, cy - 5.5f * d, cx + 9.5f * d, cy + 5.5f * d}, 2.0f * d, 2.0f * d}, pennello, 1.5f * d);
+            for (int k = -1; k <= 1; k++) {
+                dc->FillEllipse({{cx + k * 4.2f * d, cy - 1.6f * d}, 1.0f * d, 1.0f * d}, pennello);
+            }
+            dc->DrawLine({cx - 4.2f * d, cy + 2.2f * d}, {cx + 4.2f * d, cy + 2.2f * d}, pennello, 1.4f * d, tratto);
+            break;
+        }
+        case TipoIconaPerif::Altro: {
+            dc->DrawRoundedRectangle({{cx - 7.5f * d, cy - 7.5f * d, cx + 7.5f * d, cy + 7.5f * d}, 3.0f * d, 3.0f * d}, pennello, 1.5f * d);
+            dc->FillEllipse({{cx, cy}, 2.0f * d, 2.0f * d}, pennello);
+            break;
+        }
+    }
+}
+
+inline void disegnaIconaAggiornaPerif(ID2D1DeviceContext* dc, ID2D1Factory1* f2d, ID2D1SolidColorBrush* pennello,
+                                      ID2D1StrokeStyle* tratto, float dpi, const D2D1_RECT_F& rRef, D2D1_COLOR_F ink) {
+    const float cxR = (rRef.left + rRef.right) / 2, cyR = (rRef.top + rRef.bottom) / 2;
+    const float rr = 5.2f * dpi, a0 = 0.20f * (float)M_PI, a1 = 1.75f * (float)M_PI;
+    pennello->SetColor(ink);
+    ID2D1PathGeometry* gR = nullptr;
+    ID2D1GeometrySink* sR = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&gR)) && SUCCEEDED(gR->Open(&sR))) {
+        sR->BeginFigure({cxR + rr * std::cos(a0), cyR + rr * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+        sR->AddArc(D2D1::ArcSegment({cxR + rr * std::cos(a1), cyR + rr * std::sin(a1)}, {rr, rr}, 0,
+                                    D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+        sR->EndFigure(D2D1_FIGURE_END_OPEN);
+        if (SUCCEEDED(sR->Close())) dc->DrawGeometry(gR, pennello, 1.5f * dpi, tratto);
+    }
+    if (sR) sR->Release();
+    if (gR) gR->Release();
+    const float tx = cxR + rr * std::cos(a1), ty = cyR + rr * std::sin(a1);
+    const float ux = -std::sin(a1), uy = std::cos(a1);
+    const float nx = std::cos(a1), ny = std::sin(a1);
+    dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux + 2.2f * dpi * nx, ty - 3.0f * dpi * uy + 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
+    dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux - 2.2f * dpi * nx, ty - 3.0f * dpi * uy - 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
+}
+
+inline void disegnaBarraBatteriaPerif(ID2D1DeviceContext* dc, ID2D1SolidColorBrush* pennello, float dpi,
+                                      const D2D1_RECT_F& r, int batteria, D2D1_COLOR_F colBar, bool scuro) {
+    const D2D1_RECT_F track = {r.left + 12 * dpi, r.bottom - 7.5f * dpi, r.right - 12 * dpi, r.bottom - 4.5f * dpi};
+    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+    dc->FillRoundedRectangle({track, 1.5f * dpi, 1.5f * dpi}, pennello);
+    if (batteria > 0) {
+        const float fw = std::max(3.0f * dpi, (track.right - track.left) * (batteria / 100.0f));
+        pennello->SetColor(colBar);
+        dc->FillRoundedRectangle({{track.left, track.top, track.left + fw, track.bottom}, 1.5f * dpi, 1.5f * dpi}, pennello);
+    }
+}
 
 inline auto Motore::sincronizzaLogi() -> void {
     const uint64_t v = logiMon.versione.load(std::memory_order_relaxed);
@@ -1755,27 +1843,7 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
     dc->FillRoundedRectangle({rRef, 13 * dpi, 13 * dpi}, pennello);
     evidenzia(aggiungi(rRef, A_LOGI_AGGIORNA, 0), rRef, scuro, 13 * dpi);
-    {
-        const float cxR = (rRef.left + rRef.right) / 2, cyR = (rRef.top + rRef.bottom) / 2;
-        const float rr = 5.2f * dpi, a0 = 0.20f * (float)M_PI, a1 = 1.75f * (float)M_PI;
-        pennello->SetColor(ink);
-        ID2D1PathGeometry* gR = nullptr;
-        ID2D1GeometrySink* sR = nullptr;
-        if (SUCCEEDED(f2d->CreatePathGeometry(&gR)) && SUCCEEDED(gR->Open(&sR))) {
-            sR->BeginFigure({cxR + rr * std::cos(a0), cyR + rr * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
-            sR->AddArc(D2D1::ArcSegment({cxR + rr * std::cos(a1), cyR + rr * std::sin(a1)}, {rr, rr}, 0,
-                                        D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
-            sR->EndFigure(D2D1_FIGURE_END_OPEN);
-            if (SUCCEEDED(sR->Close())) dc->DrawGeometry(gR, pennello, 1.5f * dpi, tratto);
-        }
-        if (sR) sR->Release();
-        if (gR) gR->Release();
-        const float tx = cxR + rr * std::cos(a1), ty = cyR + rr * std::sin(a1);
-        const float ux = -std::sin(a1), uy = std::cos(a1);
-        const float nx = std::cos(a1), ny = std::sin(a1);
-        dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux + 2.2f * dpi * nx, ty - 3.0f * dpi * uy + 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
-        dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux - 2.2f * dpi * nx, ty - 3.0f * dpi * uy - 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
-    }
+    disegnaIconaAggiornaPerif(dc, f2d, pennello, tratto, dpi, rRef, ink);
 
     std::wstring pillTxt;
     D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
@@ -1812,51 +1880,12 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
     dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
 
-    auto coloreBatteria = [&](int bat, bool chg, bool testo) -> D2D1_COLOR_F {
-        if (chg) return testo && !scuro ? D2D1::ColorF(0.04f, 0.54f, 0.80f, 1.0f) : D2D1::ColorF(0.20f, 0.76f, 1.0f, 1.0f);
-        if (bat > 30) return testo && !scuro ? D2D1::ColorF(0.10f, 0.62f, 0.28f, 1.0f) : D2D1::ColorF(0.20f, 0.80f, 0.38f, 1.0f);
-        if (bat >= 16) return testo && !scuro ? D2D1::ColorF(0.82f, 0.50f, 0.04f, 1.0f) : D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f);
-        return testo && !scuro ? D2D1::ColorF(0.86f, 0.22f, 0.20f, 1.0f) : D2D1::ColorF(0.95f, 0.28f, 0.25f, 1.0f);
-    };
-
-    auto disegnaTipo = [&](logitech::Tipo tipo, float cx, float cy, D2D1_COLOR_F col) {
-        const float d = dpi;
-        pennello->SetColor(col);
+    auto mappaLogiTipo = [](logitech::Tipo tipo) {
         switch (tipo) {
-            case logitech::Tipo::Mouse: {
-                dc->DrawRoundedRectangle({{cx - 5.5f * d, cy - 8.5f * d, cx + 5.5f * d, cy + 8.5f * d}, 5.5f * d, 5.5f * d}, pennello, 1.5f * d);
-                dc->DrawLine({cx, cy - 5.0f * d}, {cx, cy - 1.5f * d}, pennello, 1.5f * d, tratto);
-                break;
-            }
-            case logitech::Tipo::Cuffie: {
-                ID2D1PathGeometry* g = nullptr;
-                ID2D1GeometrySink* s = nullptr;
-                if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
-                    s->BeginFigure({cx - 7.5f * d, cy + 1.0f * d}, D2D1_FIGURE_BEGIN_HOLLOW);
-                    s->AddArc(D2D1::ArcSegment({cx + 7.5f * d, cy + 1.0f * d}, {7.5f * d, 7.5f * d}, 0,
-                                               D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
-                    s->EndFigure(D2D1_FIGURE_END_OPEN);
-                    if (SUCCEEDED(s->Close())) dc->DrawGeometry(g, pennello, 1.5f * d, tratto);
-                }
-                if (s) s->Release();
-                if (g) g->Release();
-                dc->FillRoundedRectangle({{cx - 9.0f * d, cy + 0.5f * d, cx - 5.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
-                dc->FillRoundedRectangle({{cx + 5.5f * d, cy + 0.5f * d, cx + 9.0f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
-                break;
-            }
-            case logitech::Tipo::Tastiera: {
-                dc->DrawRoundedRectangle({{cx - 9.5f * d, cy - 5.5f * d, cx + 9.5f * d, cy + 5.5f * d}, 2.0f * d, 2.0f * d}, pennello, 1.5f * d);
-                for (int k = -1; k <= 1; k++) {
-                    dc->FillEllipse({{cx + k * 4.2f * d, cy - 1.6f * d}, 1.0f * d, 1.0f * d}, pennello);
-                }
-                dc->DrawLine({cx - 4.2f * d, cy + 2.2f * d}, {cx + 4.2f * d, cy + 2.2f * d}, pennello, 1.4f * d, tratto);
-                break;
-            }
-            case logitech::Tipo::Altro: {
-                dc->DrawRoundedRectangle({{cx - 7.5f * d, cy - 7.5f * d, cx + 7.5f * d, cy + 7.5f * d}, 3.0f * d, 3.0f * d}, pennello, 1.5f * d);
-                dc->FillEllipse({{cx, cy}, 2.0f * d, 2.0f * d}, pennello);
-                break;
-            }
+            case logitech::Tipo::Mouse:    return TipoIconaPerif::Mouse;
+            case logitech::Tipo::Cuffie:   return TipoIconaPerif::Cuffie;
+            case logitech::Tipo::Tastiera: return TipoIconaPerif::Tastiera;
+            default:                       return TipoIconaPerif::Altro;
         }
     };
 
@@ -1894,7 +1923,8 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
             const bool offline = dv.stato == logitech::Stato::Disconnesso;
             const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
                                                : dv.stato == logitech::Stato::Riposo ? tenue : ink;
-            disegnaTipo(dv.tipo, r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
+            disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, mappaLogiTipo(dv.tipo),
+                                  r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
 
             float limTit = r.right - 12 * dpi;
             if (dv.batteria >= 0) {
@@ -1902,22 +1932,14 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
                 swprintf(pb, 24, dv.inCarica ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
                 const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
                 const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
-                const D2D1_COLOR_F colFg = coloreBatteria(dv.batteria, dv.inCarica, true);
-                const D2D1_COLOR_F colBar = coloreBatteria(dv.batteria, dv.inCarica, false);
+                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, true);
+                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, false);
                 pennello->SetColor(D2D1::ColorF(colBar.r, colBar.g, colBar.b, scuro ? 0.20f : 0.14f));
                 dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
                 pennello->SetColor(colFg);
                 scrivi(pb, fmtNome, rt);
                 limTit = rt.left - 8 * dpi;
-
-                const D2D1_RECT_F track = {r.left + 12 * dpi, r.bottom - 7.5f * dpi, r.right - 12 * dpi, r.bottom - 4.5f * dpi};
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
-                dc->FillRoundedRectangle({track, 1.5f * dpi, 1.5f * dpi}, pennello);
-                if (dv.batteria > 0) {
-                    const float fw = std::max(3.0f * dpi, (track.right - track.left) * (dv.batteria / 100.0f));
-                    pennello->SetColor(colBar);
-                    dc->FillRoundedRectangle({{track.left, track.top, track.left + fw, track.bottom}, 1.5f * dpi, 1.5f * dpi}, pennello);
-                }
+                disegnaBarraBatteriaPerif(dc, pennello, dpi, r, dv.batteria, colBar, scuro);
             }
 
             pennello->SetColor(offline ? tenue : ink);
@@ -1972,6 +1994,184 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
     evidenzia(aggiungi(rPiede, A_LOGI_GHUB, 0), rPiede, scuro, 6 * dpi);
     pennello->SetColor(ink);
     scrivi(testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
+}
+
+inline auto Motore::sincronizzaAShark() -> void {
+    const uint64_t v = aSharkMon.versione.load(std::memory_order_relaxed);
+    if (v == aSharkVer) return;
+    aSharkStato = aSharkMon.copia();
+    aSharkVer = v;
+    dirty = true;
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_ASHARK && !pChiusura) {
+        const float nuova = altezzaVista(P_ASHARK);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pSopra = pPremuto = -1;
+        evidP.clear();
+        pDirty = true;
+    }
+    usa(s);
+}
+
+inline auto Motore::apriAShark() -> void {
+    apriCentro(P_ASHARK);
+}
+
+inline auto Motore::altezzaAShark() const -> float {
+    const float corpo = aSharkStato.dispositivi.empty() ? 76.0f : (float)aSharkStato.dispositivi.size() * LOGI_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((LOGI_TESTA + corpo + LOGI_PIEDE) * dpi));
+}
+
+inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+
+    const std::wstring titolo = L"Attack Shark";
+    const float lt = larghezzaTesto(titolo, fmtTitolo);
+    pennello->SetColor(ink);
+    scrivi(titolo, fmtTitolo, {m, 14 * dpi, m + lt + 8 * dpi, 38 * dpi});
+
+    const D2D1_RECT_F rRef = {PW - m - 26 * dpi, 13 * dpi, PW - m, 39 * dpi};
+    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+    dc->FillRoundedRectangle({rRef, 13 * dpi, 13 * dpi}, pennello);
+    evidenzia(aggiungi(rRef, A_ASHARK_AGGIORNA, 0), rRef, scuro, 13 * dpi);
+    disegnaIconaAggiornaPerif(dc, f2d, pennello, tratto, dpi, rRef, ink);
+
+    int connessi = 0;
+    for (const auto& dv : aSharkStato.dispositivi) if (dv.online) connessi++;
+    std::wstring pillTxt;
+    D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+    D2D1_COLOR_F pillFg = tenue;
+    if (!aSharkStato.connesso) {
+        pillTxt = testi::t(L"Non connesso", L"Not connected");
+    } else if (connessi == 0) {
+        pillTxt = testi::t(L"In attesa", L"Standby");
+    } else {
+        if (connessi == 1) {
+            pillTxt = testi::t(L"1 connesso", L"1 connected");
+        } else {
+            wchar_t b[48];
+            swprintf(b, 48, testi::t(L"%d connessi", L"%d connected"), connessi);
+            pillTxt = b;
+        }
+        const D2D1_COLOR_F verde = scuro ? D2D1::ColorF(0.24f, 0.84f, 0.44f, 1.0f) : D2D1::ColorF(0.10f, 0.62f, 0.28f, 1.0f);
+        pillBg = D2D1::ColorF(verde.r, verde.g, verde.b, scuro ? 0.18f : 0.14f);
+        pillFg = verde;
+    }
+    const float px0 = m + lt + 12 * dpi;
+    const float limPill = rRef.left - 8 * dpi;
+    const float pw = std::min(larghezzaTesto(pillTxt, fmtNome) + 16 * dpi, std::max(0.0f, limPill - px0));
+    if (pw >= 24 * dpi) {
+        const D2D1_RECT_F rpPill = {px0, 17 * dpi, px0 + pw, 35 * dpi};
+        pennello->SetColor(pillBg);
+        dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+        pennello->SetColor(pillFg);
+        scrivi(pillTxt, fmtNome, rpPill);
+    }
+
+    const float listTop = LOGI_TESTA * dpi;
+    const float listBottom = PH - LOGI_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    if (!aSharkStato.connesso || aSharkStato.dispositivi.empty()) {
+        aSharkScroll = 0;
+        aSharkScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 70 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(testi::t(L"Nessun dispositivo trovato", L"No devices found"),
+               fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Collega un ricevitore o dispositivo Attack Shark", L"Connect an Attack Shark receiver or device"),
+               fmtSotto, {re.left + 14 * dpi, re.top + 32 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const float contentH = (float)aSharkStato.dispositivi.size() * LOGI_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        aSharkScrollMax = std::max(0.0f, contentH - viewH);
+        aSharkScroll = std::clamp(aSharkScroll, 0.0f, aSharkScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        for (size_t i = 0; i < aSharkStato.dispositivi.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * LOGI_SCHEDA * dpi - aSharkScroll;
+            if (cy0 + (LOGI_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const attackshark::Dispositivo& dv = aSharkStato.dispositivi[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (LOGI_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+
+            const bool offline = !dv.online;
+            const bool asleep = dv.online && !dv.attivo;
+            const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
+                                               : asleep ? tenue : ink;
+            const TipoIconaPerif tipoIcona = (dv.tipo == L"Mouse" || dv.tipo == L"mouse") ? TipoIconaPerif::Mouse
+                : (dv.tipo == L"Keyboard" || dv.tipo == L"keyboard") ? TipoIconaPerif::Tastiera
+                : TipoIconaPerif::Altro;
+            disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
+                                  r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
+
+            float limTit = r.right - 12 * dpi;
+            if (dv.batteria >= 0) {
+                wchar_t pb[24];
+                swprintf(pb, 24, dv.inCarica ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
+                const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                const D2D1_COLOR_F colFg = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, true);
+                const D2D1_COLOR_F colBar = coloreBatteriaPerif(dv.batteria, dv.inCarica, scuro, false);
+                pennello->SetColor(D2D1::ColorF(colBar.r, colBar.g, colBar.b, scuro ? 0.20f : 0.14f));
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(colFg);
+                scrivi(pb, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+                disegnaBarraBatteriaPerif(dc, pennello, dpi, r, dv.batteria, colBar, scuro);
+            }
+
+            pennello->SetColor(offline ? tenue : ink);
+            scrivi(dv.nome, fmtVoce, {r.left + 44 * dpi, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+
+            std::wstring riga2;
+            if (offline) {
+                riga2 = testi::t(L"Non connesso", L"Offline");
+            } else if (asleep) {
+                if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
+                riga2 += testi::t(L"In riposo", L"Asleep");
+            } else if (dv.inCarica) {
+                if (dv.batteria >= 0) {
+                    wchar_t cb[48];
+                    swprintf(cb, 48, testi::t(L"In carica \u00b7 %d%%", L"Charging \u00b7 %d%%"), dv.batteria);
+                    riga2 = cb;
+                } else {
+                    riga2 = testi::t(L"In carica", L"Charging");
+                }
+            } else {
+                if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
+                riga2 += testi::t(L"Connesso", L"Connected");
+            }
+            pennello->SetColor(tenue);
+            scrivi(riga2, fmtSotto, {r.left + 44 * dpi, r.top + 31 * dpi, r.right - 12 * dpi, r.top + 50 * dpi});
+        }
+        dc->PopAxisAlignedClip();
+
+        if (aSharkScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (aSharkScroll / aSharkScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_ASHARK_APP, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Apri Attack Shark Software", L"Open Attack Shark Software"), fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
     chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
 }
 
@@ -3870,6 +4070,14 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             chiudiPannello();
             logitech::apriGHub();
             break;
+        case A_ASHARK_AGGIORNA:
+            aSharkMon.aggiornaOra();
+            pDirty = true;
+            break;
+        case A_ASHARK_APP:
+            chiudiPannello();
+            attackshark::apriSoftware();
+            break;
         case A_WPLUGIN_TOGGLE:
             for (auto& w : wplugStato.widgets) {
                 if (w.id == wplugIdAperto && w.haToggle) {
@@ -4021,6 +4229,10 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 d->logiScroll = std::clamp(d->logiScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->logiScrollMax);
                 d->pDirty = true;
             }
+            else if (m == WM_MOUSEWHEEL && d->pannelloTipo == P_ASHARK) {
+                d->aSharkScroll = std::clamp(d->aSharkScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->aSharkScrollMax);
+                d->pDirty = true;
+            }
             else if (m == WM_MOUSEWHEEL && d->pannelloTipo == P_WPLUGIN) {
                 d->wplugScroll = std::clamp(d->wplugScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->wplugScrollMax);
                 d->pDirty = true;
@@ -4074,8 +4286,8 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 }
                 // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
                 // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
-                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo(), ia = d->rettAISchermo(), il = d->rettLogiSchermo();
-                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || d->suIconaWPluginSchermo(pt))) return 0;
+                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo(), ia = d->rettAISchermo(), il = d->rettLogiSchermo(), ias = d->rettASharkSchermo();
+                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || PtInRect(&ias, pt) || d->suIconaWPluginSchermo(pt))) return 0;
                 d->chiudiTutte();
             }
             return 0;
@@ -4126,6 +4338,14 @@ inline auto Motore::rettLogi() const -> D2D1_RECT_F {
     return {x, yb - S, x + S, yb};
 }
 
+inline auto Motore::rettAShark() const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == AVVIO_ASHARK) x = pos[i];
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
 inline auto Motore::rettWPlugin(const std::wstring& id) const -> D2D1_RECT_F {
     const auto pos = posizioniRiposo();
     float x = W - S * 2 - GAP - 12 * dpi;
@@ -4153,6 +4373,12 @@ inline auto Motore::rettLogiSchermo() const -> RECT {
     return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
 }
 
+inline auto Motore::rettASharkSchermo() const -> RECT {
+    if (!mostraAShark) return RECT{};
+    const D2D1_RECT_F r = rettAShark();
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
 inline auto Motore::rettWPluginSchermo(const std::wstring& id) const -> RECT {
     const wplugin::Widget* pw = trovaWPlugin(id);
     if (!pw || !pw->abilitato) return RECT{};
@@ -4172,7 +4398,7 @@ inline auto Motore::suIconaWPluginSchermo(POINT pt) const -> bool {
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_LOGI) apriCentro(tipo); }
+inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_ASHARK) apriCentro(tipo); }
 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui
@@ -4182,8 +4408,8 @@ inline auto Motore::apriCentro(int tipo) -> void {
     if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
     usa(0);
     if (pannelloTipo != P_NESSUNO && !pChiusura) {
-        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN)) { chiudiPannello(); return; }
-        if (tipo == P_AI || pannelloTipo == P_AI || tipo == P_LOGI || pannelloTipo == P_LOGI || tipo == P_WPLUGIN || pannelloTipo == P_WPLUGIN) { nascondiPannello(); apriPannello(tipo); return; }
+        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_ASHARK && pannelloTipo != P_WPLUGIN)) { chiudiPannello(); return; }
+        if (tipo == P_AI || pannelloTipo == P_AI || tipo == P_LOGI || pannelloTipo == P_LOGI || tipo == P_ASHARK || pannelloTipo == P_ASHARK || tipo == P_WPLUGIN || pannelloTipo == P_WPLUGIN) { nascondiPannello(); apriPannello(tipo); return; }
         cambiaVista(tipo, {PW / 2, PH / 2});   // (da fuori: la vista nuova si apre dal centro)
         return;
     }

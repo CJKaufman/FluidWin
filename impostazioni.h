@@ -52,6 +52,9 @@ struct Valori {
     bool dockLogi = false;        // widget Logitech G HUB nel dock
     bool logiAnimCarica = true;   // animazione di ricarica sull'anello Logitech
     DWORD logiGlowColore = 0;     // colore bagliore ricarica Logitech: 0 automatico (ciano), altrimenti 0x00RRGGBB
+    bool dockAShark = false;      // widget Attack Shark nel dock
+    bool aSharkAnimCarica = true; // animazione di ricarica sull'anello Attack Shark
+    DWORD aSharkGlowColore = 0;   // colore bagliore ricarica Attack Shark: 0 automatico (ciano), altrimenti 0x00RRGGBB
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -150,6 +153,9 @@ inline void carica() {
     v.dockLogi = leggiDword(L"DockLogi", 0);
     v.logiAnimCarica = leggiDword(L"LogiAnimCarica", 1);
     v.logiGlowColore = leggiDword(L"LogiGlowColore", 0) & 0xFFFFFFu;
+    v.dockAShark = leggiDword(L"DockAShark", 0);
+    v.aSharkAnimCarica = leggiDword(L"ASharkAnimCarica", 1);
+    v.aSharkGlowColore = leggiDword(L"ASharkGlowColore", 0) & 0xFFFFFFu;
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -171,7 +177,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockGioco", v.dockGioco); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"DockAShark", v.dockAShark); scriviDword(L"ASharkAnimCarica", v.aSharkAnimCarica); scriviDword(L"ASharkGlowColore", v.aSharkGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -201,6 +207,7 @@ public:
     std::function<void(bool)> hookClaudeImposta;
     std::function<void()> apriCartellaHookAI;
     std::function<void()> apriGHub;
+    std::function<void()> apriAShark;
     std::function<bool(const std::wstring&, wplugin::Widget&)> dettagliWPlugin;
     std::function<void(const std::wstring&, const std::wstring&, bool)> impostaConfigWPluginBool;
     std::function<void(const std::wstring&, const std::wstring&, const std::wstring&)> impostaConfigWPluginStr;
@@ -492,6 +499,8 @@ private:
          L"Widget nel dock per stato, contesto e avvio rapido degli agenti AI", L"Dock widget for live AI agent status, context usage and quick launch", &Valori::dockAI, S_WIDGET},
         {L"Logitech", L"Logitech",
          L"Widget nel dock per batteria e stato dei dispositivi Logitech G HUB", L"Dock widget for Logitech G HUB battery levels and connected gear", &Valori::dockLogi, S_WIDGET},
+        {L"Attack Shark", L"Attack Shark",
+         L"Widget nel dock per batteria e stato dei dispositivi Attack Shark", L"Dock widget for Attack Shark wireless and wired gear status", &Valori::dockAShark, S_WIDGET},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
@@ -606,7 +615,8 @@ private:
                          Z_W_AI_AVVISI = 904, Z_W_AI_HOOK_AGY = 905, Z_W_AI_HOOK_CLAUDE = 906, Z_W_AI_CARTELLA = 907,
                          Z_W_LOGI_ANIM = 908, Z_W_LOGI_GHUB = 909, Z_W_WPLUG_CARTELLA = 910, Z_W_WPLUG_JSON = 911,
                          Z_W_LOGI_GLOW = 912,
-                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
+                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160,
+                         Z_W_APRI_ASHARK = 1200, Z_W_ASHARK_ANIM = 1201, Z_W_ASHARK_APP = 1202, Z_W_ASHARK_GLOW = 1210;
     struct GlowSwatch { DWORD rgb; const wchar_t* nome; };
     static constexpr GlowSwatch LOGI_GLOW_PALETTE[] = {
         {0x000000, L"Auto"},
@@ -836,6 +846,7 @@ private:
         if (id == Z_W_INDIETRO) { apriPaginaWidget(L""); return; }
         if (id == Z_W_APRI_AI) { apriPaginaWidget(L"ai"); return; }
         if (id == Z_W_APRI_LOGI) { apriPaginaWidget(L"logitech"); return; }
+        if (id == Z_W_APRI_ASHARK) { apriPaginaWidget(L"attackshark"); return; }
         if (id >= Z_W_APRI_WPLUG && id < Z_W_APRI_WPLUG + 30) {
             const auto wp = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
             const size_t k = (size_t)(id - Z_W_APRI_WPLUG);
@@ -849,6 +860,10 @@ private:
                 if (cambiato) cambiato();
             } else if (widgetAperto == L"logitech") {
                 valori().dockLogi = !valori().dockLogi;
+                salva();
+                if (cambiato) cambiato();
+            } else if (widgetAperto == L"attackshark") {
+                valori().dockAShark = !valori().dockAShark;
                 salva();
                 if (cambiato) cambiato();
             } else if (widgetAperto.rfind(L"wplugin:", 0) == 0) {
@@ -900,6 +915,26 @@ private:
         }
         if (id == Z_W_LOGI_GHUB) {
             if (apriGHub) apriGHub();
+            return;
+        }
+        if (id == Z_W_ASHARK_ANIM) {
+            valori().aSharkAnimCarica = !valori().aSharkAnimCarica;
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_W_ASHARK_GLOW && id < Z_W_ASHARK_GLOW + N_LOGI_GLOW) {
+            valori().aSharkGlowColore = LOGI_GLOW_PALETTE[id - Z_W_ASHARK_GLOW].rgb;
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_ASHARK_APP) {
+            if (apriAShark) apriAShark();
             return;
         }
         if (id == Z_W_WPLUG_CARTELLA) {
@@ -1176,7 +1211,7 @@ private:
         wplugin::Widget wpSub;
         bool widgetSubAperto = false;
         if (sezione == S_WIDGET && !widgetAperto.empty()) {
-            if (widgetAperto == L"ai" || widgetAperto == L"logitech") {
+            if (widgetAperto == L"ai" || widgetAperto == L"logitech" || widgetAperto == L"attackshark") {
                 widgetSubAperto = true;
             } else if (widgetAperto.rfind(L"wplugin:", 0) == 0) {
                 const std::wstring wid = widgetAperto.substr(8);
@@ -1203,6 +1238,9 @@ private:
             } else if (widgetAperto == L"logitech") {
                 subTit = L"Logitech";
                 subSotto = testi::t(L"Dispositivi Logitech G HUB nel dock", L"Logitech G HUB devices in the dock");
+            } else if (widgetAperto == L"attackshark") {
+                subTit = L"Attack Shark";
+                subSotto = testi::t(L"Dispositivi Attack Shark nel dock", L"Attack Shark devices in the dock");
             } else {
                 subTit = wpSub.nome;
                 subSotto = !wpSub.sottotitolo.empty() ? wpSub.sottotitolo : (wpSub.id + L".json");
@@ -1279,7 +1317,8 @@ private:
                 const D2D1_RECT_F r = {L, y, R, y + 54 * d};
                 if (sezione == S_WIDGET) {
                     const int openId = (voci[i].campo == &Valori::dockAI) ? Z_W_APRI_AI
-                                     : (voci[i].campo == &Valori::dockLogi) ? Z_W_APRI_LOGI : -1;
+                                     : (voci[i].campo == &Valori::dockLogi) ? Z_W_APRI_LOGI
+                                     : (voci[i].campo == &Valori::dockAShark) ? Z_W_APRI_ASHARK : -1;
                     const float toggleL = r.right - 66 * d;
                     if (openId >= 0) aggiungiZona({r.left, r.top, toggleL, r.bottom}, openId);
                     aggiungiZona({openId >= 0 ? toggleL : r.left, r.top, r.right, r.bottom}, (int)i);
@@ -1736,6 +1775,28 @@ private:
                 rigaConPulsante(Z_W_LOGI_GHUB, L"Logitech G HUB",
                                 testi::t(L"Avvia o porta in primo piano Logitech G HUB", L"Launch or focus Logitech G HUB"),
                                 testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), false);
+            } else if (widgetAperto == L"attackshark") {
+                rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
+                            testi::t(L"Aggiunge il widget batteria Attack Shark al dock", L"Add the Attack Shark battery widget to the dock"), animCampo(&Valori::dockAShark));
+                rigaLevetta(Z_W_ASHARK_ANIM, testi::t(L"Animazione di ricarica", L"Charging animation"),
+                            testi::t(L"Bagliore animato e impulso sull'anello della batteria durante la ricarica",
+                                     L"Animated glow and pulse on the battery ring while charging"),
+                            valori().aSharkAnimCarica ? 1.0f : 0.0f);
+                {
+                    std::vector<SwatchVoce> aSharkSwatches;
+                    aSharkSwatches.reserve(N_LOGI_GLOW);
+                    for (int j = 0; j < N_LOGI_GLOW; j++) {
+                        const DWORD rgb = LOGI_GLOW_PALETTE[j].rgb;
+                        aSharkSwatches.push_back({Z_W_ASHARK_GLOW + j, rgb == 0, valori().aSharkGlowColore == rgb, colore(rgb)});
+                    }
+                    rigaSwatch(testi::t(L"Colore del bagliore", L"Glow color"),
+                               testi::t(L"Colore dell'anello e del bagliore durante la ricarica",
+                                        L"Accent color for the charging glow and shimmer"),
+                               aSharkSwatches);
+                }
+                rigaConPulsante(Z_W_ASHARK_APP, L"Attack Shark Software",
+                                testi::t(L"Avvia Attack Shark Software o apri il sito web", L"Launch Attack Shark Software or open website"),
+                                testi::t(L"Apri Attack Shark Software", L"Open Attack Shark Software"), false);
             } else {
                 rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
                             testi::t(L"Mostra questo widget personalizzato nel dock", L"Show this custom widget in the dock"),

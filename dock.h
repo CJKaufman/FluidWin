@@ -71,6 +71,7 @@
 #include "appunti.h"
 #include "ai.h"
 #include "logitech.h"
+#include "attackshark.h"
 #include "widget_plugin.h"
 #include <ole2.h>
 #include <commdlg.h>
@@ -117,12 +118,13 @@ static std::wstring percorsoPilaPers(const std::wstring& a) { return ePilaPers(a
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
 static const wchar_t* const AVVIO_AI = L"*ai";                 // monitor AI (tra cestino e centro di controllo)
 static const wchar_t* const AVVIO_LOGI = L"*logitech";         // widget Logitech G HUB (tra monitor AI e centro di controllo)
+static constexpr const wchar_t* AVVIO_ASHARK = L"*attackshark"; // widget Attack Shark (tra Logitech e centro di controllo)
 static const wchar_t* const AVVIO_WPLUGIN_PREF = L"*wplugin:";
 static bool eWPlugin(const std::wstring& a) { return a.rfind(AVVIO_WPLUGIN_PREF, 0) == 0; }
 static std::wstring idWPlugin(const std::wstring& a) { return eWPlugin(a) ? a.substr(wcslen(AVVIO_WPLUGIN_PREF)) : std::wstring(); }
-static bool eWidgetDock(const std::wstring& a) { return a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a); }
+static bool eWidgetDock(const std::wstring& a) { return a == AVVIO_AI || a == AVVIO_LOGI || a == AVVIO_ASHARK || eWPlugin(a); }
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a) || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || ePilaPers(a) || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || a == AVVIO_ASHARK || eWPlugin(a) || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -408,7 +410,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
-    ~Motore() { aiMon.ferma(); logiMon.ferma(); wplugMon.ferma(); }
+    ~Motore() { aiMon.ferma(); logiMon.ferma(); aSharkMon.ferma(); wplugMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -528,6 +530,7 @@ public:
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
         if (mostraAI) aiMon.avvia(icone, WM_AI_AGGIORNATO);
         if (mostraLogi) logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
+        if (mostraAShark) aSharkMon.avvia(icone, WM_ASHARK_AGGIORNATO);
         wplugMon.avvia(icone, WM_WPLUGIN_AGGIORNATO);
         return true;
     }
@@ -543,13 +546,16 @@ public:
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
         const bool d = aiMon.ferma(ms);
         const bool e = logiMon.ferma(ms);
-        const bool f = wplugMon.ferma(ms);
-        return a && b && c && d && e && f;
+        const bool f = aSharkMon.ferma(ms);
+        const bool g = wplugMon.ferma(ms);
+        return a && b && c && d && e && f && g;
     }
 
     void chiudi() {
         fermaIcone();
         fermaNotifiche();
+        logiMon.ferma();
+        aSharkMon.ferma();
         if (!attivo) return;
         attivo = false;
         aggiornaAppbar();   // lo spazio riservato si libera (le finestre ingrandite tornano fino in fondo)
@@ -706,6 +712,7 @@ public:
         }
         sincronizzaAI();
         sincronizzaLogi();
+        sincronizzaAShark();
         sincronizzaWPlugin();
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
@@ -947,6 +954,20 @@ public:
         if (attivo) aggiornaApp();
         dirty = true;
     }
+    void impostaAShark(bool si) {
+        if (si == mostraAShark) return;
+        mostraAShark = si;
+        if (!si) {
+            usa(0);
+            if (pannelloTipo == P_ASHARK) chiudiPannello();
+            aSharkMon.ferma();
+        } else if (icone) {
+            aSharkMon.avvia(icone, WM_ASHARK_AGGIORNATO);
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
     static bool leggiAIAvvisi() {
         DWORD v = 1, n = sizeof(v);
         if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
@@ -974,6 +995,19 @@ public:
         rgb &= 0xFFFFFFu;
         if (rgb == logiGlowColore) return;
         logiGlowColore = rgb;
+        dirty = true;
+    }
+    bool aSharkAnimCarica = true;
+    void impostaASharkAnimCarica(bool si) {
+        if (si == aSharkAnimCarica) return;
+        aSharkAnimCarica = si;
+        dirty = true;
+    }
+    DWORD aSharkGlowColore = 0;
+    void impostaASharkGlowColore(DWORD rgb) {
+        rgb &= 0xFFFFFFu;
+        if (rgb == aSharkGlowColore) return;
+        aSharkGlowColore = rgb;
         dirty = true;
     }
     std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> elencoWPlugin() const {
@@ -1444,6 +1478,7 @@ private:
     bool mostraGiochi = true;
     bool mostraAI = false;
     bool mostraLogi = false;
+    bool mostraAShark = false;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
     // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
     // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
@@ -2099,6 +2134,7 @@ private:
             std::vector<Voce> widgets;
             if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); widgets.push_back(std::move(c)); }
             if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; widgets.push_back(std::move(c)); }
+            if (mostraAShark) { Voce c; c.fissata = true; c.avvio = AVVIO_ASHARK; c.nome = L"Attack Shark"; widgets.push_back(std::move(c)); }
             for (const auto& w : wplugStato.widgets) {
                 if (!w.abilitato) continue;
                 Voce c; c.fissata = true; c.avvio = AVVIO_WPLUGIN_PREF + w.id; c.nome = w.nome;
@@ -2132,7 +2168,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI && !eWPlugin(v.avvio)) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_GIOCHI && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI && v.avvio != AVVIO_ASHARK && !eWPlugin(v.avvio)) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -2421,8 +2457,8 @@ private:
         if (!nuovo || nessunaScheda() || pChiusura || adesso() - pT0 < 0.15) return;
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
-        const RECT is = rettIsolaSchermo(), ia = rettAISchermo(), il = rettLogiSchermo();
-        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || suIconaWPluginSchermo(pt)) return;   // l'icona del centro, AI, Logitech o widget: decide il suo clic
+        const RECT is = rettIsolaSchermo(), ia = rettAISchermo(), il = rettLogiSchermo(), ias = rettASharkSchermo();
+        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || PtInRect(&ias, pt) || suIconaWPluginSchermo(pt)) return;   // l'icona del centro, AI, Logitech, Attack Shark o widget: decide il suo clic
         HWND hw = WindowFromPoint(pt);
         if (schedaFinestra(hw) || finestraMenuTray(hw)) return;
         if (pMenuTray) { pMenuTray = false; return; }
@@ -2701,6 +2737,10 @@ private:
                 disegnaIconaLogi(r, alfa, scuro);
                 if (logiAnimCarica && logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
             }
+            else if (v.avvio == AVVIO_ASHARK) {
+                disegnaIconaAShark(r, alfa, scuro);
+                if (aSharkAnimCarica && aSharkStato.alcunoInCarica && aSharkStato.batteriaMin >= 0) movimento = true;
+            }
             else if (eWPlugin(v.avvio)) {
                 if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) {
                     disegnaIconaWPlugin(r, alfa, scuro, *pw);
@@ -2727,17 +2767,18 @@ private:
             }
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
-            // (uno anche sotto App, Giochi, Monitor AI, Logitech e centro di controllo mentre sono attivi/aperti)
+            // (uno anche sotto App, Giochi, Monitor AI, Logitech, Attack Shark e centro di controllo mentre sono attivi/aperti)
             const auto schedaAperta = [&](int t) {
                 return (pannelloTipo == t && !pChiusura) || (altra.pannelloTipo == t && !altra.pChiusura);
             };
             const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
             const bool logiAttivo = v.avvio == AVVIO_LOGI && schedaAperta(P_LOGI);
+            const bool aSharkAttivo = v.avvio == AVVIO_ASHARK && schedaAperta(P_ASHARK);
             const bool wplugAttivo = eWPlugin(v.avvio) && schedaAperta(P_WPLUGIN) && wplugIdAperto == idWPlugin(v.avvio);
             const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
-                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN) ||
-                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI && altra.pannelloTipo != P_WPLUGIN));
-            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || wplugAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_ASHARK && pannelloTipo != P_WPLUGIN) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI && altra.pannelloTipo != P_ASHARK && altra.pannelloTipo != P_WPLUGIN));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || aSharkAttivo || wplugAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura && !lModoGiochi) || (v.avvio == AVVIO_GIOCHI && lAperto && !lChiusura && lModoGiochi)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -2841,6 +2882,40 @@ private:
                     etichettaTesto = b;
                 } else {
                     etichettaTesto = L"Logitech";
+                }
+            } else if (v.avvio == AVVIO_ASHARK) {
+                if (aSharkStato.batteriaMin >= 0) {
+                    bool chg = aSharkStato.alcunoInCarica;
+                    std::wstring dev;
+                    for (const auto& dv : aSharkStato.dispositivi) {
+                        if (dv.online && dv.batteria == aSharkStato.batteriaMin) {
+                            chg = dv.inCarica;
+                            dev = dv.nome;
+                            break;
+                        }
+                    }
+                    if (dev.rfind(L"Attack Shark ", 0) == 0 && dev.size() > 13) dev = dev.substr(13);
+                    wchar_t b[128];
+                    if (!dev.empty()) {
+                        swprintf(b, 128, chg ? L"Attack Shark \u00b7 %ls %d%% \u26a1" : L"Attack Shark \u00b7 %ls %d%%", dev.c_str(), aSharkStato.batteriaMin);
+                    } else {
+                        swprintf(b, 128, chg ? L"Attack Shark \u00b7 %d%% \u26a1" : L"Attack Shark \u00b7 %d%%", aSharkStato.batteriaMin);
+                    }
+                    etichettaTesto = b;
+                } else if (aSharkStato.connesso) {
+                    int nConn = 0;
+                    for (const auto& dv : aSharkStato.dispositivi) if (dv.online) nConn++;
+                    if (nConn == 1) {
+                        etichettaTesto = testi::t(L"Attack Shark \u00b7 1 connesso", L"Attack Shark \u00b7 1 connected");
+                    } else if (nConn > 1) {
+                        wchar_t b[64];
+                        swprintf(b, 64, testi::t(L"Attack Shark \u00b7 %d connessi", L"Attack Shark \u00b7 %d connected"), nConn);
+                        etichettaTesto = b;
+                    } else {
+                        etichettaTesto = testi::t(L"Attack Shark \u00b7 In attesa", L"Attack Shark \u00b7 Standby");
+                    }
+                } else {
+                    etichettaTesto = L"Attack Shark";
                 }
             } else if (eWPlugin(v.avvio)) {
                 const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio));
@@ -3620,10 +3695,11 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI, P_WPLUGIN };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI, P_ASHARK, P_WPLUGIN };
     static const UINT WM_AI_AGGIORNATO = WM_APP + 33;
     static const UINT WM_LOGI_AGGIORNATO = WM_APP + 52;
     static const UINT WM_WPLUGIN_AGGIORNATO = WM_APP + 53;
+    static const UINT WM_ASHARK_AGGIORNATO = WM_APP + 56;
     ai::Monitor aiMon;
     ai::Riepilogo aiStato;
     uint64_t aiVer = 0;
@@ -3642,6 +3718,15 @@ private:
     void sincronizzaLogi();
     float altezzaLogi() const;
     void disegnaLogi(bool scuro, D2D1_COLOR_F ink);
+    attackshark::Monitor aSharkMon;
+    attackshark::Riepilogo aSharkStato;
+    uint64_t aSharkVer = 0;
+    float aSharkScroll = 0;
+    float aSharkScrollMax = 0;
+    void sincronizzaAShark();
+    float altezzaAShark() const;
+    void disegnaAShark(bool scuro, D2D1_COLOR_F ink);
+    void apriAShark();
     wplugin::Monitor wplugMon;
     wplugin::Riepilogo wplugStato;
     uint64_t wplugVer = 0;
@@ -3683,6 +3768,7 @@ private:
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
                   A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
                   A_LOGI_AGGIORNA, A_LOGI_GHUB,
+                  A_ASHARK_AGGIORNA, A_ASHARK_APP,
                   A_WPLUGIN_TOGGLE, A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
@@ -4344,10 +4430,12 @@ public:
     D2D1_RECT_F rettCentro() const;
     D2D1_RECT_F rettAI() const;
     D2D1_RECT_F rettLogi() const;
+    D2D1_RECT_F rettAShark() const;
     D2D1_RECT_F rettWPlugin(const std::wstring& id) const;
     RECT rettIsolaSchermo() const;
     RECT rettAISchermo() const;
     RECT rettLogiSchermo() const;
+    RECT rettASharkSchermo() const;
     RECT rettWPluginSchermo(const std::wstring& id) const;
     bool suIconaWPluginSchermo(POINT pt) const;
     bool isolaVisibile() const;
@@ -4583,64 +4671,43 @@ private:
         }
     }
 
-    void disegnaIconaLogi(const D2D1_RECT_F& r, float alfa, bool scuro) {
-        const float d = r.right - r.left;
+    D2D1_COLOR_F disegnaAnelloPeriferica(const D2D1_RECT_F& r, float alfa, bool scuro,
+                                         int bat, bool chg, bool animCarica, DWORD glowColore, bool connesso,
+                                         float& outCx, float& outCy, float& outD, bool& outValido) {
+        outD = r.right - r.left;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
-        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        dc->FillRoundedRectangle({r, outD * 0.24f, outD * 0.24f}, pennello);
         pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
-        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
-        if (d <= 8.0f) return;
+        dc->DrawRoundedRectangle({r, outD * 0.24f, outD * 0.24f}, pennello, 1.0f);
+        outValido = outD > 8.0f;
+        if (!outValido) return D2D1::ColorF(0, 0, 0, 0);
 
+        const float d = outD;
         const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        outCx = cx; outCy = cy;
         const float ra = d * 0.33f;
         const float sw = std::max(1.8f, d * 0.075f);
-        const int bat = logiStato.batteriaMin;
-        const bool chg = logiStato.alcunoInCarica;
-        const bool animChg = chg && logiAnimCarica && bat >= 0;
+        const bool animChg = chg && animCarica && bat >= 0;
 
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
         dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
 
         const float pulse = animChg ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
-        const bool customGlow = animChg && logiGlowColore != 0;
-        const float gr = customGlow ? (((logiGlowColore >> 16) & 255) / 255.0f) : 0.20f;
-        const float gg = customGlow ? (((logiGlowColore >> 8) & 255) / 255.0f) : 0.90f;
-        const float gb = customGlow ? ((logiGlowColore & 255) / 255.0f) : 1.0f;
+        const bool customGlow = animChg && glowColore != 0;
+        const float gr = customGlow ? (((glowColore >> 16) & 255) / 255.0f) : 0.20f;
+        const float gg = customGlow ? (((glowColore >> 8) & 255) / 255.0f) : 0.90f;
+        const float gb = customGlow ? ((glowColore & 255) / 255.0f) : 1.0f;
         const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.16f + 0.10f * pulse, 0.80f + 0.10f * pulse, 0.98f, alfa)
             : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
             : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
             : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
-        auto disegnaArcoLogi = [&](float aStart, float aSweep, float width, D2D1_COLOR_F col) {
-            if (aSweep <= 0.004f) return;
-            if (aSweep >= 2.0f * (float)M_PI - 0.01f) {
-                pennello->SetColor(col);
-                dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, width);
-                return;
-            }
-            const float aEnd = aStart + aSweep;
-            ID2D1PathGeometry* gArc = nullptr;
-            ID2D1GeometrySink* sArc = nullptr;
-            if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
-                sArc->BeginFigure({cx + ra * std::cos(aStart), cy + ra * std::sin(aStart)}, D2D1_FIGURE_BEGIN_HOLLOW);
-                sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(aEnd), cy + ra * std::sin(aEnd)}, {ra, ra}, 0,
-                                              D2D1_SWEEP_DIRECTION_CLOCKWISE,
-                                              aSweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
-                sArc->EndFigure(D2D1_FIGURE_END_OPEN);
-                if (SUCCEEDED(sArc->Close())) {
-                    pennello->SetColor(col);
-                    dc->DrawGeometry(gArc, pennello, width, tratto);
-                }
-            }
-            if (sArc) sArc->Release();
-            if (gArc) gArc->Release();
-        };
         if (bat >= 0) {
             const float a0 = -(float)M_PI / 2.0f;
             const float sweep = (bat >= 100) ? (2.0f * (float)M_PI) : (2.0f * (float)M_PI * (bat / 100.0f));
             if (animChg && bat > 0) {
-                disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(gr, gg, gb, (0.14f + 0.14f * pulse) * alfa));
+                disegnaArcoAnello(cx, cy, ra, sw * 2.2f, a0, sweep, D2D1::ColorF(gr, gg, gb, (0.14f + 0.14f * pulse) * alfa));
             }
-            disegnaArcoLogi(a0, sweep, sw, colRing);
+            disegnaArcoAnello(cx, cy, ra, sw, a0, sweep, colRing);
             if (animChg && sweep > 0.18f) {
                 const float phase = (float)std::fmod(ultimoT * 0.55, 1.0);
                 const float fadeIn = std::clamp(phase / 0.14f, 0.0f, 1.0f);
@@ -4654,12 +4721,34 @@ private:
                     const D2D1_COLOR_F trailCol = customGlow
                         ? D2D1::ColorF(gr + (1.0f - gr) * 0.45f, gg + (1.0f - gg) * 0.45f, gb + (1.0f - gb) * 0.45f, 0.68f * env * alfa)
                         : D2D1::ColorF(0.75f, 0.96f, 1.0f, 0.65f * env * alfa);
-                    disegnaArcoLogi(tailStart, tailSweep, sw * 1.15f, trailCol);
+                    disegnaArcoAnello(cx, cy, ra, sw * 1.15f, tailStart, tailSweep, trailCol);
                     const float tipLen = std::min(tailSweep, 0.14f);
-                    disegnaArcoLogi(headA - tipLen, tipLen, sw * 1.25f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * env * alfa));
+                    disegnaArcoAnello(cx, cy, ra, sw * 1.25f, headA - tipLen, tipLen, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * env * alfa));
                 }
             }
         }
+
+        const float inkA = (bat >= 0 || connesso) ? 0.92f : 0.45f;
+        const float sh = 0.32f + 0.28f * pulse;
+        return animChg
+            ? (customGlow
+                ? (scuro
+                    ? D2D1::ColorF(0.88f + (gr - 0.88f) * sh, 0.90f + (gg - 0.90f) * sh, 0.93f + (gb - 0.93f) * sh, inkA * alfa)
+                    : D2D1::ColorF(0.14f + (gr * 0.85f - 0.14f) * sh, 0.16f + (gg * 0.85f - 0.16f) * sh, 0.20f + (gb * 0.85f - 0.20f) * sh, inkA * alfa))
+                : (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
+                         : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa)))
+            : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
+                     : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa));
+    }
+
+    void disegnaIconaLogi(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        float cx = 0, cy = 0, d = 0;
+        bool ok = false;
+        const D2D1_COLOR_F colG = disegnaAnelloPeriferica(
+            r, alfa, scuro, logiStato.batteriaMin, logiStato.alcunoInCarica,
+            logiAnimCarica, logiGlowColore, logiStato.ghubAttivo, cx, cy, d, ok);
+        if (!ok) return;
+
         auto disegnaLogoG = [&](float gcx, float gcy, float R, D2D1_COLOR_F col) {
             const float rIn = R * 0.55f;
             const float t = R - rIn;
@@ -4685,19 +4774,44 @@ private:
             dc->FillRectangle({rx - t, ty, rx, by}, pennello);
         };
 
-        const float gR = d * 0.165f;
-        const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
-        const float sh = 0.32f + 0.28f * pulse;
-        const D2D1_COLOR_F colG = animChg
-            ? (customGlow
-                ? (scuro
-                    ? D2D1::ColorF(0.88f + (gr - 0.88f) * sh, 0.90f + (gg - 0.90f) * sh, 0.93f + (gb - 0.93f) * sh, inkA * alfa)
-                    : D2D1::ColorF(0.14f + (gr * 0.85f - 0.14f) * sh, 0.16f + (gg * 0.85f - 0.16f) * sh, 0.20f + (gb * 0.85f - 0.20f) * sh, inkA * alfa))
-                : (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
-                         : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa)))
-            : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
-                     : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa));
-        disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
+        disegnaLogoG(cx - d * 0.01f, cy, d * 0.165f, colG);
+    }
+
+    void disegnaIconaAShark(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        float cx = 0, cy = 0, d = 0;
+        bool ok = false;
+        const D2D1_COLOR_F colFin = disegnaAnelloPeriferica(
+            r, alfa, scuro, aSharkStato.batteriaMin, aSharkStato.alcunoInCarica,
+            aSharkAnimCarica, aSharkGlowColore, aSharkStato.connesso, cx, cy, d, ok);
+        if (!ok) return;
+
+        const float R = d * 0.165f;
+        ID2D1PathGeometry* gFin = nullptr;
+        ID2D1GeometrySink* sFin = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&gFin)) && SUCCEEDED(gFin->Open(&sFin))) {
+            const D2D1_POINT_2F pStart = {cx - R * 0.92f, cy + R * 0.72f};
+            const D2D1_POINT_2F pApex = {cx + R * 0.56f, cy - R * 0.92f};
+            const D2D1_POINT_2F pHeel = {cx + R * 0.68f, cy + R * 0.72f};
+            sFin->BeginFigure(pStart, D2D1_FIGURE_BEGIN_FILLED);
+            sFin->AddBezier(D2D1::BezierSegment(
+                {cx - R * 0.62f, cy - R * 0.18f},
+                {cx - R * 0.05f, cy - R * 0.70f},
+                pApex));
+            sFin->AddBezier(D2D1::BezierSegment(
+                {cx + R * 0.24f, cy - R * 0.34f},
+                {cx + R * 0.22f, cy + R * 0.22f},
+                pHeel));
+            sFin->AddQuadraticBezier(D2D1::QuadraticBezierSegment(
+                {cx - R * 0.10f, cy + R * 0.54f},
+                pStart));
+            sFin->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(sFin->Close())) {
+                pennello->SetColor(colFin);
+                dc->FillGeometry(gFin, pennello);
+            }
+        }
+        if (sFin) sFin->Release();
+        if (gFin) gFin->Release();
     }
 
     void disegnaIconaWPlugin(const D2D1_RECT_F& r, float alfa, bool scuro, const wplugin::Widget& w) {
@@ -4957,6 +5071,7 @@ private:
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
         if (v.avvio == AVVIO_AI) { aiLetto = true; dirty = true; apriCentro(P_AI); return; }
         if (v.avvio == AVVIO_LOGI) { apriCentro(P_LOGI); return; }
+        if (v.avvio == AVVIO_ASHARK) { apriAShark(); return; }
         if (eWPlugin(v.avvio)) { apriWPlugin(idWPlugin(v.avvio)); return; }
         if (v.avvio == AVVIO_PILA || ePilaPers(v.avvio)) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
@@ -5135,7 +5250,7 @@ private:
         const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
-                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI && !eWPlugin(voci[s].avvio);
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_GIOCHI && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI && voci[s].avvio != AVVIO_ASHARK && !eWPlugin(voci[s].avvio);
         if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
         if (ant.aperta()) {
             ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
@@ -5385,6 +5500,21 @@ private:
             if (s == 1) apriCentro(P_LOGI);
             else if (s == 2) logiMon.aggiornaOra();
             else if (s == 3) logitech::apriGHub();
+            return;
+        }
+        if (v.avvio == AVVIO_ASHARK) {
+            std::vector<menu::Voce> vv = {
+                menu::titolo(L"Attack Shark"),
+                menu::voce(testi::t(L"Apri Attack Shark", L"Open Attack Shark"), 1),
+                menu::voce(testi::t(L"Aggiorna", L"Refresh"), 2),
+                menu::separatore(),
+                menu::voce(testi::t(L"Apri Attack Shark Software", L"Open Attack Shark Software"), 3),
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) apriAShark();
+            else if (s == 2) aSharkMon.aggiornaOra();
+            else if (s == 3) attackshark::apriSoftware();
             return;
         }
         if (eWPlugin(v.avvio)) {
@@ -5663,6 +5793,7 @@ private:
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
             case WM_AI_AGGIORNATO: d->sincronizzaAI(); return 0;
             case WM_LOGI_AGGIORNATO: d->sincronizzaLogi(); return 0;
+            case WM_ASHARK_AGGIORNATO: d->sincronizzaAShark(); return 0;
             case WM_WPLUGIN_AGGIORNATO: d->sincronizzaWPlugin(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
