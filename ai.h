@@ -75,6 +75,14 @@ inline std::wstring formattaTempoFa(double updatedEpoch, double nowEpoch) {
     return b;
 }
 
+inline bool eProcessoTerminale(const std::wstring& exeLower) {
+    return exeLower == L"windowsterminal.exe" || exeLower == L"cmd.exe" ||
+           exeLower == L"powershell.exe" || exeLower == L"pwsh.exe" ||
+           exeLower == L"conhost.exe" || exeLower == L"wezterm-gui.exe" ||
+           exeLower == L"alacritty.exe" || exeLower == L"mintty.exe" ||
+           exeLower == L"wt.exe";
+}
+
 namespace dettagli {
 
 inline std::wstring daUtf8(const std::string& s) {
@@ -666,8 +674,9 @@ inline DWORD risolviPidPadreHook() {
     return firstParent;
 }
 
-inline bool finestraValida(HWND h) {
-    if (!IsWindowVisible(h)) return false;
+inline bool finestraValida(HWND h, const std::unordered_set<HWND>* includiNascoste = nullptr) {
+    const bool nascostaDaNoi = (includiNascoste && includiNascoste->count(h) != 0);
+    if (!IsWindowVisible(h) && !nascostaDaNoi) return false;
     if (GetWindow(h, GW_OWNER) != nullptr) return false;
     if (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return false;
     if (GetWindowTextLengthW(h) <= 0) return false;
@@ -682,7 +691,8 @@ inline bool finestraValida(HWND h) {
     }();
     if (fnDwm) {
         DWORD cloaked = 0;
-        if (SUCCEEDED(fnDwm(h, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked))) && cloaked != 0 && !IsIconic(h)) {
+        if (SUCCEEDED(fnDwm(h, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked))) &&
+            cloaked != 0 && !IsIconic(h) && !nascostaDaNoi) {
             return false;
         }
     }
@@ -2024,8 +2034,12 @@ struct FinestraCandidata {
     int score = 0;
 };
 
-inline std::vector<FinestraCandidata> valutaFinestreAgente(const Agente& a) {
-    const auto procMap = mappaProcessi();
+inline std::vector<FinestraCandidata> valutaFinestreAgente(
+    const Agente& a,
+    const std::unordered_set<HWND>* includiNascoste = nullptr,
+    const std::unordered_map<DWORD, ProcInfo>* procMapIn = nullptr) {
+    std::unordered_map<DWORD, ProcInfo> localProcMap;
+    const auto& procMap = procMapIn ? *procMapIn : (localProcMap = mappaProcessi());
 
     std::unordered_map<DWORD, int> ancestorDepth;
     if (a.pid != 0) {
@@ -2050,12 +2064,13 @@ inline std::vector<FinestraCandidata> valutaFinestreAgente(const Agente& a) {
 
     struct EnumCtx {
         const std::unordered_map<DWORD, ProcInfo>* procs;
+        const std::unordered_set<HWND>* includiNascoste;
         std::vector<FinestraCandidata> wins;
-    } ctx{&procMap, {}};
+    } ctx{&procMap, includiNascoste, {}};
 
     EnumWindows([](HWND h, LPARAM l) -> BOOL {
-        if (!finestraValida(h)) return TRUE;
         auto* c = (EnumCtx*)l;
+        if (!finestraValida(h, c->includiNascoste)) return TRUE;
         DWORD pid = 0;
         GetWindowThreadProcessId(h, &pid);
         const int len = GetWindowTextLengthW(h);
@@ -2118,6 +2133,12 @@ inline std::vector<FinestraCandidata> valutaFinestreAgente(const Agente& a) {
         int score = 0;
         if (auto it = ancestorDepth.find(w.pid); it != ancestorDepth.end()) {
             score += 100 - it->second * 4;
+        } else if (w.exeLower == L"conhost.exe") {
+            if (auto pit = procMap.find(w.pid); pit != procMap.end()) {
+                if (auto anc = ancestorDepth.find(pit->second.parentPid); anc != ancestorDepth.end()) {
+                    score += 96 - anc->second * 4;
+                }
+            }
         }
         if (!titoloLower.empty() && w.titleLower.find(titoloLower) != std::wstring::npos) {
             score += 60;
@@ -2139,9 +2160,47 @@ inline std::vector<FinestraCandidata> valutaFinestreAgente(const Agente& a) {
 
 }  // namespace dettagli
 
-inline HWND trovaFinestraAgente(const Agente& a) {
-    const auto wins = dettagli::valutaFinestreAgente(a);
+inline HWND trovaFinestraAgente(const Agente& a, const std::unordered_set<HWND>* includiNascoste = nullptr) {
+    const auto wins = dettagli::valutaFinestreAgente(a, includiNascoste);
     return (!wins.empty() && wins.front().score > 0) ? wins.front().hwnd : nullptr;
+}
+
+inline std::unordered_set<HWND> finestreTerminaliAI(const Riepilogo& stato, const std::unordered_set<HWND>& giaNascoste) {
+    std::unordered_set<HWND> out;
+    if (stato.agenti.empty()) return out;
+
+    const auto procMap = dettagli::mappaProcessi();
+    auto haPidTerminale = [&](DWORD pid) -> bool {
+        DWORD cur = pid;
+        for (int depth = 0; depth < 8 && cur != 0; depth++) {
+            auto it = procMap.find(cur);
+            if (it == procMap.end()) break;
+            if (eProcessoTerminale(it->second.exeLower)) return true;
+            if (depth > 0) {
+                const std::wstring& ex = it->second.exeLower;
+                if (ex == L"explorer.exe" || ex == L"services.exe" || ex == L"svchost.exe" ||
+                    ex == L"wininit.exe" || ex == L"winlogon.exe") {
+                    break;
+                }
+            }
+            if (it->second.parentPid == cur) break;
+            cur = it->second.parentPid;
+        }
+        return false;
+    };
+
+    for (const auto& a : stato.agenti) {
+        if ((a.fonte == Fonte::Ollama || a.fonte == Fonte::LmStudio) && !haPidTerminale(a.pid)) {
+            continue;
+        }
+        const auto wins = dettagli::valutaFinestreAgente(a, &giaNascoste, &procMap);
+        if (wins.empty()) continue;
+        const auto& top = wins.front();
+        if (top.score >= 40 && eProcessoTerminale(top.exeLower) && IsWindow(top.hwnd)) {
+            out.insert(top.hwnd);
+        }
+    }
+    return out;
 }
 
 inline bool attivaTabTerminale(HWND hwnd, const Agente& a) {
@@ -2269,27 +2328,42 @@ inline bool attivaTabTerminale(HWND hwnd, const Agente& a) {
     return activated;
 }
 
-inline HWND trovaEAttivaFinestraAgente(const Agente& a) {
-    const auto wins = dettagli::valutaFinestreAgente(a);
+inline HWND trovaEAttivaFinestraAgente(const Agente& a, const std::unordered_set<HWND>* includiNascoste = nullptr) {
+    const auto wins = dettagli::valutaFinestreAgente(a, includiNascoste);
     if (wins.empty()) return nullptr;
+
+    auto mostraERipristina = [](HWND hw) -> HWND {
+        if (!hw || !IsWindow(hw)) return nullptr;
+        if (!IsWindowVisible(hw)) ShowWindow(hw, SW_SHOW);
+        if (IsIconic(hw)) ShowWindow(hw, SW_RESTORE);
+        SetForegroundWindow(hw);
+        return hw;
+    };
 
     const auto& top = wins.front();
     const HWND bestHwnd = (top.score > 0) ? top.hwnd : nullptr;
     if (bestHwnd && top.exeLower != L"windowsterminal.exe") {
-        return bestHwnd;
+        return mostraERipristina(bestHwnd);
     }
 
     const bool hasMatchText = !a.titolo.empty() || dettagli::cartellaBreve(a.cwd).size() >= 3;
-    if (hasMatchText) {
-        if (bestHwnd && top.exeLower == L"windowsterminal.exe" && attivaTabTerminale(bestHwnd, a)) {
+    if (bestHwnd && top.exeLower == L"windowsterminal.exe") {
+        if (top.score >= 40 || !hasMatchText) {
+            mostraERipristina(bestHwnd);
+            if (hasMatchText) attivaTabTerminale(bestHwnd, a);
             return bestHwnd;
         }
-        for (const auto& w : wins) {
-            if (w.hwnd == bestHwnd || w.exeLower != L"windowsterminal.exe") continue;
-            if (attivaTabTerminale(w.hwnd, a)) return w.hwnd;
+        if (IsWindowVisible(bestHwnd) && !IsIconic(bestHwnd) && attivaTabTerminale(bestHwnd, a)) {
+            return mostraERipristina(bestHwnd);
         }
     }
-    return bestHwnd;
+    if (hasMatchText) {
+        for (const auto& w : wins) {
+            if (w.hwnd == bestHwnd || w.exeLower != L"windowsterminal.exe") continue;
+            if (attivaTabTerminale(w.hwnd, a)) return mostraERipristina(w.hwnd);
+        }
+    }
+    return bestHwnd ? mostraERipristina(bestHwnd) : nullptr;
 }
 
 // ---- avvio nuove chat AI ----

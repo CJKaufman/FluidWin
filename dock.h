@@ -410,7 +410,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
-    ~Motore() { aiMon.ferma(); logiMon.ferma(); aSharkMon.ferma(); wplugMon.ferma(); }
+    ~Motore() { ripristinaCLIAINascoste(); aiMon.ferma(); logiMon.ferma(); aSharkMon.ferma(); wplugMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -541,6 +541,7 @@ public:
     // all'uscita, dopo chiudi: aspetta i thread del widget (vedi widget::Dati::ferma) e quello delle jump list
     // (jumplist::Indice::ferma), ognuno al massimo ms. false: almeno uno non ha finito
     bool fermaWidget(DWORD ms) {
+        ripristinaCLIAINascoste();
         const bool a = widD.ferma(ms);
         const bool b = jumpList.ferma(ms);
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
@@ -552,6 +553,7 @@ public:
     }
 
     void chiudi() {
+        ripristinaCLIAINascoste();
         fermaIcone();
         fermaNotifiche();
         logiMon.ferma();
@@ -671,6 +673,11 @@ public:
     // ogni 500 ms (timer di FluidWin)
     void timer() {
         Cronometro cr(this, "timer del dock");
+        if ((mostraAI && aiNascondiCLI) || !aiCliNascosteSwHide.empty() || !aiCliFinestre.empty()) {
+            const auto primaCli = aiCliFinestre;
+            aggiornaCLIAINascoste();
+            if (aiCliFinestre != primaCli) appDaAggiornare = true;
+        }
         if (appDaAggiornare) { aggiornaApp(); dirty = true; }
         if (vetroDaRiposizionare) posizionaVetri();
         aggiornaStato(false);
@@ -930,6 +937,7 @@ public:
         if (si == mostraAI) return;
         mostraAI = si;
         if (!si) {
+            ripristinaCLIAINascoste();
             usa(0);
             if (pannelloTipo == P_AI) chiudiPannello();
             aiMon.ferma();
@@ -983,6 +991,16 @@ public:
         const DWORD v = si ? 1 : 0;
         RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
                         REG_DWORD, &v, sizeof(v));
+    }
+    void impostaAINascondiCLI(bool si) {
+        if (aiNascondiCLI == si) return;
+        aiNascondiCLI = si;
+        if (!si) ripristinaCLIAINascoste();
+        else aggiornaCLIAINascoste();
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        controllaFinestre(true);
+        dirty = true;
     }
     bool logiAnimCarica = true;
     void impostaLogiAnimCarica(bool si) {
@@ -1477,6 +1495,42 @@ private:
     bool oraNelDock = false;
     bool mostraGiochi = true;
     bool mostraAI = false;
+    bool aiNascondiCLI = false;
+    std::unordered_set<HWND> aiCliFinestre;
+    std::unordered_set<HWND> aiCliNascosteSwHide;
+    void ripristinaCLIAINascoste() {
+        for (HWND h : aiCliNascosteSwHide) {
+            if (IsWindow(h) && !IsWindowVisible(h)) ShowWindow(h, SW_SHOW);
+        }
+        aiCliNascosteSwHide.clear();
+        aiCliFinestre.clear();
+    }
+    void aggiornaCLIAINascoste() {
+        for (auto it = aiCliNascosteSwHide.begin(); it != aiCliNascosteSwHide.end();) {
+            if (!IsWindow(*it)) it = aiCliNascosteSwHide.erase(it);
+            else ++it;
+        }
+        if (!mostraAI || !aiNascondiCLI) {
+            if (!aiCliNascosteSwHide.empty() || !aiCliFinestre.empty()) ripristinaCLIAINascoste();
+            return;
+        }
+        aiCliFinestre = ai::finestreTerminaliAI(aiStato, aiCliNascosteSwHide);
+        for (auto it = aiCliNascosteSwHide.begin(); it != aiCliNascosteSwHide.end();) {
+            const HWND h = *it;
+            if (!aiCliFinestre.count(h)) {
+                if (IsWindow(h) && !IsWindowVisible(h)) ShowWindow(h, SW_SHOW);
+                it = aiCliNascosteSwHide.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (HWND h : aiCliFinestre) {
+            if (IsWindow(h) && IsWindowVisible(h) && IsIconic(h)) {
+                ShowWindow(h, SW_HIDE);
+                aiCliNascosteSwHide.insert(h);
+            }
+        }
+    }
     bool mostraLogi = false;
     bool mostraAShark = false;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
@@ -2063,8 +2117,17 @@ private:
                 return std::find(ordineFissate.begin(), ordineFissate.end(), a.avvio) < std::find(ordineFissate.begin(), ordineFissate.end(), b.avvio);
             });
         // 2) finestre aperte: si agganciano all'app fissata corrispondente, o creano una nuova voce
-        struct Ctx { std::vector<HWND> v; } ctxF;
-        EnumWindows([](HWND h, LPARAM l) -> BOOL { if (finestraDaDock(h)) ((Ctx*)l)->v.push_back(h); return TRUE; }, (LPARAM)&ctxF);
+        aggiornaCLIAINascoste();
+        struct Ctx {
+            std::vector<HWND> v;
+            const std::unordered_set<HWND>* nascosteAI;
+        } ctxF{{}, (mostraAI && aiNascondiCLI) ? &aiCliFinestre : nullptr};
+        EnumWindows([](HWND h, LPARAM l) -> BOOL {
+            const auto* c = (Ctx*)l;
+            if (c->nascosteAI && c->nascosteAI->count(h)) return TRUE;
+            if (finestraDaDock(h)) ((Ctx*)l)->v.push_back(h);
+            return TRUE;
+        }, (LPARAM)&ctxF);
         // eseguibile di ogni finestra: si chiede al sistema una volta sola per finestra (stesso processo)
         for (auto it = exeFinestre.begin(); it != exeFinestre.end();)
             it = std::find(ctxF.v.begin(), ctxF.v.end(), it->first) == ctxF.v.end() ? exeFinestre.erase(it) : std::next(it);
