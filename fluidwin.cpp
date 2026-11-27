@@ -4848,6 +4848,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (gDockOk) gDock.impostaConfigWPluginStr(id, key, val);
         else wplugin::salvaConfigStr(id, key, val);
     };
+    gImpostazioni.impostaConfigWPluginNum = [](const std::wstring& id, const std::wstring& key, double val) {
+        if (gDockOk) gDock.impostaConfigWPluginNum(id, key, val);
+        else wplugin::salvaConfigNum(id, key, val);
+    };
     affianca::registro() = [](const char* s) { logf("%s", s); };   // (prima di applicaImpostazioni, che spegne lo Snap)
     gAffRiquadro.scelto = [](HWND h, const RECT& z, HMONITOR) { logf("affianca %p: casella dal riquadro dei layout", h); affiancaInRett(h, false, z, "riquadro dei layout"); };
     applicaImpostazioni();

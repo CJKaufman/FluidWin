@@ -28,13 +28,32 @@ function Find-Tailscale {
     return $null
 }
 
+function Parse-IntervalSeconds($val) {
+    if ($null -eq $val -or $val -is [bool]) { return 10 }
+    $num = 0.0
+    if ($val -is [string]) {
+        $s = $val.Trim()
+        if ($s.EndsWith('s', [System.StringComparison]::OrdinalIgnoreCase)) {
+            $s = $s.Substring(0, $s.Length - 1).Trim()
+        }
+        if (-not [double]::TryParse($s, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$num)) {
+            return 10
+        }
+    } else {
+        try { $num = [double]$val } catch { return 10 }
+    }
+    if ([double]::IsNaN($num) -or [double]::IsInfinity($num)) { return 10 }
+    $sec = [int][Math]::Round($num)
+    return [Math]::Max(5, [Math]::Min(60, $sec))
+}
+
 function Read-WidgetConfig {
     $cfg = @{
         onlineOnly  = $true
         showSelf    = $true
         animateIcon = $true
         animStyle   = 'wave'
-        refreshSec  = '10s'
+        refreshSec  = 10
     }
     if (Test-Path $cfgFile) {
         try {
@@ -43,20 +62,10 @@ function Read-WidgetConfig {
             if ($null -ne $raw.showSelf)    { $cfg.showSelf    = [bool]$raw.showSelf }
             if ($null -ne $raw.animateIcon) { $cfg.animateIcon = [bool]$raw.animateIcon }
             if ($raw.animStyle -in @('wave', 'pulse')) { $cfg.animStyle = [string]$raw.animStyle }
-            if ($raw.refreshSec -in @('5s', '10s', '30s', '60s')) { $cfg.refreshSec = [string]$raw.refreshSec }
+            if ($null -ne $raw.refreshSec)  { $cfg.refreshSec  = Parse-IntervalSeconds $raw.refreshSec }
         } catch {}
     }
     return $cfg
-}
-
-function Parse-IntervalSeconds([string]$val) {
-    switch ($val) {
-        '5s'  { return 5 }
-        '10s' { return 10 }
-        '30s' { return 30 }
-        '60s' { return 60 }
-        default { return 10 }
-    }
 }
 
 function Handle-Action([string]$tsBin) {
@@ -113,9 +122,12 @@ function Build-TailscalePayload([string]$tsBin, [hashtable]$cfg) {
             key         = 'refreshSec'
             label       = 'Refresh interval'
             description = 'How often to poll tailscale status'
-            type        = 'choice'
-            default     = '10s'
-            options     = @('5s', '10s', '30s', '60s')
+            type        = 'slider'
+            min         = 5
+            max         = 60
+            step        = 5
+            default     = 10
+            unit        = 's'
         }
     )
 

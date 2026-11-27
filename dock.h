@@ -945,6 +945,19 @@ public:
         }
         wplugMon.ricaricaOra();
     }
+    void impostaConfigWPluginNum(const std::wstring& id, const std::wstring& chiave, double val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigNum(sid, chiave, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == chiave && cv.tipo == L"slider") {
+                    cv.valNum = wplugin::dettagli::snapSlider(val, cv.minNum, cv.maxNum, cv.stepNum);
+                }
+            }
+        }
+        wplugMon.ricaricaOra();
+    }
     void impostaWPlugin(const std::wstring& id, bool si) {
         wplugMon.impostaAbilitazione(id, si);
         for (auto& w : wplugStato.widgets) if (w.id == id) w.abilitato = si;
