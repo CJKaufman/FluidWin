@@ -1923,11 +1923,13 @@ inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
             const bool offline = dv.stato == logitech::Stato::Disconnesso;
             const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
                                                : dv.stato == logitech::Stato::Riposo ? tenue : ink;
+            const bool usbConnesso = (dv.inCarica && dv.batteria > 99) || (!dv.inCarica && dv.connessione == L"USB" && dv.batteria < 0);
+            const bool mostraBat = dv.batteria >= 0 && !usbConnesso;
             disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, mappaLogiTipo(dv.tipo),
-                                  r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
+                                  r.left + 23 * dpi, r.top + (mostraBat ? 27.0f : 31.0f) * dpi, icCol);
 
             float limTit = r.right - 12 * dpi;
-            if (dv.batteria >= 0) {
+            if (mostraBat) {
                 const bool chgVis = dv.inCarica && dv.batteria <= 99;
                 wchar_t pb[24];
                 swprintf(pb, 24, chgVis ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
@@ -2117,13 +2119,15 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
             const TipoIconaPerif tipoIcona = (dv.tipo == L"Mouse" || dv.tipo == L"mouse") ? TipoIconaPerif::Mouse
                 : (dv.tipo == L"Keyboard" || dv.tipo == L"keyboard") ? TipoIconaPerif::Tastiera
                 : TipoIconaPerif::Altro;
-            disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
-                                  r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
-
             const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
             const int sogliaPieno = eMouse ? 100 : 94;
+            const bool usbConnesso = (!eMouse && dv.inCarica && dv.batteria >= sogliaPieno) || (!dv.inCarica && dv.connessione == L"USB");
+            const bool mostraBat = dv.batteria >= 0 && !usbConnesso;
+            disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
+                                  r.left + 23 * dpi, r.top + (mostraBat ? 27.0f : 31.0f) * dpi, icCol);
+
             float limTit = r.right - 12 * dpi;
-            if (dv.batteria >= 0) {
+            if (mostraBat) {
                 const bool chgVis = dv.inCarica && dv.batteria < sogliaPieno;
                 wchar_t pb[24];
                 swprintf(pb, 24, chgVis ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
