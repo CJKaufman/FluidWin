@@ -1992,7 +1992,7 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 riga2 += testi::t(L"In riposo", L"Asleep");
             } else if (dv.inCarica) {
                 if (dv.batteria > 99) {
-                    riga2 = testi::t(L"USB connesso", L"USB Connected");
+                    riga2 = testi::t(L"Base - Carico", L"Dock - Charged");
                 } else {
                     riga2 = testi::t(L"Base - In carica", L"Dock - Charging");
                 }
