@@ -45,6 +45,7 @@ struct Valori {
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
     bool dockAI = false;          // icona Monitor AI nel dock
+    bool aiNascondiCLI = false;   // nasconde dal dock i terminali con chat AI e li minimizza in AI Monitor
     bool dockLogi = false;        // widget Logitech G HUB nel dock
     bool logiAnimCarica = true;   // animazione di ricarica sull'anello Logitech
     DWORD logiGlowColore = 0;     // colore bagliore ricarica Logitech: 0 automatico (ciano), altrimenti 0x00RRGGBB
@@ -139,6 +140,7 @@ inline void carica() {
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
     v.dockAI = leggiDword(L"DockAI", 0);
+    v.aiNascondiCLI = leggiDword(L"AINascondiCLI", 0) != 0;
     v.dockLogi = leggiDword(L"DockLogi", 0);
     v.logiAnimCarica = leggiDword(L"LogiAnimCarica", 1);
     v.logiGlowColore = leggiDword(L"LogiGlowColore", 0) & 0xFFFFFFu;
@@ -163,7 +165,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"AINascondiCLI", v.aiNascondiCLI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -590,7 +592,7 @@ private:
                          Z_W_AI_AVVISI = 904, Z_W_AI_HOOK_AGY = 905, Z_W_AI_HOOK_CLAUDE = 906, Z_W_AI_CARTELLA = 907,
                          Z_W_LOGI_ANIM = 908, Z_W_LOGI_GHUB = 909, Z_W_WPLUG_CARTELLA = 910, Z_W_WPLUG_JSON = 911,
                          Z_W_LOGI_GLOW = 912,
-                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
+                         Z_W_APRI_WPLUG = 920, Z_W_AI_NASCONDI_CLI = 955, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
     struct GlowSwatch { DWORD rgb; const wchar_t* nome; };
     static constexpr GlowSwatch LOGI_GLOW_PALETTE[] = {
         {0x000000, L"Auto"},
@@ -837,6 +839,14 @@ private:
         }
         if (id == Z_W_AI_AVVISI) {
             if (leggiAIAvvisi && impostaAIAvvisi) impostaAIAvvisi(!leggiAIAvvisi());
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_AI_NASCONDI_CLI) {
+            valori().aiNascondiCLI = !valori().aiNascondiCLI;
+            salva();
+            if (cambiato) cambiato();
             vetro::battito(v.fin, 1);
             disegna();
             return;
@@ -1640,6 +1650,10 @@ private:
                 rigaLevetta(Z_W_AI_AVVISI, testi::t(L"Avvisi nel notch", L"Notch alerts"),
                             testi::t(L"Mostra gli avvisi degli agenti AI nel notch", L"Show AI agent status alerts in the notch"),
                             (leggiAIAvvisi ? leggiAIAvvisi() : true) ? 1.0f : 0.0f);
+                rigaLevetta(Z_W_AI_NASCONDI_CLI, testi::t(L"Nascondi finestre CLI AI", L"Hide AI CLI windows"),
+                            testi::t(L"Nasconde dal dock i terminali con chat AI e li minimizza in AI Monitor",
+                                     L"Hide AI chat terminals from dock and minimize them into AI Monitor"),
+                            valori().aiNascondiCLI ? 1.0f : 0.0f);
                 rigaLevetta(Z_W_AI_HOOK_AGY, testi::t(L"Hook Antigravity CLI", L"Antigravity CLI hooks"),
                             testi::t(L"Registra gli hook in ~/.gemini/config/hooks.json", L"Register lifecycle hooks in ~/.gemini/config/hooks.json"),
                             (hookAgyStato && hookAgyStato()) ? 1.0f : 0.0f);

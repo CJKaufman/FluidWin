@@ -1280,6 +1280,19 @@ inline auto Motore::sincronizzaAI() -> void {
     aiStato = std::move(nuovo);
     aiVer = v;
     dirty = true;
+    if (mostraAI && aiNascondiCLI) {
+        const auto primaCli = aiCliFinestre;
+        aggiornaCLIAINascoste();
+        if (aiCliFinestre != primaCli) {
+            appDaAggiornare = true;
+            if (attivo) aggiornaApp();
+            controllaFinestre(true);
+        }
+    } else if (!aiCliNascosteSwHide.empty() || !aiCliFinestre.empty()) {
+        ripristinaCLIAINascoste();
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+    }
     if (haAvviso) ilNotch().avviso(avvisoMsg, sensori::S_AI, avvisoCode, true);
     if (aiAperto) {
         const float nuova = altezzaVista(P_AI);
@@ -1297,8 +1310,9 @@ inline auto Motore::altezzaAI() const -> float {
 }
 
 inline auto Motore::focusAgente(const ai::Agente& a) -> void {
-    HWND target = ai::trovaEAttivaFinestraAgente(a);
+    HWND target = ai::trovaEAttivaFinestraAgente(a, &aiCliNascosteSwHide);
     if (target) {
+        aiCliNascosteSwHide.erase(target);
         chiudiPannello();
         if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
         portaDavanti(target);
