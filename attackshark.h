@@ -451,10 +451,11 @@ private:
             if (len < 5 || p[0] != 0x03) return;
             nome = (p[1] == 0x24) ? L"Attack Shark V6" : L"Attack Shark Mouse";
             const BYTE stateByte = p[2];
-            const bool charging = stateByte == 0x42 || stateByte == 0x43 ||
-                                  stateByte == 0x02 || stateByte == 0x03 ||
-                                  (stateByte & 0x02) != 0;
-            online = (p[3] != 0);
+            const BYTE powerByte = p[3];
+            online = (powerByte != 0);
+            const bool charging = ((powerByte & 0x02) != 0) ||
+                                  stateByte == 0x42 || stateByte == 0x43 ||
+                                  stateByte == 0x02 || stateByte == 0x03;
             if (p[4] >= 1 && p[4] <= 100) {
                 batteria = (int)p[4];
             } else if (p[4] == 0 && stateByte >= 1 && stateByte <= 10) {
