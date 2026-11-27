@@ -2147,10 +2147,13 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
                 riga2 += testi::t(L"In riposo", L"Asleep");
             } else if (dv.inCarica) {
+                const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
                 if (dv.batteria > 99) {
-                    riga2 = testi::t(L"Base - Carico", L"Dock - Charged");
+                    riga2 = eMouse ? testi::t(L"Base - Carico", L"Dock - Charged")
+                                   : testi::t(L"USB connesso", L"USB Connected");
                 } else {
-                    riga2 = testi::t(L"Base - In carica", L"Dock - Charging");
+                    riga2 = eMouse ? testi::t(L"Base - In carica", L"Dock - Charging")
+                                   : testi::t(L"USB - In carica", L"USB - Charging");
                 }
             } else if (dv.connessione == L"USB") {
                 riga2 = testi::t(L"USB connesso", L"USB Connected");
