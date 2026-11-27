@@ -28,6 +28,7 @@ static constexpr size_t MAX_ITEMS = 32;
 static constexpr size_t MAX_WIDGETS = 16;
 static constexpr size_t MAX_CONFIG = 16;
 static constexpr size_t MAX_CONFIG_OPTIONS = 5;
+static constexpr size_t MAX_CONFIG_COLOR_OPTIONS = 8;
 
 struct Colore {
     float r = 0, g = 0, b = 0;
@@ -52,7 +53,7 @@ struct ConfigVoce {
 struct Widget {
     std::wstring id, nome, sottotitolo, tooltip, stato, piedeTesto, piedeUrl, filePath;
     std::wstring iconaGlyph, iconaTesto, iconaAnimazione;
-    Colore iconaColore, statoColore;
+    Colore iconaColore, iconaGlow, statoColore;
     int iconaAnello = -1;
     bool abilitato = true;
     bool haToggle = false;
@@ -242,6 +243,22 @@ inline Colore parseColoreObj(const std::string& s) {
     Colore c;
     c.valido = parseColore(s, &c.r, &c.g, &c.b);
     return c;
+}
+
+inline std::wstring normalizzaColoreOpt(const std::wstring& s) {
+    const std::wstring t = trim(s);
+    if (t.empty()) return L"";
+    if (_wcsicmp(t.c_str(), L"auto") == 0) return L"auto";
+    if (t.size() != 7 || t[0] != L'#') return L"";
+    std::wstring out = L"#";
+    for (size_t k = 1; k < 7; k++) {
+        const wchar_t c = t[k];
+        if (c >= L'0' && c <= L'9') out.push_back(c);
+        else if (c >= L'a' && c <= L'f') out.push_back((wchar_t)(c - L'a' + L'A'));
+        else if (c >= L'A' && c <= L'F') out.push_back(c);
+        else return L"";
+    }
+    return out;
 }
 
 // ---- parser JSON minimale ----
@@ -566,7 +583,8 @@ inline bool ugualeWidget(const Widget& a, const Widget& b) {
         a.iconaAnimazione != b.iconaAnimazione ||
         a.iconaAnello != b.iconaAnello || a.abilitato != b.abilitato ||
         a.haToggle != b.haToggle || a.toggleStato != b.toggleStato || a.toggleChiave != b.toggleChiave ||
-        !ugualeColore(a.iconaColore, b.iconaColore) || !ugualeColore(a.statoColore, b.statoColore) ||
+        !ugualeColore(a.iconaColore, b.iconaColore) || !ugualeColore(a.iconaGlow, b.iconaGlow) ||
+        !ugualeColore(a.statoColore, b.statoColore) ||
         a.elementi.size() != b.elementi.size() || a.config.size() != b.config.size()) {
         return false;
     }
@@ -717,6 +735,7 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
         out.iconaGlyph = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(ic->str("glyph"))));
         out.iconaTesto = dettagli::troncaIconaTesto(dettagli::daUtf8(ic->str("text")));
         out.iconaColore = dettagli::parseColoreObj(ic->str("color"));
+        out.iconaGlow = dettagli::parseColoreObj(ic->str("glowColor"));
         out.iconaAnello = ic->optPercent("ring");
         if (const auto* an = ic->trova("animate")) {
             if (an->tipo == dettagli::Json::Str) {
@@ -763,7 +782,7 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
             });
             if (dup) continue;
             const std::wstring tipo = dettagli::minuscolo(dettagli::trim(dettagli::daUtf8(it.str("type"))));
-            if (tipo != L"toggle" && tipo != L"choice" && tipo != L"slider") continue;
+            if (tipo != L"toggle" && tipo != L"choice" && tipo != L"color" && tipo != L"slider") continue;
 
             ConfigVoce cv;
             cv.chiave = chiave;
@@ -791,6 +810,28 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
                     std::find(cv.opzioni.begin(), cv.opzioni.end(), defStr) != cv.opzioni.end())) {
                     cv.valStr = defStr;
                 } else if (!cv.opzioni.empty()) {
+                    cv.valStr = cv.opzioni.front();
+                }
+            } else if (cv.tipo == L"color") {
+                if (const auto* opts = it.trova("options"); opts && opts->tipo == dettagli::Json::Arr) {
+                    for (const auto& op : opts->arr) {
+                        if (cv.opzioni.size() >= MAX_CONFIG_COLOR_OPTIONS) break;
+                        if (op.tipo != dettagli::Json::Str) continue;
+                        const std::wstring norm = dettagli::normalizzaColoreOpt(dettagli::daUtf8(op.s));
+                        if (!norm.empty() && std::find(cv.opzioni.begin(), cv.opzioni.end(), norm) == cv.opzioni.end()) {
+                            cv.opzioni.push_back(norm);
+                        }
+                    }
+                }
+                if (cv.opzioni.empty()) {
+                    cv.opzioni = {L"auto", L"#30D158", L"#32D2FF", L"#0A84FF", L"#BF5AF2", L"#FF9F0A", L"#FF453A"};
+                }
+                const std::wstring defNorm = (def && def->tipo == dettagli::Json::Str)
+                    ? dettagli::normalizzaColoreOpt(dettagli::daUtf8(def->s))
+                    : L"";
+                if (!defNorm.empty() && std::find(cv.opzioni.begin(), cv.opzioni.end(), defNorm) != cv.opzioni.end()) {
+                    cv.valStr = defNorm;
+                } else {
                     cv.valStr = cv.opzioni.front();
                 }
             } else {
@@ -831,6 +872,11 @@ inline bool parseWidgetJson(const std::string& jsonText, const std::wstring& fal
                     const std::wstring wv = dettagli::trim(dettagli::daUtf8(ov->s));
                     if (!wv.empty() && (cv.opzioni.empty() ||
                         std::find(cv.opzioni.begin(), cv.opzioni.end(), wv) != cv.opzioni.end())) {
+                        cv.valStr = wv;
+                    }
+                } else if (cv.tipo == L"color" && ov->tipo == dettagli::Json::Str) {
+                    const std::wstring wv = dettagli::normalizzaColoreOpt(dettagli::daUtf8(ov->s));
+                    if (!wv.empty() && std::find(cv.opzioni.begin(), cv.opzioni.end(), wv) != cv.opzioni.end()) {
                         cv.valStr = wv;
                     }
                 } else if (cv.tipo == L"slider" && ov->tipo == dettagli::Json::Num && std::isfinite(ov->n)) {
@@ -1011,12 +1057,13 @@ inline bool creaEsempio() {
         "                 key:     action key string (default \"toggle\", max 48 chars)\n"
         "                 on:      boolean switch state (or fallback \"value\")\n"
         "                 Clicking writes <id>.action.json without executing any shell command.\n"
-        "  icon         { glyph, text, color, ring, animate }\n"
-        "                 glyph:   ring | battery | spark | cpu | thermometer | tailscale | dot | text\n"
-        "                 text:    up to 4 chars shown inside the dock tile (e.g. \"42\\u00b0\", \"VPN\")\n"
-        "                 color:   #RRGGBB hex accent color\n"
-        "                 ring:    0..100 outer progress arc (omit for ringless icon)\n"
-        "                 animate: none | pulse | breathe | wave | spin\n"
+        "  icon         { glyph, text, color, glowColor, ring, animate }\n"
+        "                 glyph:     ring | battery | spark | cpu | thermometer | tailscale | dot | text\n"
+        "                 text:      up to 4 chars shown inside the dock tile (e.g. \"42\\u00b0\", \"VPN\")\n"
+        "                 color:     #RRGGBB hex accent color\n"
+        "                 glowColor: optional #RRGGBB hex override for animated glow halo\n"
+        "                 ring:      0..100 outer progress arc (omit for ringless icon)\n"
+        "                 animate:   none | pulse | breathe | wave | spin\n"
         "  items        Array of cards: { title, subtitle, badge, color, progress, url, copy }\n"
         "                 color:    #RRGGBB dot & bar accent\n"
         "                 progress: 0..100 bottom bar\n"
@@ -1024,8 +1071,8 @@ inline bool creaEsempio() {
         "                 url:      http://, https://, or existing local file/folder path\n"
         "  config       Array (max 16) rendered in Settings > Widgets > <widget>:\n"
         "                 { key, label, description, type, default, options, min, max, step, unit }\n"
-        "                 type:    \"toggle\" (bool) | \"choice\" (string) | \"slider\" (number)\n"
-        "                 options: string array (max 5) for type \"choice\"\n"
+        "                 type:    \"toggle\" (bool) | \"choice\" (string) | \"color\" (hex/auto swatch) | \"slider\" (number)\n"
+        "                 options: string array (max 5 for \"choice\"; max 8 of \"auto\" or #RRGGBB for \"color\")\n"
         "                 slider:  min (0), max (100), step (1), default (min), unit (max 8 chars)\n"
         "                 User changes persist to <id>.config.json ({ \"<key>\": value })\n"
         "                 in this folder and override defaults on reload.\n"

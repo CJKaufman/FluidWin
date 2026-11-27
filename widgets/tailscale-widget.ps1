@@ -53,6 +53,7 @@ function Read-WidgetConfig {
         showSelf    = $true
         animateIcon = $true
         animStyle   = 'wave'
+        glowColor   = 'auto'
         refreshSec  = 10
     }
     if (Test-Path $cfgFile) {
@@ -62,6 +63,11 @@ function Read-WidgetConfig {
             if ($null -ne $raw.showSelf)    { $cfg.showSelf    = [bool]$raw.showSelf }
             if ($null -ne $raw.animateIcon) { $cfg.animateIcon = [bool]$raw.animateIcon }
             if ($raw.animStyle -in @('wave', 'pulse')) { $cfg.animStyle = [string]$raw.animStyle }
+            if ($raw.glowColor -is [string]) {
+                $gc = $raw.glowColor.Trim()
+                if ($gc -ieq 'auto') { $cfg.glowColor = 'auto' }
+                elseif ($gc -match '^#[0-9a-fA-F]{6}$') { $cfg.glowColor = $gc.ToUpperInvariant() }
+            }
             if ($null -ne $raw.refreshSec)  { $cfg.refreshSec  = Parse-IntervalSeconds $raw.refreshSec }
         } catch {}
     }
@@ -117,6 +123,14 @@ function Build-TailscalePayload([string]$tsBin, [hashtable]$cfg) {
             type        = 'choice'
             default     = 'wave'
             options     = @('wave', 'pulse')
+        },
+        @{
+            key         = 'glowColor'
+            label       = 'Glow color'
+            description = 'Accent color for the animated logo glow'
+            type        = 'color'
+            default     = 'auto'
+            options     = @('auto', '#30D158', '#32D2FF', '#0A84FF', '#BF5AF2', '#FF9F0A', '#FF453A')
         },
         @{
             key         = 'refreshSec'
@@ -262,6 +276,15 @@ function Build-TailscalePayload([string]$tsBin, [hashtable]$cfg) {
         })
     }
 
+    $iconObj = @{
+        glyph   = 'tailscale'
+        color   = $iconColor
+        animate = $animMode
+    }
+    if ($cfg.glowColor -and $cfg.glowColor -ne 'auto') {
+        $iconObj.glowColor = $cfg.glowColor
+    }
+
     return @{
         id          = 'tailscale'
         name        = 'Tailscale'
@@ -269,11 +292,7 @@ function Build-TailscalePayload([string]$tsBin, [hashtable]$cfg) {
         tooltip     = $tooltip
         status      = $statusText
         statusColor = $statusColor
-        icon        = @{
-            glyph   = 'tailscale'
-            color   = $iconColor
-            animate = $animMode
-        }
+        icon        = $iconObj
         toggle      = @{
             key = 'connected'
             on  = $running
