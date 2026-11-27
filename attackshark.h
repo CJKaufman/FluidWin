@@ -520,16 +520,22 @@ private:
         }
 
         for (const auto& kb : tastiere) {
-            bool dupOffline = false;
-            if (!kb.online) {
-                for (const auto& alt : tastiere) {
-                    if (&alt != &kb && alt.online && alt.nome == kb.nome) {
-                        dupOffline = true;
-                        break;
-                    }
-                }
+            bool skip = false;
+            bool haUsbOnline = false;
+            for (const auto& alt : tastiere) {
+                if (&alt == &kb || alt.nome != kb.nome) continue;
+                if (alt.online && alt.connessione == L"USB") haUsbOnline = true;
+                if (!kb.online && alt.online) { skip = true; break; }
+                if (kb.batteria < 0 && alt.online && alt.batteria >= 0) { skip = true; break; }
             }
-            if (!dupOffline) out.dispositivi.push_back(kb);
+            if (!skip) {
+                Dispositivo d = kb;
+                if (haUsbOnline && d.online) {
+                    d.connessione = L"USB";
+                    d.inCarica = true;
+                }
+                out.dispositivi.push_back(std::move(d));
+            }
         }
 
         std::sort(out.dispositivi.begin(), out.dispositivi.end(),
