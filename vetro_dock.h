@@ -169,20 +169,23 @@ public:
             if (FAILED(ultimo)) return false;
             ultimoBlur = deviazione; ultimaSat = sat;
         }
+        // ok(): ricorda l'esito in 'ultimo' e dice se e' riuscito (le catene si fermano al primo errore, come prima con
+        // "FAILED(ultimo = ...) ||", che clang-tidy segnala come assegnazione dentro l'if)
+        auto ok = [this](HRESULT r) { ultimo = r; return SUCCEEDED(r); };
         if (w != ultimoW || h != ultimoH) {
-            if (FAILED(ultimo = visual->put_Size({float(w),float(h)})) ||
-                FAILED(ultimo = clip->put_Right(float(w))) || FAILED(ultimo = clip->put_Bottom(float(h)))) return false;
+            if (!ok(visual->put_Size({float(w),float(h)})) ||
+                !ok(clip->put_Right(float(w))) || !ok(clip->put_Bottom(float(h)))) return false;
             ultimoW = w; ultimoH = h;
         }
         if (x != ultimoX || y != ultimoY) {
-            if (FAILED(ultimo = visual->put_Offset({float(x),float(y),0}))) return false;
+            if (!ok(visual->put_Offset({float(x),float(y),0}))) return false;
             ultimoX = x; ultimoY = y;
         }
         raggio = std::clamp(raggio, 0.f, std::min(w,h)*0.5f);
         if (raggio != ultimoRaggio) {
             const abi::Vector2 rr{raggio,raggio};
-            if (FAILED(ultimo = clip->put_TopLeftRadius(rr)) || FAILED(ultimo = clip->put_TopRightRadius(rr)) ||
-                FAILED(ultimo = clip->put_BottomLeftRadius(rr)) || FAILED(ultimo = clip->put_BottomRightRadius(rr))) return false;
+            if (!ok(clip->put_TopLeftRadius(rr)) || !ok(clip->put_TopRightRadius(rr)) ||
+                !ok(clip->put_BottomLeftRadius(rr)) || !ok(clip->put_BottomRightRadius(rr))) return false;
             ultimoRaggio = raggio;
         }
         return true;
@@ -201,7 +204,7 @@ public:
                 FAILED(compositor->CreateSpriteVisual(&strato)) || FAILED(strato.As(&v)) ||
                 FAILED(compositor->CreateColorBrush(&coloreVelo)) || FAILED(coloreVelo.As(&brush)) ||
                 FAILED(strato->put_Brush(brush.Get())) || FAILED(figli->InsertAtTop(v.Get()))) return;
-            velo = v;
+            velo = std::move(v);
         }
         if (!attiva) { if (veloVisibile) velo->put_Opacity(0); veloVisibile = false; return; }
         auto byte = [](float f) { return BYTE(std::lround(255*std::clamp(f,0.f,1.f))); };
@@ -249,9 +252,13 @@ private:
             static auto crea = lib ? reinterpret_cast<CreaCoda>(GetProcAddress(lib, "CreateDispatcherQueueController")) : nullptr;
             static thread_local ComPtr<IUnknown> coda;
             if (!crea || coda) return hr;
-            if (FAILED(hr = crea({sizeof(OpzioniCoda),2,0}, &coda))) return hr;
-            if (FAILED(hr = RoActivateInstance(classe.Get(), &obj))) return hr;
+            hr = crea({sizeof(OpzioniCoda),2,0}, &coda);
+            if (FAILED(hr)) return hr;
+            hr = RoActivateInstance(classe.Get(), &obj);
+            if (FAILED(hr)) return hr;
         }
+        // ok(): ricorda l'esito in hr e dice se e' riuscito (vedi imposta)
+        auto ok = [&hr](HRESULT r) { hr = r; return SUCCEEDED(r); };
         ComPtr<DesktopInterop> desktop;
         ComPtr<Compositor2> pennelli;
         ComPtr<Compositor7> geometria;
@@ -259,20 +266,20 @@ private:
         ComPtr<c::ICompositionClip> forma;
         ComPtr<SourceFactory> parametri;
         ComPtr<IInspectable> parametro;
-        if (FAILED(hr = obj.As(&compositor)) || FAILED(hr = obj->QueryInterface(iidDesktop, reinterpret_cast<void**>(desktop.GetAddressOf()))) ||
-            FAILED(hr = obj->QueryInterface(iidCompositor2, reinterpret_cast<void**>(pennelli.GetAddressOf()))) ||
-            FAILED(hr = obj->QueryInterface(iidCompositor7, reinterpret_cast<void**>(geometria.GetAddressOf()))) ||
-            FAILED(hr = desktop->CreateDesktopWindowTarget(h, TRUE, &destinazione)) ||
-            FAILED(hr = destinazione.As(&target)) || FAILED(hr = pennelli->CreateBackdropBrush(&pennello)) ||
-            FAILED(hr = pennello.As(&sfondo)) || FAILED(hr = compositor->CreateSpriteVisual(&sprite)) ||
-            FAILED(hr = sprite.As(&visual)) || FAILED(hr = geometria->CreateRectangleClip(&clip)) ||
-            FAILED(hr = clip.As(&forma)) || FAILED(hr = visual->put_Clip(forma.Get())) ||
-            FAILED(hr = target->put_Root(visual.Get()))) return hr;
-        if (FAILED(hr = RoGetActivationFactory(HStringReference(L"Windows.Foundation.PropertyValue").Get(),
+        if (!ok(obj.As(&compositor)) || !ok(obj->QueryInterface(iidDesktop, reinterpret_cast<void**>(desktop.GetAddressOf()))) ||
+            !ok(obj->QueryInterface(iidCompositor2, reinterpret_cast<void**>(pennelli.GetAddressOf()))) ||
+            !ok(obj->QueryInterface(iidCompositor7, reinterpret_cast<void**>(geometria.GetAddressOf()))) ||
+            !ok(desktop->CreateDesktopWindowTarget(h, TRUE, &destinazione)) ||
+            !ok(destinazione.As(&target)) || !ok(pennelli->CreateBackdropBrush(&pennello)) ||
+            !ok(pennello.As(&sfondo)) || !ok(compositor->CreateSpriteVisual(&sprite)) ||
+            !ok(sprite.As(&visual)) || !ok(geometria->CreateRectangleClip(&clip)) ||
+            !ok(clip.As(&forma)) || !ok(visual->put_Clip(forma.Get())) ||
+            !ok(target->put_Root(visual.Get()))) return hr;
+        if (!ok(RoGetActivationFactory(HStringReference(L"Windows.Foundation.PropertyValue").Get(),
                              __uuidof(f::IPropertyValueStatics), reinterpret_cast<void**>(box.GetAddressOf()))) ||
-            FAILED(hr = RoGetActivationFactory(HStringReference(L"Windows.UI.Composition.CompositionEffectSourceParameter").Get(),
+            !ok(RoGetActivationFactory(HStringReference(L"Windows.UI.Composition.CompositionEffectSourceParameter").Get(),
                              iidSourceFactory, reinterpret_cast<void**>(parametri.GetAddressOf()))) ||
-            FAILED(hr = parametri->Create(HStringReference(L"Desktop").Get(), &parametro))) return hr;
+            !ok(parametri->Create(HStringReference(L"Desktop").Get(), &parametro))) return hr;
         return parametro.As(&sorgente);
     }
 
@@ -287,16 +294,17 @@ private:
             input = static_cast<e::IGraphicsEffectSource*>(nodo);
             return S_OK;
         };
-        HRESULT hr;
-        if (blur > 0 && FAILED(hr = aggiungi(Filtro::Sfocatura, blur))) return hr;
-        if (sat != 1 && FAILED(hr = aggiungi(Filtro::Saturazione, sat))) return hr;
+        HRESULT hr = S_OK;
+        auto ok = [&hr](HRESULT r) { hr = r; return SUCCEEDED(r); };   // (vedi imposta)
+        if (blur > 0 && !ok(aggiungi(Filtro::Sfocatura, blur))) return hr;
+        if (sat != 1 && !ok(aggiungi(Filtro::Saturazione, sat))) return hr;
         if (!effetto) return sprite->put_Brush(nullptr);  // trasparenza ottica, nessun filtro
         ComPtr<c::ICompositionEffectFactory> fabbrica;
         ComPtr<c::ICompositionEffectBrush> pennello;
         ComPtr<c::ICompositionBrush> pronto;
-        if (FAILED(hr = compositor->CreateEffectFactory(effetto.Get(), &fabbrica)) ||
-            FAILED(hr = fabbrica->CreateBrush(&pennello)) || FAILED(hr = pennello->SetSourceParameter(HStringReference(L"Desktop").Get(), sfondo.Get())) ||
-            FAILED(hr = pennello.As(&pronto))) return hr;
+        if (!ok(compositor->CreateEffectFactory(effetto.Get(), &fabbrica)) ||
+            !ok(fabbrica->CreateBrush(&pennello)) || !ok(pennello->SetSourceParameter(HStringReference(L"Desktop").Get(), sfondo.Get())) ||
+            !ok(pennello.As(&pronto))) return hr;
         return sprite->put_Brush(pronto.Get());
     }
 };

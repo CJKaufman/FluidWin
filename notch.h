@@ -1438,15 +1438,18 @@ private:
         else {
             // app senza icona leggibile (issue #40: un quadrato grigio vuoto): la sua iniziale nel quadrato
             colore(1, 1, 1, 0.14f * a); rt->FillRoundedRectangle({{ix, iy, ix + il, iy + il}, 9 * d, 9 * d}, pen);
-            // (il primo carattere visibile, intero: si saltano spazi e segni di direzione invisibili, che le app arabe
-            // mettono in testa al nome, e una coppia surrogata resta intera, R20261128-125521-S2)
+            // (il primo carattere visibile, intero: lettera, cifra o segno secondo Windows. Si saltano spazi e segni
+            // invisibili, come quelli di direzione che le app arabe mettono in testa al nome (U+200F, U+061C...);
+            // una coppia surrogata resta intera. R20261128-125521-S2 e la sua verifica R20261128-131925)
             std::wstring ini;
-            for (size_t k = 0; k < nApp.size(); k++) {
+            for (size_t k = 0; k < nApp.size() && ini.empty(); k++) {
                 const wchar_t c = nApp[k];
-                if (iswspace(c) || c == 0x200E || c == 0x200F || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069) || c == 0xFEFF || c == 0x200B) continue;
-                if (c >= 0xD800 && c <= 0xDBFF) { if (k + 1 < nApp.size()) ini = nApp.substr(k, 2); }
-                else if (!(c >= 0xDC00 && c <= 0xDFFF)) ini.assign(1, (wchar_t)towupper(c));
-                break;
+                if (c >= 0xD800 && c <= 0xDBFF) {
+                    if (k + 1 < nApp.size() && nApp[k + 1] >= 0xDC00 && nApp[k + 1] <= 0xDFFF) ini = nApp.substr(k, 2);
+                    continue;
+                }
+                WORD tipo = 0;
+                if (GetStringTypeW(CT_CTYPE1, &c, 1, &tipo) && (tipo & (C1_ALPHA | C1_DIGIT | C1_PUNCT))) ini.assign(1, (wchar_t)towupper(c));
             }
             if (!ini.empty() && fGrande) {
                 const DWRITE_TEXT_ALIGNMENT al = fGrande->GetTextAlignment();

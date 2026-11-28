@@ -2336,7 +2336,9 @@ private:
         const float w=f.right-f.left,h=f.bottom-f.top;
         auto foto=fotoOndaDock->GetSize();
         const float passo=std::max(4.f,std::round(5*dpi)), margine=2*dpi;
-        for(float y=margine;y+passo<=h-margine;y+=passo) for(float x=margine;x+passo<=w-margine;x+=passo) {
+        // (contatori interi: le stesse celle di prima, senza l'errore che si accumula sommando float)
+        for(int iy=0;margine+(float)iy*passo+passo<=h-margine;iy++) for(int ix=0;margine+(float)ix*passo+passo<=w-margine;ix++) {
+            const float y=margine+(float)iy*passo, x=margine+(float)ix*passo;
             const float rx=x+passo/2-w/2, ry=y+passo/2-h/2, dist=std::hypot(rx,ry);
             const float eta=tempo-arrivoOnda(dist,massimo);
             if (eta<=0 || eta>.23f || dist<1) continue;
