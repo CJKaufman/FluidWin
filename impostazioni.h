@@ -47,7 +47,6 @@ struct Valori {
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockGiochi = true;       // pulsante Giochi nel dock accanto a quello delle app
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
-    int stileVetro = 0;           // stile del vetro (vetro::Stile: acrilico, liquido, mica, trasparente)
     bool dockAI = false;          // icona Monitor AI nel dock
     bool aiNascondiCLI = false;   // nasconde dal dock i terminali con chat AI e li minimizza in AI Monitor
     bool dockLogi = false;        // widget Logitech G HUB nel dock
@@ -148,8 +147,6 @@ inline void carica() {
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockGiochi = leggiDword(L"DockGiochi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
-    v.stileVetro = std::clamp((int)leggiDword(L"StileVetro", 0), 0, vetro::N_STILI - 1);
-    vetro::stile() = v.stileVetro;
     v.dockAI = leggiDword(L"DockAI", 0);
     v.aiNascondiCLI = leggiDword(L"AINascondiCLI", 0) != 0;
     v.dockLogi = leggiDword(L"DockLogi", 0);
@@ -179,7 +176,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockGioco", v.dockGioco); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"StileVetro", (DWORD)v.stileVetro); scriviDword(L"DockAI", v.dockAI); scriviDword(L"AINascondiCLI", v.aiNascondiCLI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"DockAShark", v.dockAShark); scriviDword(L"ASharkAnimCarica", v.aSharkAnimCarica); scriviDword(L"ASharkGlowColore", v.aSharkGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockGiochi", v.dockGiochi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"AINascondiCLI", v.aiNascondiCLI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"DockAShark", v.dockAShark); scriviDword(L"ASharkAnimCarica", v.aSharkAnimCarica); scriviDword(L"ASharkGlowColore", v.aSharkGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -591,7 +588,6 @@ private:
     static constexpr DWORD COLORI[] = {0x2C2C2E, 0xF2F2F7, 0x0A84FF, 0x5E5CE6, 0xBF5AF2, 0xFF375F, 0xFF9F0A, 0x30D158};
     static constexpr int N_COLORI = sizeof(COLORI) / sizeof(COLORI[0]);
     static constexpr int Z_COLORE_MIO = Z_COLORE + 1 + N_COLORI;
-    static constexpr int Z_STILE = 620;
     void scegliColore(int id) {
         DWORD& c = valori().dockColore;
         if (id == Z_COLORE) c = 0;
@@ -831,15 +827,6 @@ private:
         if (id >= Z_W_CFG_SLIDER && id < Z_W_CFG_SLIDER + (int)wplugin::MAX_CONFIG) return;
         if (id >= Z_COLORE && id <= Z_COLORE_MIO) {
             scegliColore(id);
-            salva();
-            if (cambiato) cambiato();
-            disegna();
-            return;
-        }
-        if (id >= Z_STILE && id < Z_STILE + vetro::N_STILI) {
-            valori().stileVetro = id - Z_STILE;
-            vetro::stile() = valori().stileVetro;
-            v.aggiornaStile();
             salva();
             if (cambiato) cambiato();
             disegna();
@@ -1520,7 +1507,7 @@ private:
             v.testo(testi::t(c.nome, c.name), fVoce, {r.left + 16 * d, r.top + 7 * d, x0 - 16 * d, r.top + 29 * d}, inkS);
             v.testo(testi::t(c.spiega, c.explain), fSotto, {r.left + 16 * d, r.top + 28 * d, x0 - 16 * d, r.top + 48 * d}, tenueS);
             binari[i] = {x0, cy - 12 * d, x1, cy + 12 * d};
-            aggiungiZona({x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id);
+            zone.push_back({{x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id});
             const int val = valori().*(c.campo);
             const float p = (val - c.min) / (float)(c.max - c.min), xm = x0 + (x1 - x0) * p;
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
@@ -1558,46 +1545,6 @@ private:
                 }
                 y += 70 * d;
             }
-            // tema del vetro: Acrilico, Liquido, Mica, Trasparente
-            {
-                const D2D1_RECT_F r = {L, y, R, y + 64 * d};
-                riquadro(r, false);
-                const std::wstring tit = testi::t(L"Tema del vetro", L"Glass theme");
-                const std::wstring sub = testi::t(L"Dock, pannelli e menu", L"Dock, panels and menus");
-                const wchar_t* nomi[vetro::N_STILI] = {
-                    testi::t(L"Acrilico", L"Acrylic"),
-                    testi::t(L"Liquido", L"Liquid"),
-                    L"Mica",
-                    testi::t(L"Trasparente", L"Clear")
-                };
-                float lw[vetro::N_STILI]{}, sumW = 0;
-                for (int k = 0; k < vetro::N_STILI; k++) { lw[k] = v.larghezza(nomi[k], fCentro); sumW += lw[k]; }
-                const float xLeftEnd = std::min(r.right - 16 * d - 240 * d,
-                                                r.left + 16 * d + std::max(v.larghezza(tit, fVoce), v.larghezza(sub, fSotto)) + 12 * d);
-                const float larg = std::min(360 * d, r.right - 16 * d - xLeftEnd);
-                const float x0 = r.right - 16 * d - larg, h = 34 * d, yl = r.top + 15 * d;
-                v.testo(tit, fVoce, {r.left + 16 * d, r.top + 11 * d, x0 - 10 * d, r.top + 33 * d}, inkS);
-                v.testo(sub, fSotto, {r.left + 16 * d, r.top + 32 * d, x0 - 10 * d, r.top + 52 * d}, tenueS);
-                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
-                v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
-                const float pad = std::max(4.0f * d, (larg - 6 * d - sumW) / (float)vetro::N_STILI);
-                float cx = x0 + 3 * d;
-                for (int k = 0; k < vetro::N_STILI; k++) {
-                    const float pw = lw[k] + pad;
-                    const D2D1_RECT_F rp = {cx, yl + 3 * d, cx + pw, yl + h - 3 * d};
-                    aggiungiZona(rp, Z_STILE + k);
-                    if (valori().stileVetro == k) {
-                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
-                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
-                    } else if (sopra == Z_STILE + k) {
-                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
-                        v.rt->FillRoundedRectangle({rp, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
-                    }
-                    v.testo(nomi[k], fCentro, rp, inkS);
-                    cx += pw;
-                }
-                y += 70 * d;
-            }
             // colore del dock: automatico (meta' chiaro e meta' scuro), i colori pronti, e "+" per sceglierne uno
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
             riquadro(r, false);
@@ -1612,7 +1559,7 @@ private:
                 const int id = Z_COLORE + k;
                 const float cx = xInizio + passo * k;
                 const D2D1_ELLIPSE el = {{cx, cy}, rc, rc};
-                aggiungiZona({cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id);
+                zone.push_back({{cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id});
                 const bool attivo = k == 0 ? !(scelto & COLORE_SCELTO)
                                   : k <= N_COLORI ? scelto == (COLORE_SCELTO | COLORI[k - 1])
                                                   : ((scelto & COLORE_SCELTO) && !pronto);
