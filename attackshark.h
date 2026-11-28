@@ -11,6 +11,7 @@
 #include <setupapi.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -45,6 +46,15 @@ struct LedStato {
     uint8_t optFlags = 0x06;
     uint8_t r = 255, g = 0, b = 234;
     bool arcobaleno = false;
+};
+
+struct MouseStato {
+    bool valido = false;
+    bool haRaw04 = false;
+    uint8_t raw04[64]{};
+    int pollingHz = 1000;
+    int dpiAttivo = 1;
+    int dpi[6] = {800, 1600, 2400, 3200, 5000, 8400};
 };
 
 inline void apriSoftware() {
@@ -359,6 +369,49 @@ inline HANDLE apriFeatTastiera(const HidApi& hid, USHORT& featLen) {
     return INVALID_HANDLE_VALUE;
 }
 
+inline BYTE codicePollingV6(int hz) {
+    switch (hz) {
+        case 125:  return 0x08;
+        case 250:  return 0x04;
+        case 500:  return 0x02;
+        case 1000: return 0x01;
+        default:   return 0x01;
+    }
+}
+
+inline int pollingDaCodiceV6(BYTE b) {
+    switch (b) {
+        case 0x08: return 125;
+        case 0x04: return 250;
+        case 0x02: return 500;
+        case 0x01: return 1000;
+        default:   return 1000;
+    }
+}
+
+inline HANDLE apriFeatMouse(const HidApi& hid, USHORT& featLen) {
+    featLen = 0;
+    HANDLE trovato = INVALID_HANDLE_VALUE;
+    visitaHid(hid, [&](const std::wstring& path, const std::wstring& low) {
+        if (low.find(L"vid_1d57") == std::wstring::npos) return true;
+        uint16_t vid = 0, pid = 0;
+        HidCaps caps{};
+        if (!leggiInfoHid(hid, path, vid, pid, caps)) return true;
+        if (vid != VID_BEKEN || pid != PID_ASHARK_MOUSE ||
+            caps.UsagePage != 0x000B || caps.FeatureReportByteLength < 64) {
+            return true;
+        }
+        HANDLE h = apriHidConRipiego(path, false, false);
+        if (h != INVALID_HANDLE_VALUE) {
+            trovato = h;
+            featLen = caps.FeatureReportByteLength;
+            return false;
+        }
+        return true;
+    });
+    return trovato;
+}
+
 struct StatoTastieraCache {
     bool nomeLetto = false;
     std::wstring nome = L"Attack Shark RK86";
@@ -501,6 +554,111 @@ inline bool impostaLedRK86(const LedStato& s) {
     rep[9] = (BYTE)(0xFF - (sum & 0xFF));
 
     const bool ok = hid.setFeature(h, rep.data(), len) != FALSE;
+    CloseHandle(h);
+    return ok;
+}
+
+inline bool leggiMouseV6(MouseStato& out) {
+    out = MouseStato{};
+    dettagli::HidApi hid;
+    if (!hid.carica()) return false;
+    USHORT featLen = 0;
+    HANDLE h = dettagli::apriFeatMouse(hid, featLen);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    const ULONG len = std::max<ULONG>(64, featLen);
+    bool ok = true;
+    for (BYTE cmd : {BYTE(0x04), BYTE(0x05), BYTE(0x06)}) {
+        std::vector<BYTE> req(len, 0);
+        req[0] = 0xA0;
+        req[1] = cmd;
+        if (!hid.setFeature(h, req.data(), len)) {
+            ok = false;
+            break;
+        }
+        Sleep(40);
+    }
+
+    if (ok) {
+        std::vector<BYTE> resp(len, 0);
+        bool got04 = false;
+        for (int tentativo = 0; tentativo < 4; tentativo++) {
+            std::fill(resp.begin(), resp.end(), 0);
+            resp[0] = 0x06;
+            if (hid.getFeature(h, resp.data(), len) && resp[0] == 0x04) {
+                got04 = true;
+                break;
+            }
+            if (tentativo < 3) Sleep(40);
+        }
+        if (got04) {
+            std::memcpy(out.raw04, resp.data(), 64);
+            out.haRaw04 = true;
+            for (int i = 0; i < 6; i++) {
+                const int rawDpi = (int)std::round(((int)resp[8 + i] + 1) * 800.0 / 19.0 / 100.0) * 100;
+                out.dpi[i] = std::clamp(rawDpi, 400, 10000);
+            }
+            out.pollingHz = dettagli::pollingDaCodiceV6(resp[14]);
+            out.dpiAttivo = std::clamp((int)resp[15], 0, 5);
+            out.valido = true;
+        } else {
+            ok = false;
+        }
+    }
+
+    CloseHandle(h);
+    return ok;
+}
+
+inline bool impostaPollingV6(int hz) {
+    BYTE val = 0;
+    switch (hz) {
+        case 125:  val = 0x08; break;
+        case 250:  val = 0x04; break;
+        case 500:  val = 0x02; break;
+        case 1000: val = 0x01; break;
+        default:   return false;
+    }
+    dettagli::HidApi hid;
+    if (!hid.carica()) return false;
+    USHORT featLen = 0;
+    HANDLE h = dettagli::apriFeatMouse(hid, featLen);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    const ULONG len = std::max<ULONG>(64, featLen);
+    std::vector<BYTE> rep(len, 0);
+    rep[0] = 0x06;
+    rep[1] = 0x09;
+    rep[2] = 0x01;
+    rep[3] = val;
+    rep[4] = (BYTE)(0xFF - val);
+
+    const bool ok = hid.setFeature(h, rep.data(), len) != FALSE;
+    CloseHandle(h);
+    return ok;
+}
+
+inline bool impostaDpiV6(MouseStato& s) {
+    if (!s.haRaw04) return false;
+    dettagli::HidApi hid;
+    if (!hid.carica()) return false;
+    USHORT featLen = 0;
+    HANDLE h = dettagli::apriFeatMouse(hid, featLen);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    const ULONG len = std::max<ULONG>(64, featLen);
+    std::vector<BYTE> rep(len, 0);
+    std::memcpy(rep.data(), s.raw04, 64);
+    for (int i = 0; i < 6; i++) {
+        rep[8 + i] = (BYTE)std::clamp((int)std::round(s.dpi[i] * 19.0 / 800.0) - 1, 1, 255);
+    }
+    rep[15] = (BYTE)std::clamp(s.dpiAttivo, 0, 5);
+
+    const bool ok = hid.setFeature(h, rep.data(), len) != FALSE;
+    if (ok) {
+        std::memcpy(s.raw04, rep.data(), 64);
+        s.valido = true;
+    }
     CloseHandle(h);
     return ok;
 }

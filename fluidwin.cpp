@@ -4205,6 +4205,7 @@ static appunti::Appunti gAppunti;
 static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
 static attackshark_ui::Finestra gASharkUI;
+static attackshark_ui::FinestraMouse gASharkMouseUI;
 
 // ---------------------------------------------------------------------------------------------
 // Diagnostica da copiare (Impostazioni > Generale): quello che serve per capire un problema su un altro PC, senza dati
@@ -4343,6 +4344,7 @@ static void applicaImpostazioni() {
                    gLauncherTasto = stato == StatoSchermo::Normale;
                    gDock.schermoIntero((int)stato); gDock.controllaFinestre(); }
     gASharkUI.aggiornaTema();
+    gASharkMouseUI.aggiornaTema();
     // Arabo acceso o spento: i formati di testo prendono la direzione (da destra a sinistra) quando nascono, e molti
     // vivono quanto FluidWin. Riavviare e' il modo sicuro di rifarli tutti
 
@@ -5160,6 +5162,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.apriGHub = [] { logitech::apriGHub(); };
     gImpostazioni.apriAShark = [] { attackshark::apriSoftware(); };
     gDock.apriControlloRK86 = [](const std::wstring& st) { gASharkUI.apri(st); };
+    gDock.apriControlloV6 = [](const std::wstring& st) { gASharkMouseUI.apri(st); };
     gImpostazioni.dettagliWPlugin = [](const std::wstring& id, wplugin::Widget& out) {
         return gDockOk && gDock.widgetWPlugin(id, out);
     };
@@ -5258,6 +5261,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     cursori::togli();   // di nuovo i cursori di Windows
     if (gDockOk) gDock.chiudi();
     gASharkUI.chiudi();
+    gASharkMouseUI.chiudi();
     gBanner.chiudiLettore();
     togliPrimoPiano();
     gAppunti.distruggi();

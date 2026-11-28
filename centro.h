@@ -2242,22 +2242,25 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 : (dv.tipo == L"Keyboard" || dv.tipo == L"keyboard") ? TipoIconaPerif::Tastiera
                 : TipoIconaPerif::Altro;
             const bool eTastiera = (tipoIcona == TipoIconaPerif::Tastiera);
+            const bool eMouse = (tipoIcona == TipoIconaPerif::Mouse);
+            const bool cliccabile = eTastiera || eMouse;
             if (eTastiera) {
                 evidenzia(aggiungi(r, A_ASHARK_KB, (int)i), r, scuro, rp);
+            } else if (eMouse) {
+                evidenzia(aggiungi(r, A_ASHARK_MOUSE, (int)i), r, scuro, rp);
             }
 
             const bool offline = !dv.online;
             const bool asleep = dv.online && !dv.attivo;
             const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
                                                : asleep ? tenue : ink;
-            const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
             const int sogliaPieno = eMouse ? 100 : 94;
             const bool usbConnesso = (!eMouse && dv.inCarica && dv.batteria >= sogliaPieno) || (!dv.inCarica && dv.connessione == L"USB");
             const bool mostraBat = dv.batteria >= 0 && !usbConnesso;
             disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
                                   r.left + 23 * dpi, r.top + (mostraBat ? 27.0f : 31.0f) * dpi, icCol);
 
-            const float limDestra = r.right - (eTastiera ? 24.0f : 12.0f) * dpi;
+            const float limDestra = r.right - (cliccabile ? 24.0f : 12.0f) * dpi;
             float limTit = limDestra;
             if (mostraBat) {
                 const bool chgVis = dv.inCarica && dv.batteria < sogliaPieno;
@@ -2300,7 +2303,7 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
             }
             pennello->SetColor(tenue);
             scrivi(riga2, fmtSotto, {r.left + 44 * dpi, r.top + 31 * dpi, limDestra, r.top + 50 * dpi});
-            if (eTastiera) {
+            if (cliccabile) {
                 const float chevY = mostraBat ? (r.top + 41.0f * dpi) : ((r.top + r.bottom) / 2);
                 chevronDestra(r.right - 13 * dpi, chevY);
             }
@@ -4259,10 +4262,13 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             chiudiPannello();
             attackshark::apriSoftware();
             break;
-        case A_ASHARK_KB: {
+        case A_ASHARK_KB:
+        case A_ASHARK_MOUSE: {
+            const bool eMouse = (e.azione == A_ASHARK_MOUSE);
             std::wstring stato;
             if (e.indice >= 0 && e.indice < (int)aSharkStato.dispositivi.size()) {
                 const attackshark::Dispositivo& dv = aSharkStato.dispositivi[e.indice];
+                const int sogliaPieno = eMouse ? 100 : 94;
                 if (!dv.online) {
                     stato = testi::t(L"Non connesso", L"Offline");
                 } else if (!dv.attivo) {
@@ -4270,12 +4276,17 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
                     stato += testi::t(L"In riposo", L"Asleep");
                     if (dv.batteria >= 0) stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
                 } else if (dv.connessione == L"USB") {
-                    if (dv.inCarica && dv.batteria >= 0 && dv.batteria < 94) {
+                    if (dv.inCarica && dv.batteria >= 0 && dv.batteria < sogliaPieno) {
                         stato = testi::t(L"USB - In carica", L"USB - Charging");
                         stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
                     } else {
                         stato = testi::t(L"USB connesso", L"USB Connected");
                     }
+                } else if (eMouse && dv.inCarica) {
+                    stato = (dv.batteria >= sogliaPieno)
+                        ? testi::t(L"Base - Carico", L"Dock - Charged")
+                        : testi::t(L"Base - In carica", L"Dock - Charging");
+                    if (dv.batteria >= 0) stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
                 } else {
                     if (dv.batteria >= 0) {
                         stato = dv.connessione.empty() ? std::wstring(testi::t(L"Connesso", L"Connected")) : dv.connessione;
@@ -4287,7 +4298,11 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
                 }
             }
             chiudiPannello();
-            if (apriControlloRK86) apriControlloRK86(stato);
+            if (eMouse) {
+                if (apriControlloV6) apriControlloV6(stato);
+            } else {
+                if (apriControlloRK86) apriControlloRK86(stato);
+            }
             break;
         }
         case A_WPLUGIN_TOGGLE:
