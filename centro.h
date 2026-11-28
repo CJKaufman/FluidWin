@@ -2238,13 +2238,18 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
             pennello->SetColor(scheda);
             dc->FillRoundedRectangle({r, rp, rp}, pennello);
 
+            const TipoIconaPerif tipoIcona = (dv.tipo == L"Mouse" || dv.tipo == L"mouse") ? TipoIconaPerif::Mouse
+                : (dv.tipo == L"Keyboard" || dv.tipo == L"keyboard") ? TipoIconaPerif::Tastiera
+                : TipoIconaPerif::Altro;
+            const bool eTastiera = (tipoIcona == TipoIconaPerif::Tastiera);
+            if (eTastiera) {
+                evidenzia(aggiungi(r, A_ASHARK_KB, (int)i), r, scuro, rp);
+            }
+
             const bool offline = !dv.online;
             const bool asleep = dv.online && !dv.attivo;
             const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
                                                : asleep ? tenue : ink;
-            const TipoIconaPerif tipoIcona = (dv.tipo == L"Mouse" || dv.tipo == L"mouse") ? TipoIconaPerif::Mouse
-                : (dv.tipo == L"Keyboard" || dv.tipo == L"keyboard") ? TipoIconaPerif::Tastiera
-                : TipoIconaPerif::Altro;
             const bool eMouse = (dv.tipo == L"Mouse" || dv.tipo == L"mouse");
             const int sogliaPieno = eMouse ? 100 : 94;
             const bool usbConnesso = (!eMouse && dv.inCarica && dv.batteria >= sogliaPieno) || (!dv.inCarica && dv.connessione == L"USB");
@@ -2252,7 +2257,8 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
             disegnaIconaTipoPerif(dc, f2d, pennello, tratto, dpi, tipoIcona,
                                   r.left + 23 * dpi, r.top + (mostraBat ? 27.0f : 31.0f) * dpi, icCol);
 
-            float limTit = r.right - 12 * dpi;
+            const float limDestra = r.right - (eTastiera ? 24.0f : 12.0f) * dpi;
+            float limTit = limDestra;
             if (mostraBat) {
                 const bool chgVis = dv.inCarica && dv.batteria < sogliaPieno;
                 wchar_t pb[24];
@@ -2293,7 +2299,11 @@ inline auto Motore::disegnaAShark(bool scuro, D2D1_COLOR_F ink) -> void {
                 riga2 += testi::t(L"Connesso", L"Connected");
             }
             pennello->SetColor(tenue);
-            scrivi(riga2, fmtSotto, {r.left + 44 * dpi, r.top + 31 * dpi, r.right - 12 * dpi, r.top + 50 * dpi});
+            scrivi(riga2, fmtSotto, {r.left + 44 * dpi, r.top + 31 * dpi, limDestra, r.top + 50 * dpi});
+            if (eTastiera) {
+                const float chevY = mostraBat ? (r.top + 41.0f * dpi) : ((r.top + r.bottom) / 2);
+                chevronDestra(r.right - 13 * dpi, chevY);
+            }
         }
         dc->PopAxisAlignedClip();
 
@@ -4249,6 +4259,37 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             chiudiPannello();
             attackshark::apriSoftware();
             break;
+        case A_ASHARK_KB: {
+            std::wstring stato;
+            if (e.indice >= 0 && e.indice < (int)aSharkStato.dispositivi.size()) {
+                const attackshark::Dispositivo& dv = aSharkStato.dispositivi[e.indice];
+                if (!dv.online) {
+                    stato = testi::t(L"Non connesso", L"Offline");
+                } else if (!dv.attivo) {
+                    if (!dv.connessione.empty()) stato = dv.connessione + L" \u00b7 ";
+                    stato += testi::t(L"In riposo", L"Asleep");
+                    if (dv.batteria >= 0) stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
+                } else if (dv.connessione == L"USB") {
+                    if (dv.inCarica && dv.batteria >= 0 && dv.batteria < 94) {
+                        stato = testi::t(L"USB - In carica", L"USB - Charging");
+                        stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
+                    } else {
+                        stato = testi::t(L"USB connesso", L"USB Connected");
+                    }
+                } else {
+                    if (dv.batteria >= 0) {
+                        stato = dv.connessione.empty() ? std::wstring(testi::t(L"Connesso", L"Connected")) : dv.connessione;
+                        stato += L" \u00b7 " + std::to_wstring(dv.batteria) + L"%";
+                    } else {
+                        if (!dv.connessione.empty()) stato = dv.connessione + L" \u00b7 ";
+                        stato += testi::t(L"Connesso", L"Connected");
+                    }
+                }
+            }
+            chiudiPannello();
+            if (apriControlloRK86) apriControlloRK86(stato);
+            break;
+        }
         case A_WPLUGIN_TOGGLE:
             for (auto& w : wplugStato.widgets) {
                 if (w.id == wplugIdAperto && w.haToggle) {
