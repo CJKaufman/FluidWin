@@ -3341,7 +3341,7 @@ private:
                   A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
                   A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
                   A_LOGI_AGGIORNA, A_LOGI_GHUB,
-                  A_ASHARK_AGGIORNA, A_ASHARK_APP, A_ASHARK_KB, A_ASHARK_MOUSE,
+                  A_ASHARK_AGGIORNA, A_ASHARK_APP, A_ASHARK_KB,
                   A_WPLUGIN_TOGGLE, A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
@@ -3934,7 +3934,6 @@ public:
     void (*impostazioni)(const RECT* da) = nullptr;
     void (*esci)() = nullptr;   // "Esci da FluidWin" (issue #16): l'uscita normale, che rimette Windows com'era
     std::function<void(const std::wstring&)> apriControlloRK86;
-    std::function<void(const std::wstring&)> apriControlloV6;
     // le impostazioni aperte dal centro di controllo si sono richiuse nel suo rettangolo: il centro ricompare li'
     void riapriControllo();
     // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
