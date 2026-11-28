@@ -311,16 +311,22 @@ public:
             }
         }
         if (ritocco) ritocco(h, visibile, vw, vh, (unsigned int*)px.data());
+        if (!creaImmagine(vw, vh, out)) return false;
+        ctx->UpdateSubresource(out.tex, 0, nullptr, px.data(), vw * 4, 0);
+        ctx->GenerateMips(out.srv);   // rimpicciolita resta morbida, senza sfarfallio
+        return true;
+    }
+
+    // Superficie per una foto che verra' riempita dal chiamante, anche direttamente dalla cattura GPU.
+    bool creaImmagine(int larghezza, int altezza, Immagine& out) {
         out.libera();
-        D3D11_TEXTURE2D_DESC td{}; td.Width = vw; td.Height = vh; td.MipLevels = 0; td.ArraySize = 1;
+        D3D11_TEXTURE2D_DESC td{}; td.Width = larghezza; td.Height = altezza; td.MipLevels = 0; td.ArraySize = 1;
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
         if (FAILED(dev->CreateTexture2D(&td, nullptr, &out.tex))) return false;
-        ctx->UpdateSubresource(out.tex, 0, nullptr, px.data(), vw * 4, 0);
         // (senza vista la foto non c'e': prima una vista nulla andava a GenerateMips e la foto risultava pronta, S5)
         if (FAILED(dev->CreateShaderResourceView(out.tex, nullptr, &out.srv)) || !out.srv) { out.libera(); return false; }
-        ctx->GenerateMips(out.srv);   // rimpicciolita resta morbida, senza sfarfallio
-        out.w = vw; out.h = vh;
+        out.w = larghezza; out.h = altezza;
         return true;
     }
 

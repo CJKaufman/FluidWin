@@ -1,3 +1,5 @@
+**English** | [Türkçe](docs/README.tr.md)
+
 # FluidWin
 
 **Windows, redesigned from scratch. By one person, for the love of it.**
@@ -12,6 +14,14 @@ exactly to how it was.
   <img src="docs/gif/genio.gif" width="560" alt="A window minimizing into the dock and coming back out">
 </p>
 
+## What's next
+
+- **1.5.0 will bring no new features.** It will be entirely about going very deep into FluidWin to fix as many bugs
+  as possible, to make it as light and fast as possible on every kind of PC, including less powerful ones, and to make
+  it rock-solid and efficient.
+- **1.6.0 will bring in the pull requests that @CJKaufman has sent**, such as the games launcher, the widgets tab and
+  the clipboard flyout, once 1.5.0 has made the ground solid.
+
 ## What it does
 
 ### The dock
@@ -22,8 +32,8 @@ where you can drag files to delete them.
 
 Rest the mouse on an app to see **live previews** of its windows, rising from behind the icon. Right-click an app for
 its **commands** (new window, recent files and so on, the same ones Windows shows), drag icons to **reorder** them,
-and hide the apps you don't want to see. The dock can sit at the **bottom, top, left or right** of the screen, and it
-has buttons to show the desktop and bring your windows back.
+and hide the apps you don't want to see. The dock can sit at the **bottom, top, left or right** of the screen (hold
+**Alt** and drag it to another edge), and it has buttons to show the desktop and bring your windows back.
 
 If you use more than one screen, bring the mouse to the edge of the other screen and the dock moves there.
 
@@ -113,13 +123,38 @@ Windows cursors come back. It also works on Windows builds where the Windows set
 ### Settings
 
 Every feature can be turned on or off from the settings, divided into simple sections. You also choose the
-language (seven of them), the shape of the corners, where the dock sits, and one of FluidWin's own wallpapers.
+language (eight of them), the shape of the corners, how the dock glass looks, and one of FluidWin's own wallpapers.
 
 <p align="center">
   <img src="docs/gif/impostazioni.gif" width="560" alt="The settings window">
 </p>
 
 ...and a lot more.
+
+## What's new in 1.4.0
+
+The dock is now one piece of glass that grows into everything else.
+
+- **New dock glass:** the dock blurs and tints what is behind it, like real glass. Blur, tint, saturation and edge
+  light can be adjusted in Settings > Dock.
+- **The control center and the launcher grow out of the dock:** press the control center icon or the Windows key and
+  the dock glass stretches into the panel, then shrinks back when you close it.
+- **Settings inside the control center:** the FluidWin tile opens the settings right in the panel, with larger text
+  and controls.
+- **Move the dock by dragging it:** hold Alt and drag the dock to the bottom, top, left or right edge of the screen.
+- **Dock on the left or right:** the control center and the settings fill the whole height of the dock, with larger
+  controls and even spacing.
+- **Open windows are shown with small lines** under each icon (one line per window, up to three), always inside the
+  glass.
+- **Brightness for laptop screens** in the control center, and an **Energy saver** button that switches it directly.
+- **Time and date in the dock** fade in and out smoothly when you turn them on or off.
+- Settings are tidier: nothing is cut off any more (languages, corners, minimize style, long descriptions), and the
+  settings icon is easier to read.
+- **Turkish:** FluidWin now speaks eight languages, with a Turkish README too (#30).
+- **Pinned apps:** apps you uninstalled no longer stay in the dock, Store apps pinned in Windows can be hidden, and
+  Windows Settings shows up with its own name and icon and can be added to the dock (#33, PR #37 by @CJKaufman).
+- **Notifications in the hidden notch** are as wide as their text, with a cleaner shape, and apps without an icon show
+  their initial instead of an empty square (#40).
 
 ## What's new in 1.3.1
 
@@ -288,7 +323,7 @@ The source code is public, so anyone can inspect how FluidWin works and judge th
 - This is still an **early version**. I tested it carefully on my PC, but not on every PC in the world. If something
   doesn't work, tell me in the [Issues](../../issues). In the settings, **General**, **Diagnostics**, **Copy** gives
   you a short report (with no personal data) to paste there.
-- The interface is in **Italian, English, Spanish, French, German, Portuguese and Arabic** (you can switch in the
+- The interface is in **Italian, English, Spanish, French, German, Portuguese, Arabic and Turkish** (you can switch in the
   settings). Translations other than Italian and English are new: if something reads oddly, tell me.
 - It doesn't ask for administrator rights, doesn't touch Windows files and doesn't inject code into other apps.
 - It only goes online for the weather and the city search ([Open-Meteo](https://open-meteo.com)), the news (the public

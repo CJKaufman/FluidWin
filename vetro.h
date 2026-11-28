@@ -72,7 +72,7 @@ class Finestra {
 public:
     HWND fin = nullptr;
     ID2D1Factory* f2d = nullptr;
-    ID2D1HwndRenderTarget* rt = nullptr;
+    ID2D1RenderTarget* rt = nullptr;
     ID2D1SolidColorBrush* pen = nullptr;
     IDWriteFactory* fdw = nullptr;
     const wchar_t* fam = L"Segoe UI Variable Text";
@@ -127,7 +127,7 @@ public:
         dpi = dpiMonitor(mon);
         if (w != W || h != H || !rt) {
             W = w; H = h;
-            if (rt) rt->Resize(D2D1::SizeU(W, H));
+            if (rt) static_cast<ID2D1HwndRenderTarget*>(rt)->Resize(D2D1::SizeU(W, H));
             else creaRt();
         }
     }
@@ -206,9 +206,11 @@ public:
 
 private:
     void creaRt() {
+        ID2D1HwndRenderTarget* finestra = nullptr;
         f2d->CreateHwndRenderTarget(D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96),
-                                    D2D1::HwndRenderTargetProperties(fin, D2D1::SizeU(std::max(1, W), std::max(1, H))), &rt);
+                                    D2D1::HwndRenderTargetProperties(fin, D2D1::SizeU(std::max(1, W), std::max(1, H))), &finestra);
+        rt = finestra;
         if (rt) {
             rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);   // sul vetro il ClearType farebbe aloni colorati
             // superficie e pennello vanno in coppia: senza pennello niente superficie (prima inizia() la dava per buona

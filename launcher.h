@@ -2259,6 +2259,8 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
             aggiornaGiochiInEsecuzione();
         }
         lChiusura = false; lDirty = true; lRipreso = true;
+        // nato dal dock: il vetro torna ad allargarsi dal punto in cui e' (stessa curva dell'apertura)
+        if (launcherDalDock) lT0 = adesso() - (1 - std::pow(1 - std::clamp(lK, 0.0, 1.0), 0.25)) * L_APRE;
         // una ricerca dei file arrivata durante la chiusura e' stata scartata: si rifa' (R20261119-195000-S3)
         if (!lModoGiochi && !query.empty() && lFileTesto != query) SetTimer(launcher, TIMER_FILE_L, 200, nullptr);
         prendiFuoco(launcher);
@@ -2295,10 +2297,18 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
     }
     rettLauncher = {x0, y0, x0 + (int)LW, y0 + (int)LH};
     aggiornaAncora(giochi);
+    // Come il centro di controllo: se il dock ha il suo vetro, e' lui ad allargarsi fino a diventare il launcher (niente
+    // vetro a parte che cresce dall'icona). Senza (vetro non disponibile) resta la crescita dall'icona App
+    launcherDalDock = vetro && !IsRectEmpty(&baseVetroCentro);
+    if (launcherDalDock) {
+        lScala = 1; lVel = 0; lAlfa = 1; lK = 0;
+        metaVetroCentro = rettLauncher;
+        scrivi("launcher: nasce dal vetro del dock");
+    }
     SetWindowRgn(launcher, nullptr, FALSE);
     SetWindowPos(launcher, HWND_TOPMOST, x0, rettLauncher.top, (int)LW, (int)(LH + LEXTRA), SWP_NOACTIVATE);
     posizionaLauncher();
-    ShowWindow(vetroLauncher, SW_SHOWNOACTIVATE);
+    if (!launcherDalDock) ShowWindow(vetroLauncher, SW_SHOWNOACTIVATE);
     ShowWindow(launcher, SW_SHOW);
     prendiFuoco(launcher);
     lDirty = true; dirty = true;
@@ -2308,6 +2318,7 @@ inline auto Motore::apriLauncher(bool giochi) -> void {
 inline auto Motore::chiudiLauncher() -> void {
     if (!lAperto || lChiusura) return;
     lChiusura = true; lDirty = true;
+    lK0 = lK; lTC = adesso();   // (nato dal dock: il vetro rientra da dove e' arrivato)
     if (lRegione) { SetWindowRgn(launcher, nullptr, FALSE); lRegione = false; }   // per rientrare nell'icona serve tutta la finestra
 }
 
@@ -2320,11 +2331,31 @@ inline auto Motore::nascondiLauncher() -> void {
     if (vetroLauncher) ShowWindow(vetroLauncher, SW_HIDE);
     if (lAperto) lChiusoT = adesso();
     lAperto = false; lChiusura = false; lAnim = false; lDirty = false;
+    if (launcherDalDock) {   // il vetro del dock torna solo suo
+        launcherDalDock = false; lK = 0; aperturaVetroCentro = 0;
+        if (visualL) visualL->SetClip(static_cast<IDCompositionClip*>(nullptr));
+        applicaVetroCentro();
+    }
     dirty = true;   // il dock puo' tornare a nascondersi
 }
 
 // il contenuto (DirectComposition) e il vetro crescono attorno all'icona "App"
 inline auto Motore::posizionaLauncher() -> void {
+    if (launcherDalDock) {
+        // il vetro del dock si allarga verso il launcher; il contenuto resta a grandezza naturale, ritagliato al vetro
+        // che lo sta raggiungendo, e compare nell'ultimo tratto (come il centro di controllo, posizionaPannello)
+        aperturaVetroCentro = lK;
+        metaVetroCentro = rettLauncher;
+        applicaVetroCentro();
+        const float u = float(std::clamp((lK - 0.64) / 0.36, 0.0, 1.0));
+        visualL->SetTransform(D2D1::Matrix3x2F::Identity());
+        effettoL->SetOpacity(u * u * (3 - 2 * u));
+        const RECT& r = rettLauncher;
+        visualL->SetClip(D2D1::RectF(float(std::max(0L, rettVetro.left - r.left)), float(std::max(0L, rettVetro.top - r.top)),
+                                     float(std::max(0L, rettVetro.right - r.left)), float(std::max(0L, rettVetro.bottom - r.top))));
+        dcomp->Commit();
+        return;
+    }
     const double s = lScala;
     const float ax = (float)ancora.x, ay = (float)ancora.y;
     visualL->SetTransform(D2D1::Matrix3x2F::Scale((float)s, (float)s, {ax, ay}));
@@ -4939,13 +4970,28 @@ inline auto Motore::disegnaIconaGiochi(const D2D1_RECT_F& r, float alfa, bool sc
 inline auto Motore::renderLauncher() -> bool {
     // scala con una molla: apre con un piccolo rimbalzo (gelatina), rientra nell'icona rapida e senza
     // in chiusura lo stesso movimento all'indietro: rientra nell'icona con la molla e sfuma solo nell'ultimo tratto
-    bool anim = molla(lScala, lVel, lChiusura ? 0.0 : 1.0, 240, lChiusura ? 0.8 : 0.55, 0.0005);
-    if (lChiusura) {
-        lAlfa = std::clamp((lScala - 0.10) / 0.30, 0.0, 1.0);
-        if (lAlfa <= 0.02 || !anim) { nascondiLauncher(); return false; }
+    bool anim;
+    if (launcherDalDock) {
+        // nato dal dock: il vetro si allarga con la curva del centro di controllo (senza rimbalzo oltre 1, il contenuto
+        // uscirebbe dal vetro) e in chiusura rientra nel dock; il contenuto e' gia' sparito a meta' strada
+        if (lChiusura) {
+            const double x = std::clamp((adesso() - lTC) / L_CHIUDE, 0.0, 1.0);
+            lK = lK0 * (1 - x * x);
+            if (x >= 1) { nascondiLauncher(); return false; }
+        } else {
+            const double x = std::clamp((adesso() - lT0) / L_APRE, 0.0, 1.0);
+            lK = 1 - std::pow(1 - x, 4);
+        }
+        anim = lChiusura || lK < 1;
     } else {
-        lAlfa = verso(lAlfa, 1.0, 0.045);
-        if (lAlfa != 1.0) anim = true;
+        anim = molla(lScala, lVel, lChiusura ? 0.0 : 1.0, 240, lChiusura ? 0.8 : 0.55, 0.0005);
+        if (lChiusura) {
+            lAlfa = std::clamp((lScala - 0.10) / 0.30, 0.0, 1.0);
+            if (lAlfa <= 0.02 || !anim) { nascondiLauncher(); return false; }
+        } else {
+            lAlfa = verso(lAlfa, 1.0, 0.045);
+            if (lAlfa != 1.0) anim = true;
+        }
     }
     posizionaLauncher();
     if (!lChiusura && !anim && !lRegione) {
@@ -4979,7 +5025,7 @@ inline auto Motore::renderLauncher() -> bool {
     dc->SetTarget(bersaglioL);
     dc->BeginDraw();
     dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-    disegnaFondo({0.5f, 0.5f, LW - 0.5f, LH - 0.5f}, scuro);
+    if (!launcherDalDock) disegnaFondo({0.5f, 0.5f, LW - 0.5f, LH - 0.5f}, scuro);   // (nato dal dock il fondo e' il vetro del dock)
 
     // pulsante di accensione (sospendi, riavvia, arresta, blocca, disconnetti) a destra della ricerca
     {

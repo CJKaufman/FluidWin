@@ -154,6 +154,8 @@ struct Anim {
     RECT       attuale{};
     // effetto genio: al posto della miniatura si disegna la foto della finestra deformata dalla GPU
     bool       genio = false;
+    std::shared_ptr<viva::Cattura> catturaGenio;
+    bool       fotoGenioAggiornata = false;
     int        fotogrammiGenio = 0;  // la miniatura resta sotto i primi fotogrammi del genio, finche' e' sicuramente a schermo
     double     pGenio = 0;           // punto raggiunto dal genio (0 finestra, 1 icona): un nuovo clic lo inverte da qui
     bool       sobbalzo = false;     // caduta nel dock: il riquadro ha gia' toccato le icone (sobbalzo dato, una volta)
@@ -433,7 +435,10 @@ static bool finestraApp(HWND h) {
     const LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE), ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
     if (st & WS_CHILD) return false;
     if (ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE)) return false;
-    if ((st & WS_CAPTION) != WS_CAPTION) return false;
+    // Una cornice personalizzata puo' perdere WS_CAPTION quando la finestra si ingrandisce.
+    // I bordi ridimensionabili e i comandi di riduzione e ingrandimento la distinguono da un popup a tutto schermo.
+    constexpr LONG_PTR corniceIngrandita = WS_MAXIMIZE | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+    if ((st & WS_CAPTION) != WS_CAPTION && (st & corniceIngrandita) != corniceIngrandita) return false;
     if (GetWindow(h, GW_OWNER) && !(ex & WS_EX_APPWINDOW)) return false;
     wchar_t c[64]; GetClassNameW(h, c, 64);
     static const wchar_t* escluse[] = {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd", L"Progman", L"WorkerW",
@@ -1220,16 +1225,18 @@ static double tempoProssimoFotogramma() {
     return ora();
 }
 
-static Anim* nuovaAnim(HWND h, Tipo tipo, const RECT& da, const RECT& a, const InfoFinestra& info, BYTE opacita) {
+static Anim* nuovaAnim(HWND h, Tipo tipo, const RECT& da, const RECT& a, const InfoFinestra& info, BYTE opacita, bool miniatura = true) {
     Anim n;
     n.hwnd = h; n.tipo = tipo; n.da = da; n.a = a; n.attuale = da;
     n.t0 = n.tFase = tempoProssimoFotogramma();
     n.ampiezza = (double)distanzaMassima(da, a);
     n.molla = tipo == Tipo::Ripristina ? MOLLA_RIPRISTINA : MOLLA_RIDUCI;
     n.sorgente = sorgenteDa(info);
-    if (FAILED(DwmRegisterThumbnail(gOverlay, h, &n.thumb))) { logf("miniatura non registrata %p", h); return nullptr; }
-    impostaMiniatura(n, da, opacita);
-    mostraOverlay(true);
+    if (miniatura) {
+        if (FAILED(DwmRegisterThumbnail(gOverlay, h, &n.thumb))) { logf("miniatura non registrata %p", h); return nullptr; }
+        impostaMiniatura(n, da, opacita);
+        mostraOverlay(true);
+    }
     gAnim.push_back(n);
     logf("anim %d su %p da %ld,%ld-%ld,%ld a %ld,%ld-%ld,%ld", (int)tipo, h, da.left, da.top, da.right, da.bottom,
          a.left, a.top, a.right, a.bottom);
@@ -1916,6 +1923,45 @@ static const UINT WM_NATA_NASCOSTA = WM_APP + 12;   // wParam finestra, lParam 1
 struct Attesa { double t; bool pronta = false; bool annulla = false; genio::Immagine copertura{}; RECT rc{}; };
 static std::unordered_map<HWND, Attesa> gInAttesa;
 
+// Moonlight usa una finestra Qt Quick: rendendola layered durante la creazione il suo thread UI puo' restare
+// occupato anche dopo aver ripristinato lo stile. La crescita usa invece due immagini nell'overlay di FluidWin.
+struct SfondoApertura {
+    double t = ora();
+    RECT monitor{};
+    genio::Immagine foto;
+    ~SfondoApertura() { foto.libera(); }
+};
+struct AperturaComposta {
+    double apparsa = -1, inizio = -1;
+    RECT finestra{};
+    std::shared_ptr<SfondoApertura> sfondo;
+    std::shared_ptr<viva::Cattura> cattura;
+    genio::Immagine foto;
+    genio::Vertice ritaglio[4]{};
+    ~AperturaComposta() { foto.libera(); }
+};
+static std::unordered_map<HWND, AperturaComposta> gApertureComposte;
+static std::weak_ptr<SfondoApertura> gSfondoApertura;
+
+static bool apertureComposteAttive() {
+    return std::any_of(gApertureComposte.begin(), gApertureComposte.end(), [](const auto& p) { return p.second.apparsa >= 0; });
+}
+
+static void segnaAperturaComposta(HWND h) {
+    auto it = gApertureComposte.find(h);
+    if (it == gApertureComposte.end() || it->second.apparsa >= 0) return;
+    const double t = ora();
+    if (t - it->second.sfondo->t > 3.0) { gApertureComposte.erase(it); return; }
+    it->second.apparsa = t;
+    logf("apertura composta %p: finestra mostrata", h);
+}
+
+static bool aperturaComposta(HWND h) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(h, &pid);
+    return pid && nomeProcesso(pid) == L"moonlight.exe";
+}
+
 // foto dello schermo in r (quello che c'e' dietro una finestra che sta per comparire)
 static bool fotoSchermo(const RECT& r, genio::Immagine& out) {
     const int w = r.right - r.left, hh = r.bottom - r.top;
@@ -1940,6 +1986,85 @@ static bool fotoSchermo(const RECT& r, genio::Immagine& out) {
     if (mem) DeleteDC(mem);
     ReleaseDC(nullptr, scr);
     return ok;
+}
+
+static void preparaAperturaComposta(HWND h) {
+    if (gApertureComposte.count(h)) return;
+    if (IsWindowVisible(h)) { logf("apertura composta %p: gia' visibile alla creazione", h); return; }
+    MONITORINFO monitor{}; monitor.cbSize = sizeof(monitor);
+    if (!GetMonitorInfoW(MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST), &monitor)) return;
+    auto sfondo = gSfondoApertura.lock();
+    if (!sfondo || ora() - sfondo->t > 0.5 || !EqualRect(&sfondo->monitor, &monitor.rcMonitor)) {
+        sfondo = std::make_shared<SfondoApertura>();
+        sfondo->monitor = monitor.rcMonitor;
+        if (!fotoSchermo(sfondo->monitor, sfondo->foto)) return;
+        gSfondoApertura = sfondo;
+    }
+    gApertureComposte.try_emplace(h).first->second.sfondo = std::move(sfondo);
+    logf("apertura composta %p: sfondo pronto", h);
+}
+
+static genio::Elemento elementoCrescita(const genio::Immagine& foto, HWND h, const RECT& area, double x) {
+    const double scala = SCALA_CRESCITA + (1.0 - SCALA_CRESCITA) * (1.0 - std::exp(-7.0 * x) * std::cos(5.4 * x));
+    const double cx = (area.left + area.right) / 2.0, cy = (area.top + area.bottom) / 2.0;
+    const double w = (area.right - area.left) * scala / 2.0, altezza = (area.bottom - area.top) * scala / 2.0;
+    const RECT r = x >= 1.0 ? area : RECT{(LONG)std::lround(cx - w), (LONG)std::lround(cy - altezza), (LONG)std::lround(cx + w), (LONG)std::lround(cy + altezza)};
+    genio::Elemento e{&foto, r, r, 0.0, morbido(x / 0.4)};
+    e.raggio = raggioDi(h) * scala;
+    return e;
+}
+
+static void passoApertureComposte(double t, std::vector<genio::Elemento>& elementi) {
+    for (auto it = gApertureComposte.begin(); it != gApertureComposte.end();) {
+        const HWND h = it->first;
+        auto& a = it->second;
+        if (a.apparsa < 0) { ++it; continue; }
+        InfoFinestra i;
+        RECT area{};
+        const RECT& monitor = a.sfondo->monitor;
+        if (!impostazioni::valori().apertura || !IsWindow(h)) {
+            it = gApertureComposte.erase(it); continue;
+        }
+        // Si anima la parte sul monitor: una finestra puo' sporgere di qualche pixel al primo avvio.
+        const bool pronta = IsWindowVisible(h) && leggiRettangoli(h, i) && IntersectRect(&area, &i.visibile, &monitor);
+        if (a.inizio < 0) {
+            if (t - a.apparsa > 0.75 || (a.cattura && a.cattura->statoAvvio() < 0)) {
+                logf("apertura composta %p: foto non pronta", h); it = gApertureComposte.erase(it); continue;
+            }
+            if (!pronta || GetForegroundWindow() != h) { ++it; continue; }
+            if (!a.cattura) {
+                a.cattura = std::make_shared<viva::Cattura>();
+                viva::avviaInSottofondo(a.cattura, gGenio.dispositivo(), h);
+            }
+            if (!a.cattura->attiva()) { ++it; continue; }
+            const RECT sorgente{area.left - i.visibile.left, area.top - i.visibile.top, area.right - i.visibile.left, area.bottom - i.visibile.top};
+            if (sorgente.right > a.cattura->larghezza() || sorgente.bottom > a.cattura->altezza()) { ++it; continue; }
+            const int w = area.right - area.left, altezzaFoto = area.bottom - area.top;
+            if ((!a.foto.tex || a.foto.w != w || a.foto.h != altezzaFoto) && !gGenio.creaImmagine(w, altezzaFoto, a.foto)) { ++it; continue; }
+            int larghezza = 0, altezza = 0;
+            if (!a.cattura->copia(gGenio.contesto(), a.foto.tex, 0, 0, sorgente, &larghezza, &altezza) || sorgente.right > larghezza || sorgente.bottom > altezza) { ++it; continue; }
+            gGenio.rifaiMips(a.foto);
+            a.cattura.reset();
+            a.finestra = area;
+            a.inizio = t;
+            const float u0 = (float)(area.left - monitor.left) / a.sfondo->foto.w, u1 = (float)(area.right - monitor.left) / a.sfondo->foto.w;
+            const float v0 = (float)(area.top - monitor.top) / a.sfondo->foto.h, v1 = (float)(area.bottom - monitor.top) / a.sfondo->foto.h;
+            a.ritaglio[0] = {(float)area.left, (float)area.top, u0, v0};
+            a.ritaglio[1] = {(float)area.right, (float)area.top, u1, v0};
+            a.ritaglio[2] = {(float)area.left, (float)area.bottom, u0, v1};
+            a.ritaglio[3] = {(float)area.right, (float)area.bottom, u1, v1};
+            logf("apertura composta %p: animazione avviata", h);
+        }
+        const double x = (t - a.inizio) / DURATA_CRESCITA;
+        if (x >= 1.0 || !pronta || GetForegroundWindow() != h || !EqualRect(&area, &a.finestra)) {
+            it = gApertureComposte.erase(it); continue;
+        }
+        genio::Elemento sfondo{&a.sfondo->foto, area, area, 0.0, 1.0};
+        sfondo.maglia = a.ritaglio; sfondo.colonne = sfondo.righe = 2; sfondo.raggio = 0;
+        elementi.push_back(sfondo);
+        elementi.push_back(elementoCrescita(a.foto, h, area, x));
+        ++it;
+    }
 }
 
 // coperture da disegnare adesso: thread ancora in corso, finestra gia' visibile e ancora dove era alla creazione
@@ -1995,6 +2120,7 @@ static DWORD WINAPI nascondiNata(LPVOID p) {
 static void suCreata(HWND h) {
     if (gPausa || !gGenioOk || !gMovimento || !impostazioni::valori().apertura || !finestraApp(h)) return;
     if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) return;   // scheda staccata trascinando (browser): niente animazione
+    if (aperturaComposta(h)) { preparaAperturaComposta(h); return; }
     // (layered di suo: alla creazione non si tocca, ci si pensa alla comparsa)
     if (gInAttesa.count(h) || GetPropW(h, PROP_NASCOSTA) || (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) return;
     spegniTransizioniNative(h);
@@ -2057,9 +2183,11 @@ static void lasciaVedere(HWND h) {
 static void svuotaAperture() {
     for (auto& a : gAperture) { stampa::abbandona(a.lavoro); lasciaVedere(a.hwnd); }
     gAperture.clear();
+    gApertureComposte.clear();
 }
 
 static void suNuovaFinestra(HWND h) {
+    segnaAperturaComposta(h);
     const bool inAttesa = gInAttesa.count(h) > 0, inCorso = inCorsoDiNascondere(h);
     if (inAttesa && !inCorso) gInAttesa.erase(h);
     // senza animazione una finestra resa trasparente alla creazione torna subito com'era
@@ -2069,6 +2197,10 @@ static void suNuovaFinestra(HWND h) {
     };
     const auto& imp = impostazioni::valori();
     if (gPausa || !gGenioOk || !gMovimento || GetAncestor(h, GA_ROOT) != h || !finestraApp(h) || IsIconic(h)) return rinuncia();
+    if (aperturaComposta(h)) {
+        if (!gApertureComposte.count(h)) logf("apertura composta %p: comparsa senza sfondo", h);
+        return;
+    }
     if (animDi(h) || gelatinaDi(h) || aperturaDi(h) || (!inAttesa && GetPropW(h, PROP_NASCOSTA))) return;
     BOOL velata = FALSE; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &velata, sizeof(velata));
     if (velata) {
@@ -2493,6 +2625,28 @@ static void elementoRiduzione(Anim& a, const genio::Immagine* img, double p, dou
     aggiungi(a.magliaC, img, l, t, r, b, contenuto, rs);
 }
 
+// La cattura composita non chiede a Chromium (o ad altre app) di ridisegnare con PrintWindow.
+static bool copiaFotoDelGenio(viva::Cattura& cattura, HWND h, const RECT& visibile, genio::Immagine& foto) {
+    if (!cattura.attiva()) return false;
+    const int w = visibile.right - visibile.left, hh = visibile.bottom - visibile.top;
+    if (w <= 0 || hh <= 0) return false;
+    RECT src{0, 0, w, hh};
+    if (cattura.larghezza() != w || cattura.altezza() != hh) {
+        RECT wr{};
+        if (!GetWindowRect(h, &wr) || cattura.larghezza() != wr.right - wr.left || cattura.altezza() != wr.bottom - wr.top) return false;
+        src = {visibile.left - wr.left, visibile.top - wr.top, visibile.right - wr.left, visibile.bottom - wr.top};
+        if (src.left < 0 || src.top < 0 || src.right > cattura.larghezza() || src.bottom > cattura.altezza()) return false;
+    }
+    genio::Immagine nuova;
+    const bool cambiaMisura = !foto.tex || foto.w != w || foto.h != hh;
+    auto& destinazione = cambiaMisura ? nuova : foto;
+    if (cambiaMisura && !gGenio.creaImmagine(w, hh, nuova)) return false;
+    if (!cattura.copia(gGenio.contesto(), destinazione.tex, 0, 0, src, nullptr, nullptr, true)) { nuova.libera(); return false; }
+    gGenio.rifaiMips(destinazione);
+    if (cambiaMisura) { foto.libera(); foto = nuova; }
+    return true;
+}
+
 static void passo(double t) {
     std::vector<genio::Elemento> elementi;
     elementiCoperture(elementi);   // sotto a tutto il resto: sono solo lo sfondo dietro finestre appena nate
@@ -2537,40 +2691,22 @@ static void passo(double t) {
                 // aperta fuori dal dock: la foto cresce dal centro della finestra fino alla sua misura, apparendo
                 // molla: parte veloce, supera di poco la misura (~3%) e ci torna, senza altre oscillazioni visibili
                 const double x = std::clamp((t - a.t0) / DURATA_CRESCITA, 0.0, 1.0);
-                const double s = SCALA_CRESCITA + (1.0 - SCALA_CRESCITA) * (1.0 - std::exp(-7.0 * x) * std::cos(5.4 * x));
-                const double cx = (a.da.left + a.da.right) / 2.0, cy = (a.da.top + a.da.bottom) / 2.0;
-                const double mw = (a.da.right - a.da.left) * s / 2.0, mh = (a.da.bottom - a.da.top) * s / 2.0;
-                const RECT r = x >= 1.0 ? a.da : RECT{(LONG)std::lround(cx - mw), (LONG)std::lround(cy - mh), (LONG)std::lround(cx + mw), (LONG)std::lround(cy + mh)};
-                genio::Elemento el{&foto->second, r, r, 0.0, morbido(x / 0.4)};
-                el.raggio = raggioDi(a.hwnd) * s;
-                elementi.push_back(el);
-                if (gLog && ++a.fotogrammiGenio <= 4) logf("crescita: fotogramma per t=%.3f scala=%.2f", t, s);
+                elementi.push_back(elementoCrescita(foto->second, a.hwnd, a.da, x));
+                if (gLog && ++a.fotogrammiGenio <= 4) logf("crescita: fotogramma per t=%.3f", t);
                 if (x >= 1.0) { a.fase = 1; a.tFase = t; }
             } else if (a.fase == 0) {
-                // La foto del genio e' quella fatta alla riduzione (anche minuti prima): appena la finestra e' ripristinata
-                // (ancora trasparente) se ne fa una nuova in sottofondo e la si mette al suo posto a meta' volo. Cosi'
-                // all'arrivo il contenuto e' quello di adesso e la finestra vera prende il posto della foto senza salti
-                // (una foto nuova ogni ~80 ms finche' vola: il contenuto si muove anche durante il volo)
-                if (!a.rilettura && a.riletture < 6 && t - a.t0 > 0.04 + 0.08 * a.riletture && x0Genio(a, t) < 0.9 && !IsIconic(a.hwnd)) {
-                    RECT wr; if (GetWindowRect(a.hwnd, &wr)) { a.riletture++; a.wrRilettura = wr; a.rilettura = stampa::avvia(a.hwnd, wr.right - wr.left, wr.bottom - wr.top); }
-                } else if (a.rilettura && stampa::pronta(a.rilettura)) {
-                    std::vector<UINT> px; RECT wr{}; GetWindowRect(a.hwnd, &wr);
-                    const bool presa = stampa::prendi(a.rilettura, px) && EqualRect(&wr, &a.wrRilettura);
-                    a.rilettura = nullptr;
-                    InfoFinestra* fi = presa ? traccia(a.hwnd) : nullptr;
-                    genio::Immagine nuova;
-                    if (fi && fi->valida && gGenio.carica(a.hwnd, fi->visibile, wr, px.data(), nuova)) {
-                        foto->second.libera(); foto->second = nuova;
-                        if (gLog && a.riletture == 1) logf("genio ripristino: foto rifatta a %.0f ms", (t - a.t0) * 1000);
-                    }
+                // Si parte dalla foto della riduzione e si aggiorna durante il volo quando DWM consegna una copia.
+                if (a.catturaGenio && copiaFotoDelGenio(*a.catturaGenio, a.hwnd, a.da, foto->second)) {
+                    if (!a.fotoGenioAggiornata) logf("ripristino genio %p: foto aggiornata da cattura diretta", a.hwnd);
+                    a.fotoGenioAggiornata = true;
                 }
                 // al ripristino parte subito veloce e frena all'arrivo: cosi' risponde al clic senza attese
-                const double x = std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0);
+                const double x = x0Genio(a, t);
                 const double p = curvaRipristino(x);
                 a.pGenio = p;
                 elementoRiduzione(a, &foto->second, p, 1.0 - morbido((p - 0.92) / 0.08), elementi);
                 if (gLog && ++a.fotogrammiGenio <= 6) logf("genio ripristino: fotogramma per t=%.3f p=%.3f", t, p);
-                if (x >= 1.0) { a.fase = 1; a.tFase = t; }
+                if (x >= 1.0) { a.catturaGenio.reset(); a.fase = 1; a.tFase = t; }
             } else if (a.fase == 1 || a.fase == 2) {
                 // la finestra vera, con la sua ombra, ricompare sotto la foto in 150 ms (ombra morbida, non uno scatto);
                 // solo quando e' opaca la foto sfuma (in 120 ms). Prima la foto cominciava a sfumare a meta' rampa: per
@@ -2763,6 +2899,7 @@ static void passo(double t) {
     }
     passoGelatine(t, elementi);
     passoAperture(t);
+    passoApertureComposte(t, elementi);
     passoChiusure(t, elementi);
     bool miniature = false;
     for (auto& a : gAnim) if (a.thumb && !a.vetrina) miniature = true;   // quelle con la finestrella sua non usano l'overlay
@@ -2777,7 +2914,7 @@ static void passo(double t) {
         // finite le animazioni l'overlay va sempre svuotato e nascosto, anche se in questo passo ha appena disegnato
         // (anche le coperture delle finestre nuove ancora da rendere trasparenti tengono l'overlay: prima venivano
         // svuotate nello stesso fotogramma in cui erano disegnate, R20261121-001054-S16)
-        if (gGenio.visibile && ((gAnim.empty() && gGelatine.empty() && !chiusureAttive() && !copertureAttive()) || (elementi.empty() && !serveGenio))) { gGenio.svuota(); gGenio.mostra(false); }
+        if (gGenio.visibile && ((gAnim.empty() && gGelatine.empty() && !chiusureAttive() && !copertureAttive() && !apertureComposteAttive()) || (elementi.empty() && !serveGenio))) { gGenio.svuota(); gGenio.mostra(false); }
     }
 }
 
@@ -2852,8 +2989,20 @@ static bool preparaCopia(HWND h, InfoFinestra& i) {
         gGenio.fotoDaSchermo = false;
         if (gGenioOk && iconaBarra(h, ic) && !gGenio.cattura(h, i.visibile, gFoto[h], true)) liberaFoto(h);
     }
-    if (!nuovaAnim(h, Tipo::Pronta, i.visibile, i.visibile, i, 255)) { liberaFoto(h); return false; }
-    if (Anim* a = animDi(h)) GetWindowRect(h, &a->fin);
+    const bool conFoto = gFoto.count(h) != 0;
+    Anim* a = nuovaAnim(h, Tipo::Pronta, i.visibile, i.visibile, i, 255, !conFoto);
+    if (!a) { liberaFoto(h); return false; }
+    GetWindowRect(h, &a->fin);
+    if (conFoto) {
+        // Presenta la stessa foto che andra' verso il dock prima che WS_EX_LAYERED cambi la superficie reale.
+        // Una miniatura viva poteva perdere la superficie nello stesso fotogramma in cui la finestra cambiava stile.
+        a->genio = true;
+        passo(tempoProssimoFotogramma());
+        if (!gGenio.visibile || gGenio.perso || FAILED(DwmFlush()) || !animDi(h)) {
+            annullaAnimDi(h); liberaFoto(h); return false;
+        }
+        logf("pronta %p: foto composta prima della trasparenza", h);
+    }
     spegniTransizioniNative(h);     // la riduzione sara' istantanea, sotto la copia gia' pronta
     if (!rendiLayered(h, 255)) { annullaAnimDi(h); riaccendiTransizioniNative(h); liberaFoto(h); return false; }
     logf("pronta %p genio=%d schermo=%d", h, (int)gFoto.count(h), (int)gGenio.fotoDaSchermo);
@@ -2866,6 +3015,7 @@ static bool invertiRipristino(HWND h) {
     Anim* a = animDi(h);
     // (una finestra che sta crescendo non ha un'icona da cui e' uscita: si riduce come vuole Windows)
     if (!a || a->tipo != Tipo::Ripristina || !a->genio || a->cresce || !gFoto.count(h)) return false;
+    a->catturaGenio.reset();
     a->tipo = Tipo::Pronta; a->fase = 0; a->t0 = a->tFase = ora();
     alfaFinestra(h, 0);
     logf("ripristino invertito %p a p=%.2f", h, a->pGenio);
@@ -3347,6 +3497,8 @@ static void suRipristina(HWND h) {
         n.hwnd = h; n.tipo = Tipo::Ripristina; n.genio = true;
         n.da = i->visibile; n.a = ic; n.pGenio = pDa;
         n.t0 = n.tFase = tempoProssimoFotogramma() - inversaRipristino(pDa) * DURATA_GENIO_RIPRISTINA;
+        n.catturaGenio = std::make_shared<viva::Cattura>();
+        viva::avviaInSottofondo(n.catturaGenio, gGenio.dispositivo(), h);
         gAnim.push_back(n);
         alfaFinestra(h, ALFA_INVISIBILE);   // (ridotta era ad alfa 0: ora e' al suo posto, deve ricevere i clic)
         logf("ripristino genio %p da p=%.2f", h, pDa);
@@ -3466,7 +3618,7 @@ static void CALLBACK suEvento(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG fi
     // gli eventi vengono gestiti dentro GetMessage, che pero' non ritorna finche' non arriva un messaggio vero:
     // se e' partita un'animazione, svegliamo subito il ciclo principale (altrimenti aspetterebbe il timer)
     // (anche con l'overlay ancora a schermo: un'animazione annullata qui lo lascia da svuotare)
-    if (!gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || chiusureAttive() || copertureAttive() || (gGenioOk && gGenio.visibile)) PostMessageW(gMessaggi, WM_NULL, 0, 0);
+    if (!gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || apertureComposteAttive() || chiusureAttive() || copertureAttive() || (gGenioOk && gGenio.visibile)) PostMessageW(gMessaggi, WM_NULL, 0, 0);
     if (gLog && ora() - t > 0.010) logf("evento lento 0x%lx su %p: %.1f ms", ev, h, (ora() - t) * 1000);
 }
 
@@ -3501,6 +3653,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
             [[fallthrough]];
         }
         case EVENT_SYSTEM_FOREGROUND:
+            segnaAperturaComposta(h);
             traccia(h);
             aggiornaFgZoom();
             if (gDockOk && GetAncestor(h, GA_ROOT) == h) { gDock.segnaCambiamento(); gDock.controllaFinestre(); }
@@ -3517,6 +3670,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
             break;
         case EVENT_OBJECT_DESTROY:
             avviaChiusura(h);
+            gApertureComposte.erase(h);
             annullaAnimDi(h); gInfo.erase(h); gNascoste.erase(h); gDaAdottare.erase(h); liberaFoto(h); gUltimoPosto.erase(h); gNateVelate.erase(h);
             if (auto at = gInAttesa.find(h); at != gInAttesa.end()) { at->second.copertura.libera(); gInAttesa.erase(at); }
             if (h == gTrascinoApp) gTrascinoApp = nullptr;
@@ -3593,7 +3747,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
                 if (a->comando == COMANDO_POSIZIONA && a->comandoDato && a->attesa == 3) { avviaZoom(h, it->second); break; }
                 logf("ingrandimento preparato annullato %p (mossa senza ingrandirsi)", h); annullaAnimDi(h); break;
             }
-            if (a && a->tipo == Tipo::Pronta && a->fase < 2 && !a->genio && !EqualRect(&wr, &a->fin)) annullaPronta(*a, ora());
+            if (a && a->tipo == Tipo::Pronta && a->fase < 2 && (!a->genio || a->pGenio == 0.0) && !EqualRect(&wr, &a->fin)) annullaPronta(*a, ora());
             break;
         }
     }
@@ -4115,6 +4269,8 @@ static std::wstring diagnostica() {
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.winV, v.angolo, v.menuDestro, v.notch, v.oraDock);
     riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, ai %d, logi %d, logiAnim %d, aShark %d, aSharkAnim %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra), giochi %d, modalita' gioco %d", v.dockAuto, v.dockOpacita, v.dockSpazio,
          v.dockIcone, v.dockDistanza, (unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockAI, v.dockLogi, v.logiAnimCarica, v.dockAShark, v.aSharkAnimCarica, v.dockLato, v.dockGiochi, v.dockGioco);
+    riga(L"Materiale dock: %ls, sfocatura %d px, saturazione %d%%, luce bordo %d%%",
+         gDock.filtraSfondoDock() ? L"composizione" : L"acrilico di sistema", v.dockSfocatura, v.dockSaturazione, v.dockBordo);
     // icone fissate del dock (solo conteggi, niente nomi di app): per le segnalazioni di icone doppie, vuote o mancanti
     if (gDockOk) { const auto& f = gDock.diagFissate;
         riga(L"Dock, app fissate: lista di Windows %ls, collegamenti %d, app di pacchetto %d, Squirrel di versioni cancellate %d, senza destinazione %d, file dell'icona mancante %d, doppie %d, scartate %d",
@@ -4152,6 +4308,14 @@ static void apriImpostazioni(bool dalMouse = false) {
 
 // applica le impostazioni (all'avvio e a ogni cambio dalla finestra)
 static bool gRtlAvvio = false;   // lingua da destra a sinistra all'avvio (vedi applicaImpostazioni)
+static void applicaCursoriDock() {
+    if (!gDockOk) return;
+    const auto& v = impostazioni::valori();
+    gDock.impostaMateriale(v.dockSfocatura, v.dockOpacita, v.dockSaturazione, v.dockBordo);
+    gDock.impostaLatoIcone(v.dockIcone);
+    gDock.impostaDistanzaIcone(v.dockDistanza);
+}
+
 static void applicaImpostazioni() {
     const impostazioni::Valori& v = impostazioni::valori();
     gTastiVolume = v.volume && gOsdOk;
@@ -4169,10 +4333,10 @@ static void applicaImpostazioni() {
         if (gDockOk) gDock.impostaAngoli();
         logf("angoli: %s", v.angoli == 0 ? "arrotondati" : v.angoli == 1 ? "poco arrotondati" : "squadrati");
     }
-    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime);
+    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime);
                    gDock.impostaGiochi(v.dockGiochi); gDock.impostaAI(v.dockAI); gDock.impostaAINascondiCLI(v.aiNascondiCLI); gDock.impostaLogi(v.dockLogi); gDock.impostaLogiAnimCarica(v.logiAnimCarica); gDock.impostaLogiGlowColore(v.logiGlowColore);
                    gDock.impostaAShark(v.dockAShark); gDock.impostaASharkAnimCarica(v.aSharkAnimCarica); gDock.impostaASharkGlowColore(v.aSharkGlowColore);
-                   gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore);
+                   applicaCursoriDock(); gDock.impostaColore(v.dockColore);
                    const StatoSchermo stato = statoSchermoAttuale();
                    gLauncherTasto = stato == StatoSchermo::Normale;
                    gDock.schermoIntero((int)stato); gDock.controllaFinestre(); }
@@ -4507,6 +4671,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 }
             }
             controllaPrimoPiano();
+            std::erase_if(gApertureComposte, [](const auto& p) { return p.second.apparsa < 0 && ora() - p.second.sfondo->t > 3.0; });
             if (gDockOk) {
                 rinascondiBarreWindows();
                 const StatoSchermo stato = statoSchermoAttuale();
@@ -4743,13 +4908,13 @@ static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); return EXCE
 // fotogrammi): serve un altro passo, che lo svuota e lo nasconde. Prima restava l'ultima foto ferma nell'overlay
 // fino all'animazione successiva (R20261114-011820-S7)
 static bool overlayDaSvuotare() { return gGenioOk && gGenio.visibile; }
-static bool daDisegnare() { return !gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || chiusureAttive() || copertureAttive() || overlayDaSvuotare() || (gDockOk && gDock.serveFotogramma()); }
+static bool daDisegnare() { return !gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || apertureComposteAttive() || chiusureAttive() || copertureAttive() || overlayDaSvuotare() || (gDockOk && gDock.serveFotogramma()); }
 
 static void unFotogramma() {
     gBattito = GetTickCount64();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     const double t = tempoProssimoFotogramma();
-    if (!gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || chiusureAttive() || copertureAttive() || overlayDaSvuotare()) passo(t);
+    if (!gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || apertureComposteAttive() || chiusureAttive() || copertureAttive() || overlayDaSvuotare()) passo(t);
     // il ritmo lo da' una sola attesa del vblank per fotogramma: il genio se e' a schermo, altrimenti il dock,
     // altrimenti DwmFlush
     bool atteso = gGenio.visibile && !gGenio.perso;
@@ -4857,6 +5022,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.barraSalvata = salvaStatoBarra();   // prima che il dock nasconda la barra di Windows
     if (!gDock.barraSalvata) logf("stato della barra di Windows non salvato: resta com'e' (niente scomparsa)");
     gDock.riduci = riduciDalDock;
+    gDock.salvaLato = [](int lato) {
+        impostazioni::valori().dockLato = lato;
+        impostazioni::scriviDword(L"DockLato", (DWORD)lato);
+    };
     gDock.preparaChiusura = preparaChiusura;
     gDock.registro = [](const char* s) { logf("dock: %s", s); };
     if (gLog) notch::Notch::registroScaffale = [](const char* fase, unsigned long esito) { logf("scaffale: %s [0x%lx]", fase, esito); };
@@ -4940,6 +5109,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (gDockOk) gDock.ilNotch().avviso(t, s, v, a);
     };
     gImpostazioni.cambiato = applicaImpostazioni;
+    gImpostazioni.cursoreDockCambiato = applicaCursoriDock;
     gImpostazioni.copiaDiagnostica = copiaDiagnostica;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     // (senza rettangolo: dal menu del dock, crescono dal punto del clic)
@@ -4947,6 +5117,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.esci = [] { logf("esci dalle impostazioni"); PostQuitMessage(0); };
     gDock.impostazioni = [](const RECT* da) { gImpostazioni.apri(da, da == nullptr); };
     gDock.riavvia = [] { riavvia("richiesto dall'utente"); };
+    gDock.mostraPaginaImpostazioni = [](HWND h, LONG larghezza) { gImpostazioni.apri(nullptr, false, h, larghezza); };
+    gDock.adattaPaginaImpostazioni = [] { gImpostazioni.adattaAlDock(); };
+    gDock.dipingiImpostazioni = [](ID2D1RenderTarget* rt, ID2D1SolidColorBrush* pen, bool scuro) {
+        gImpostazioni.dipingiNelDock(rt,pen,scuro);
+    };
+    gDock.ingressoImpostazioni = [] { return gImpostazioni.ingressoDock(); };
+    gImpostazioni.aggiornaDock = [] { gDock.aggiornaPaginaImpostazioni(); };
+    gDock.staccaPaginaImpostazioni = [] { gImpostazioni.staccaDalDock(); };
+    gImpostazioni.ritornoIntegrato = [] { gDock.tornaAiComandi(); };
     gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
     gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };

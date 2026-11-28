@@ -44,8 +44,12 @@ inline auto Motore::pannelloDaDisegnare() const -> bool {
     return (pannelloTipo != P_NESSUNO && (pDirty || pAnimazione)) || (altra.pannelloTipo != P_NESSUNO && (altra.pDirty || altra.pAnimazione));
 }
 
-inline auto Motore::creaPannello(HINSTANCE inst) -> bool {
+inline auto Motore::creaPannello(HINSTANCE inst, bool principale) -> bool {
     PWMAX = std::ceil(336 * dpi); PHMAX = std::ceil(760 * dpi);
+    if (principale) {
+        const int larghezzaMonitor = schermo.right - schermo.left;
+        larghezzaSuperficieCentro = std::clamp(larghezzaMonitor, (int)PWMAX, (int)D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION);
+    }
     WNDCLASSW wp{}; wp.lpfnWndProc = procPannello; wp.hInstance = inst; wp.lpszClassName = L"FluidWin.Pannello";
     wp.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wp);
@@ -60,7 +64,8 @@ inline auto Motore::creaPannello(HINSTANCE inst) -> bool {
     if (SUCCEEDED(hr)) hr = ad->GetParent(__uuidof(IDXGIFactory2), (void**)&fab);
     if (SUCCEEDED(hr)) {
         DXGI_SWAP_CHAIN_DESC1 sd{};
-        sd.Width = (UINT)PWMAX; sd.Height = (UINT)PHMAX; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
+        sd.Width = principale ? larghezzaSuperficieCentro : (UINT)PWMAX;
+        sd.Height = (UINT)PHMAX; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
         sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
         hr = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &scP);
@@ -97,7 +102,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     if (pannelloTipo == tipo && pChiusura) {
         const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
         const double x = 1 - std::pow(1 - k, 1.0 / 4);
-        pT0 = adesso() - x * 0.25;
+        pT0 = adesso() - x * (centroDalDock ? 0.42 : 0.25);
         pChiusura = false; pAnimazione = true; pDirty = true;
         SetForegroundWindow(pannello);
         ordinaSchede(); usa(slot);
@@ -117,6 +122,19 @@ inline auto Motore::apriPannello(int tipo) -> void {
     if (lato == 1) y1 = ic.bottom + stacco;
     else if (verticale()) y1 = std::min((int)ic.bottom + (int)PAD, (int)schermo.bottom - 8);
     phDisponibile = std::max(200 * dpi, (float)(lato == 1 ? schermo.bottom - y1 : y1 - schermo.top) - 12 * dpi);
+    // Dock ai lati (vedi scalaLato): il centro di controllo nasce dal vetro del dock e lo riempie. La scala e' quella
+    // che porta la sua altezza naturale all'altezza del vetro, senza uscire dallo spazio accanto al dock, dalla
+    // superficie del pannello o da SCALA_LATO_MAX (oltre, il resto dell'altezza si divide sopra e sotto)
+    scalaLato = 1;
+    if (tipo == P_CONTROLLO && verticale() && vetro && !IsRectEmpty(&baseVetroCentro)) {
+        centroDalDock = true;   // (serve gia' ad altezzaVista qui sotto; si riassegna uguale piu' avanti)
+        const float naturale = std::max(1.0f, altezzaControllo());
+        const float vetroH = std::min({float(baseVetroCentro.bottom - baseVetroCentro.top), altezzaMassimaP(), PHMAX});
+        const float spazioX = float(lato == 2 ? schermo.right - (ic.right + stacco) : (ic.left - stacco) - schermo.left) - 8 * dpi;
+        const float largMax = std::min(spazioX, float(larghezzaSuperficieCentro));
+        scalaLato = std::clamp(std::min(vetroH / naturale, largMax / PWMAX), 1.0f, SCALA_LATO_MAX);
+        PW = std::round(PWMAX * scalaLato);
+    }
     preparaVista(tipo);
     PH = altezzaVista(tipo);
     phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
@@ -128,15 +146,24 @@ inline auto Motore::apriPannello(int tipo) -> void {
     if (lato == 2) x1 = ic.right + stacco + (int)PW;
     else if (lato == 3) x1 = ic.left - stacco;
     rettPannello = lato == 1 ? RECT{x1 - (int)PW, y1, x1, y1 + (int)PH} : RECT{x1 - (int)PW, y1 - (int)PH, x1, y1};
+    centroDalDock = tipo == P_CONTROLLO && vetro && !IsRectEmpty(&baseVetroCentro);
+    if (centroDalDock) {
+        if (verticale()) {
+            LONG top = (baseVetroCentro.top + baseVetroCentro.bottom - LONG(PH))/2;
+            top = std::clamp(top, schermo.top, std::max(schermo.top, schermo.bottom-LONG(PH)));
+            OffsetRect(&rettPannello, 0, top-rettPannello.top);
+        }
+    }
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
     posizionaPannello(0);
-    ShowWindow(vetroPannello, SW_SHOWNOACTIVATE);
+    ShowWindow(vetroPannello, centroDalDock ? SW_HIDE : SW_SHOWNOACTIVATE);
     ShowWindow(pannello, SW_SHOW);
     if (registro) { char b[120]; snprintf(b, 120, "pannello %d aperto: visibile %d, rett %ld,%ld-%ld,%ld", tipo, (int)IsWindowVisible(pannello), rettPannello.left, rettPannello.top, rettPannello.right, rettPannello.bottom); scrivi(b); }
     // l'altra carta, se e' aperta, va dietro: un po' piu' piccola, se ne vede solo il bordo sinistro
     if (altraAperta) { usa(1 - slot); davanti = false; posObj = 1; gira = false; chiudiAlle = -1; pAnimazione = true; usa(slot); }
     prendiFuoco(pannello);   // (come il launcher: senza il primo piano il controllo di sicurezza lo richiudeva dopo 0,6 s)
     ordinaSchede(); usa(slot);
+    pT0 = adesso();
     pDirty = true;
 }
 
@@ -176,7 +203,15 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_ASHARK) h = altezzaAShark();
     else if (tipo == P_WPLUGIN) h = altezzaWPlugin();
     else h = altezzaControllo();
-    return std::min(h, altezzaMassimaP());
+    h = std::min(h, altezzaMassimaP());
+    // dock ai lati: ogni vista prende tutta l'altezza del vetro del dock (il centro di controllo, ingrandito di
+    // scalaLato, la riempie; le altre si allungano). Prima il pannello restava piu' basso e il vetro unito vuoto
+    if (slotCorrente == 0 && centroDalDock && verticale()) {
+        if (tipo == P_CONTROLLO) h = std::round(altezzaControllo() * scalaLato);
+        const float vetroH = std::min({float(baseVetroCentro.bottom - baseVetroCentro.top), altezzaMassimaP(), PHMAX});
+        h = std::min(std::max(h, vetroH), PHMAX);
+    }
+    return h;
 }
 
 // Passa a un'altra vista dentro la stessa finestra. origine: il punto da cui nasce (quello toccato), in coordinate
@@ -306,23 +341,32 @@ inline auto Motore::controlloCompatto() const -> bool {
 #ifdef PROVA_COMPATTO
     return true;
 #endif
-    return std::round((518 + 52 * righeControllo()) * dpi) > altezzaMassimaP(); }
+    return std::round(controlloNormale.altezza(righeControllo()) * dpi) > altezzaMassimaP(); }
 // luminosita' e batteria: una riga in piu' solo se il monitor si regola e se c'e' una batteria. Le conta anche
 // controlloCompatto. Su uno schermo cosi' basso che nemmeno la versione compatta ci sta con tutte e due (720p al
 // 125%) la luminosita' lascia il posto alla batteria: sul portatile la si regola anche coi tasti
 inline auto Motore::rigaBatteria() const -> bool { return sensori::Sensori::io().batteria >= 0; }
 inline auto Motore::rigaLuminosita() const -> bool {
     if (sis.luminosita < 0) return false;
-    return !rigaBatteria() || std::round((430 + 48 * 2) * dpi) <= altezzaMassimaP();
+    return !rigaBatteria() || std::round(controlloStretto.altezza(2) * dpi) <= altezzaMassimaP();
 }
 inline auto Motore::righeControllo() const -> int { return (rigaLuminosita() ? 1 : 0) + (rigaBatteria() ? 1 : 0); }
 inline auto Motore::altezzaControllo() const -> float {
     const int righe = righeControllo();
-    if (!controlloCompatto()) return std::round((518 + 52 * righe) * dpi);
-    return std::round((430 + 48 * righe) * dpi);
+    if (!controlloCompatto()) return std::round(controlloNormale.altezza(righe) * dpi);
+    return std::round(controlloStretto.altezza(righe) * dpi);
 }
 
 inline auto Motore::nascondiPannello() -> void {
+    if (slotCorrente == 0) extraImpostazioni = velocitaExtraImpostazioni = 0;
+    if (slotCorrente == 0 && paginaImpostazioni) {
+        paginaImpostazioni = false;
+        if (staccaPaginaImpostazioni) staccaPaginaImpostazioni();
+    }
+    if (slotCorrente == 0 && centroDalDock) {
+        centroDalDock = false; aperturaVetroCentro = 0;
+        applicaVetroCentro();
+    }
     if (pannello) ShowWindow(pannello, SW_HIDE);
     if (vetroPannello) ShowWindow(vetroPannello, SW_HIDE);
     if (pannelloTipo != P_NESSUNO) { pannelloChiuso = pannelloTipo; pChiusoT = adesso(); }
@@ -338,8 +382,46 @@ inline auto Motore::nascondiPannello() -> void {
 // k = 0..1 (apertura). Il centro di controllo nasce piccolo sopra la sua pillola e cresce (senza piegarsi), le
 // notifiche entrano da destra. Da carta dietro: un po' piu' piccola e spostata a sinistra (se ne vede il bordo);
 // mentre torna davanti gira larga da sinistra. Il vetro copre esattamente il contenuto trasformato.
+inline auto Motore::allineaPannelloAlDock() -> void {
+    if (IsRectEmpty(&baseVetroCentro)) return;
+    const LONG sinistra = std::max(schermo.left, baseVetroCentro.left);
+    const LONG destra = std::min(schermo.right, baseVetroCentro.right);
+    const LONG massimo = std::min(LONG(larghezzaSuperficieCentro), schermo.right-schermo.left);
+    const LONG larghezza = std::min(massimo, std::max(destra - sinistra, (LONG)PWMAX) + LONG(std::lround(extraImpostazioni)));
+    const LONG x = std::clamp(sinistra + (destra - sinistra - larghezza) / 2,
+                              schermo.left, std::max(schermo.left, schermo.right - larghezza));
+    if (rettPannello.left == x && rettPannello.right == x + larghezza) return;
+    rettPannello.left = metaVetroCentro.left = x;
+    rettPannello.right = metaVetroCentro.right = x + larghezza;
+    PW = float(larghezza);
+    pDirty = true;
+}
+
 inline auto Motore::posizionaPannello(double k) -> void {
+    if (slotCorrente == 0 && centroDalDock) {
+        if (!verticale()) allineaPannelloAlDock();
+        else {
+            LONG w = std::min(LONG(larghezzaSuperficieCentro),LONG(std::round(PWMAX * scalaLato) + std::round(extraImpostazioni)));
+            if (lato == 2) rettPannello.right = std::min(schermo.right,rettPannello.left+w);
+            else rettPannello.left = std::max(schermo.left,rettPannello.right-w);
+            PW = float(rettPannello.right-rettPannello.left);
+        }
+        const RECT& r = rettPannello;
+        metaVetroCentro = r;
+        aperturaVetroCentro = k;
+        applicaVetroCentro();
+        SetWindowPos(pannello, nullptr, r.left, r.top, r.right-r.left, r.bottom-r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        // I comandi restano a grandezza naturale. Entrano quando il vetro li ha raggiunti.
+        const float u = float(std::clamp((k-.64)/.36, 0., 1.));
+        effettoP->SetOpacity(u*u*(3-2*u)*pOpContenuto);
+        visualP->SetTransform(D2D1::Matrix3x2F::Identity());
+        visualP->SetClip(D2D1::RectF(float(std::max(0L,rettVetro.left-r.left)), float(std::max(0L,rettVetro.top-r.top)),
+                                     float(std::max(0L,rettVetro.right-r.left)), float(std::max(0L,rettVetro.bottom-r.top))));
+        dcomp->Commit();
+        return;
+    }
     const RECT& r = rettPannello;
+    visualP->SetClip(static_cast<IDCompositionClip*>(nullptr));
     const float pw = (float)(r.right - r.left), ph = (float)(r.bottom - r.top);
     D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Identity();
     float tx = 0;
@@ -383,7 +465,7 @@ inline auto Motore::renderPannello() -> bool {
         if (x >= 1) pDissolvi = 0;
     } else if (!pChiusura) {
         // (niente rimbalzo oltre 1: il contenuto uscirebbe dalla sua finestra e verrebbe tagliato)
-        const double x = std::clamp((ora - pT0) / 0.25, 0.0, 1.0);
+        const double x = std::clamp((ora - pT0) / (centroDalDock ? 0.42 : 0.25), 0.0, 1.0);
         k = 1 - std::pow(1 - x, 4);
         pAnimazione = x < 1 || posaInMoto;
     } else {
@@ -398,7 +480,10 @@ inline auto Motore::renderPannello() -> bool {
     if (rettPannello.bottom - rettPannello.top != alto) {   // (col dock in alto resta fermo il bordo in alto, sotto il dock)
         if (lato == 1) rettPannello.bottom = rettPannello.top + alto; else rettPannello.top = rettPannello.bottom - alto;
     }
+    if (slotCorrente == 0 && centroDalDock && molla(extraImpostazioni,velocitaExtraImpostazioni,
+            paginaImpostazioni ? extraImpostazioniObiettivo : 0, 230, 1.0, .1)) pAnimazione = true;
     posizionaPannello(k); pK = k;
+    if (paginaImpostazioni && slotCorrente == 0 && adattaPaginaImpostazioni) adattaPaginaImpostazioni();
 
     // cambio di vista in corso: 0..1
     double e = 1;
@@ -425,10 +510,18 @@ inline auto Motore::renderPannello() -> bool {
     dc->BeginDraw();
     dc->Clear(D2D1::ColorF(0, 0, 0, 0));
     const float hv = (float)phVis;
-    disegnaFondo({0.5f, 0.5f, PW - 0.5f, hv - 0.5f}, scuro);
+    if (!centroDalDock) disegnaFondo({0.5f, 0.5f, PW - 0.5f, hv - 0.5f}, scuro);
     elementi.clear();
     dc->PushAxisAlignedClip({0, 0, PW, hv}, D2D1_ANTIALIAS_MODE_ALIASED);
-    if (tVista < 0) disegnaVista(pannelloTipo, PH, scuro, ink, D2D1::Matrix3x2F::Identity());
+    if (paginaImpostazioni && slotCorrente == 0 && dipingiImpostazioni) {
+        // (opacita' che segue l'allargamento; senza spazio per allargarsi le impostazioni compaiono subito)
+        const float u = extraImpostazioniObiettivo > 1 ? std::clamp(float(extraImpostazioni) / extraImpostazioniObiettivo, 0.f, 1.f) : 1.f;
+        dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                      D2D1::IdentityMatrix(),u),nullptr);
+        dipingiImpostazioni(dc,pennello,coloreAuto ? scuro : fondoScuro);
+        dc->PopLayer();
+    }
+    else if (tVista < 0) disegnaVista(pannelloTipo, PH, scuro, ink, D2D1::Matrix3x2F::Identity());
     else {
         // Cambio di vista: il pulsante toccato cresce davvero e diventa il pannello. Un solo movimento da seguire con
         // l'occhio: la vista di prima se ne va subito (solo dissolvenza), il cerchio del pulsante si allarga fino ai
@@ -452,7 +545,7 @@ inline auto Motore::renderPannello() -> bool {
         const float g = liscio(tratto01(u, 0.0f, 0.62f));
         // da dove nasce: il pulsante tondo toccato, oppure (mixer) la riga "Uscita", che si allarga senza simbolo
         const bool daRiga = interna == P_MIXER;
-        const float r0 = daRiga ? 6 * dpi : (controlloCompatto() ? 22 : 26) * dpi, rf = std::max(6.0f, raggio::vetro() - 6.0f) * dpi;
+        const float r0 = daRiga ? 6 * dpi : (controlloCompatto() ? controlloStretto : controlloNormale).raggioScorciatoia * dpi, rf = std::max(6.0f, raggio::vetro() - 6.0f) * dpi;
         const D2D1_RECT_F da = daRiga ? D2D1_RECT_F{8 * dpi, o.y - 18 * dpi, PW - 8 * dpi, o.y + 18 * dpi} : D2D1_RECT_F{o.x - r0, o.y - r0, o.x + r0, o.y + r0};
         const D2D1_RECT_F a2 = {6 * dpi, 6 * dpi, PW - 6 * dpi, hv - 6 * dpi};
         const D2D1_RECT_F rc = {da.left + (a2.left - da.left) * g, da.top + (a2.top - da.top) * g, da.right + (a2.right - da.right) * g, da.bottom + (a2.bottom - da.bottom) * g};
@@ -503,7 +596,26 @@ inline auto Motore::renderPannello() -> bool {
 inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink, const D2D1::Matrix3x2F& t) -> void {
     const float phSalvato = PH;
     PH = h; baseVista = t; dc->SetTransform(t);
-    if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
+    const float s = (slotCorrente == 0 && centroDalDock) ? scalaLato : 1.0f;
+    if (tipo == P_CONTROLLO && s > 1.001f) {
+        // Dock ai lati: il centro di controllo disegnato alla sua misura naturale e ingrandito di s (testi e simboli
+        // restano nitidi: Direct2D li disegna gia' scalati). Se l'altezza avanza (s al massimo) si divide sopra e sotto.
+        // Le zone dei clic si portano nella stessa scala, cosi' clic, trascinamenti e cursori tornano
+        const float pwVero = PW, naturale = altezzaControllo();
+        const D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Scale(s, s);
+        PW = pwVero / s; PH = h / s;
+        riempiControllo = std::max(0.0f, std::floor(PH - naturale));
+        baseVista = m * t; dc->SetTransform(baseVista);
+        const size_t n = elementi.size();
+        disegnaControllo(scuro, ink);
+        riempiControllo = 0;
+        for (size_t i = n; i < elementi.size(); i++) {
+            D2D1_RECT_F& r = elementi[i].r;
+            r = {r.left * s, r.top * s, r.right * s, r.bottom * s};
+        }
+        PW = pwVero;
+    }
+    else if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
     else if (tipo == P_AI) disegnaAI(scuro, ink);
     else if (tipo == P_LOGI) disegnaLogi(scuro, ink);
     else if (tipo == P_ASHARK) disegnaAShark(scuro, ink);
@@ -2465,10 +2577,12 @@ inline auto Motore::disegnaWPlugin(bool scuro, D2D1_COLOR_F ink) -> void {
 // "Centro di controllo": rete, Bluetooth, volume a capsula, uscita audio, scorciatoie
 inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // schermi bassi (portatili 1280x720 al 125%...): versione compatta, stesse cose un po' piu' basse
-    const bool cp = controlloCompatto();
-    const float th = (cp ? 52 : 64) * dpi, tg = (cp ? 8 : 10) * dpi, sh = (cp ? 40 : 44) * dpi;
-    const float m = (cp ? 12 : 16) * dpi, larg = PW - 2 * (16 * dpi), mezzo = (larg - 10 * dpi) / 2;
-    float y = m;
+    const auto& misure = controlloCompatto() ? controlloStretto : controlloNormale;
+    const float th = misure.tessera * dpi, tg = misure.spazioRiga * dpi, sh = misure.cursore * dpi;
+    const float m = 12 * dpi, larg = PW - 2 * (16 * dpi), mezzo = (larg - 10 * dpi) / 2;
+    // dock ai lati: l'altezza che avanza si divide fra i gruppi (piu' aria sopra e fra le sezioni, vedi riempiControllo)
+    const float ex = riempiControllo;
+    float y = m + ex * 0.16f;
     // Wi-Fi: interruttore vero se c'e' la scheda; senza (PC col cavo) lo stato della rete, e il clic apre le impostazioni
     const int wf = sis.wifi, bt = sis.bluetooth;
     if (wf >= 0) piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, wf == 1, L"Wi-Fi",
@@ -2538,7 +2652,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     }
 
     // volume: capsula riempita di bianco come su iOS; si trascina, la rotella regola, l'altoparlante disattiva
-    y += th + (cp ? 10 : 14) * dpi;
+    y += th + 12 * dpi + ex * 0.24f;
     const D2D1_RECT_F rv = {16 * dpi, y, PW - 16 * dpi, y + sh};
     const float rr = sh / 2, v = (audioOk && !muto) ? volume : 0.0f;
     aggiungi(rv, A_VOLUME, 0);
@@ -2562,7 +2676,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // luminosita' del monitor (solo se si puo' regolare via DDC/CI)
     const int lum = sis.luminosita;
     if (rigaLuminosita()) {
-        y += sh + 8 * dpi;
+        y += sh + 6 * dpi;
         const D2D1_RECT_F rl = {16 * dpi, y, PW - 16 * dpi, y + sh};
         const float vl = lum / 100.0f;
         aggiungi(rl, A_LUMINOSITA, 0);
@@ -2582,7 +2696,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // batteria (portatili): carica, se si sta caricando e quanto manca. Riempita come il volume: verde in carica,
     // rossa sotto il 20% a batteria, bianca altrimenti. Il clic apre Alimentazione e batteria di Windows
     if (const sensori::Sensori& se = sensori::Sensori::io(); rigaBatteria()) {
-        y += sh + 8 * dpi;
+        y += sh + 6 * dpi;
         const D2D1_RECT_F rb = {16 * dpi, y, PW - 16 * dpi, y + sh};
         const float vb = std::clamp(se.batteria / 100.0f, 0.0f, 1.0f), riempito = larg * vb;
         aggiungi(rb, A_ENERGIA, 0);
@@ -2648,22 +2762,33 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     }
 
     // uscita audio
-    y += sh + (cp ? 4 : 8) * dpi;
-    const D2D1_RECT_F ru = {8 * dpi, y, PW - 8 * dpi, y + 36 * dpi};
+    y += sh + 6 * dpi + ex * 0.22f;
+    const D2D1_RECT_F ru = {8 * dpi, y, PW * .52f, y + 32 * dpi};
     evidenzia(aggiungi(ru, A_AUDIO, 0), ru, scuro, 6 * dpi);
     pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.62f});
-    scrivi(testi::t(L"Uscita", L"Output"), fmtSotto, {16 * dpi, y, 76 * dpi, y + 36 * dpi});
+    scrivi(testi::t(L"Uscita", L"Output"), fmtSotto, {16 * dpi, y, 76 * dpi, y + 32 * dpi});
     pennello->SetColor(ink);
-    scrivi(nomeUscita.empty() ? std::wstring(testi::t(L"Nessun dispositivo", L"No device")) : nomeUscita, fmtVoce, {68 * dpi, y, PW - 36 * dpi, y + 36 * dpi});
-    chevronDestra(PW - 20 * dpi, y + 18 * dpi);
+    scrivi(nomeUscita.empty() ? std::wstring(testi::t(L"Nessun dispositivo", L"No device")) : nomeUscita, fmtVoce, {56 * dpi, y, ru.right - 24 * dpi, ru.bottom});
+    chevronDestra(ru.right - 12 * dpi, y + 16 * dpi);
+    const D2D1_RECT_F re = {ru.right + 6*dpi, y, PW - 16*dpi, ru.bottom};
+    const bool risparmio = risparmioEnergiaAttivo();
+    pennello->SetColor(risparmio ? D2D1::ColorF(.1f,.65f,.32f,.30f) :
+                      D2D1::ColorF(ink.r,ink.g,ink.b,.08f));
+    dc->FillRoundedRectangle({re,8*dpi,8*dpi},pennello);
+    evidenzia(aggiungi(re, A_RISPARMIO, 0),re,scuro,8*dpi);
+    const auto testoEnergia = risparmio ? L"Risparmio energia ✓" : L"Risparmio energia";
+    const auto testoEnergy = risparmio ? L"Energy saver ✓" : L"Energy saver";
+    pennello->SetColor(ink);
+    scrivi(testi::t(testoEnergia,testoEnergy),fmtNome,re);
 
     // scorciatoie tonde
-    y += 36 * dpi + (cp ? 8 : 16) * dpi;
+    y += 32 * dpi + 10 * dpi + ex * 0.22f;
     const wchar_t* nomi[4] = {testi::t(L"Widget", L"Widget"), testi::t(L"In background", L"In background"), testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
     const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_APPUNTI};
+    const float mezzaCella = larg / 8;
     for (int i = 0; i < 4; i++) {
-        const float rc = (cp ? 22 : 26) * dpi, cx = 16 * dpi + larg * (i + 0.5f) / 4, cy = y + rc;
-        const D2D1_RECT_F r = {cx - 36 * dpi, y - 4 * dpi, cx + 36 * dpi, y + 76 * dpi};
+        const float rc = misure.raggioScorciatoia * dpi, cx = 16 * dpi + larg * (i + 0.5f) / 4, cy = y + rc;
+        const D2D1_RECT_F r = {cx - mezzaCella + 4 * dpi, y - 4 * dpi, cx + mezzaCella - 4 * dpi, cy + rc + 22 * dpi};
         const int e = aggiungi(r, az[i], 0);
         const double h = evidenzia(e, {0, 0, 0, 0}, scuro, 0);   // solo il valore: l'evidenziazione e' il cerchio
         const float s = (e == pPremuto) ? 0.9f : 1.0f;
@@ -2672,7 +2797,8 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         pennello->SetColor(ink);
         if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloCampana(cx, cy); else simboloAppunti(cx, cy);
         pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.75f});
-        scrivi(nomi[i], fmtNome, {cx - 40 * dpi, cy + rc + 4 * dpi, cx + 40 * dpi, cy + rc + 22 * dpi});
+        // (il nome usa tutta la cella, senza il margine della zona: "In background" finiva coi puntini)
+        scrivi(nomi[i], fmtNome, {cx - mezzaCella, cy + rc + 4 * dpi, cx + mezzaCella, r.bottom});
     }
 }
 
@@ -3140,11 +3266,11 @@ inline auto Motore::simboloEnergia(float cx, float cy) -> void {
 }
 
 inline auto Motore::simboloIngranaggio(float cx, float cy) -> void {
-    dc->DrawEllipse({{cx, cy}, 5.6f * dpi, 5.6f * dpi}, pennello, 2.2f * dpi);
-    dc->DrawEllipse({{cx, cy}, 2.0f * dpi, 2.0f * dpi}, pennello, 1.4f * dpi);
-    for (int i = 0; i < 8; i++) {
-        const float a = i * (float)M_PI / 4 + (float)M_PI / 8, c = std::cos(a), s = std::sin(a);
-        linea(c * 6.6f, s * 6.6f, c * 8.6f, s * 8.6f, cx, cy, 2.6f);
+    dc->DrawEllipse({{cx, cy}, 3.15f * dpi, 3.15f * dpi}, pennello, 1.9f * dpi);
+    for (int i = 0; i < 6; ++i) {
+        const float a = (i + .5f) * float(M_PI) / 3;
+        const float x = std::cos(a), y = std::sin(a);
+        linea(x * 3.55f, y * 3.55f, x * 4.95f, y * 4.95f, cx, cy, 1.65f);
     }
 }
 
@@ -3874,8 +4000,21 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             aggiornaTemaVetri(); dirty = true; pDirty = true;
             break;
         case A_FLUIDWIN: {   // le impostazioni crescono dal vetro del pannello (il contenuto qui svanisce sul posto)
-            RECT r{};
-            const bool da = impostazioni && GetWindowRect(vetroPannello, &r) && !IsRectEmpty(&r);
+            if (centroDalDock && mostraPaginaImpostazioni) {
+                paginaImpostazioni = true;
+                pDirty = pAnimazione = true;
+                const LONG spazio = lato == 2 ? schermo.right - rettPannello.left :
+                                   lato == 3 ? rettPannello.right - schermo.left : schermo.right - schermo.left;
+                // Larghezza: quanto basta perche' le impostazioni stiano alla loro misura (vedi Finestra::apri in
+                // impostazioni.h: sotto ~640 px a 100% rimpicciolivano testi e controlli, al 76% col pannello largo 472)
+                const LONG obiettivo = LONG(std::lround(std::max(PW + larghezzaExtraImpostazioni * dpi, LARGHEZZA_IMPOSTAZIONI * dpi)));
+                const LONG larghezzaEspansa = std::min({LONG(larghezzaSuperficieCentro), spazio, obiettivo});
+                extraImpostazioniObiettivo = float(std::max(0L, larghezzaEspansa - LONG(PW)));
+                mostraPaginaImpostazioni(pannello, larghezzaEspansa);
+                break;
+            }
+            RECT r = rettPannello;
+            const bool da = impostazioni && (centroDalDock || GetWindowRect(vetroPannello, &r)) && !IsRectEmpty(&r);
             if (da) cediPannello(); else chiudiPannello();
             if (impostazioni) impostazioni(da ? &r : nullptr);
             break;
@@ -3993,6 +4132,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         }
         case A_SCHERMO:      chiudiPannello(); apriPagina(L"ms-settings:display"); break;
         case A_ENERGIA:      chiudiPannello(); apriPagina(L"ms-settings:powersleep"); break;
+        case A_RISPARMIO:
+            if (!sistema::Sistema::cambiaRisparmioEnergia(!risparmioEnergiaAttivo()))
+                scrivi("risparmio energia: comando diretto non disponibile");
+            break;
         case A_IMPOSTAZIONI: chiudiPannello(); apriPagina(L"ms-settings:"); break;
         case A_NOTIFICA:
             // come toccare una notifica: si apre l'app e la notifica se ne va
@@ -4138,6 +4281,7 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
 }
 
 inline auto Motore::elementoIn(float x, float y) const -> int {
+    if (centroDalDock && (pK < .98 || pChiusura)) return -1;
     if (tVista >= 0) return -1;   // cambio di vista in corso: le zone sono quelle della vista di prima
     for (int i = (int)elementi.size() - 1; i >= 0; i--) {   // gli ultimi aggiunti stanno sopra (es. l'altoparlante sul volume)
         const auto& r = elementi[i].r;
@@ -4153,6 +4297,12 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
     // CreateWindowEx manda gia' dei messaggi) non deve scambiare niente
     if (h == d->altra.pannello) d->usa(1 - d->slotCorrente);
     else if (h != d->pannello) return DefWindowProcW(h, m, w, l);
+    if (d->paginaImpostazioni && d->ingressoImpostazioni &&
+        ((m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) || m == WM_KEYDOWN || m == WM_MOUSELEAVE || m == WM_CAPTURECHANGED)) {
+        if (m == WM_MOUSELEAVE) d->pMouseDentro = false;
+        HWND input = d->ingressoImpostazioni();
+        if (input) return SendMessageW(input,m,w,l);
+    }
     const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
     // carta dietro: un clic la riporta davanti (rimescolando), il resto del mouse non le arriva
     if (!d->davanti && d->pannelloTipo != P_NESSUNO && !d->pChiusura && m >= WM_MOUSEFIRST && m <= WM_MOUSELAST) {
@@ -4301,6 +4451,7 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
         case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
         // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
         case WM_ACTIVATE:
+            if (d->paginaImpostazioni) return 0;
             if (LOWORD(w) != WA_INACTIVE && h == d->pannello) { d->pFuocoAvuto = true; d->pMenuTray = false; }
             if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) {
                 if (d->pMenuTray) return 0;

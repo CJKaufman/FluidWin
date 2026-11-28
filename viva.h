@@ -122,7 +122,7 @@ public:
 
     // Prende l'ultimo fotogramma arrivato (scarta i piu' vecchi). Se c'e', copia il suo rettangolo src (coordinate
     // del fotogramma) in dst a (dx, dy) e restituisce true. cw/ch: misura del contenuto del fotogramma
-    bool copia(ID3D11DeviceContext* ctx, ID3D11Texture2D* dst, int dx, int dy, const RECT& src, int* cw = nullptr, int* ch = nullptr) {
+    bool copia(ID3D11DeviceContext* ctx, ID3D11Texture2D* dst, int dx, int dy, const RECT& src, int* cw = nullptr, int* ch = nullptr, bool intera = false) {
         if (!attiva() || !pool) return false;
         WGC::IDirect3D11CaptureFrame* ultimo = nullptr;
         for (int i = 0; i < 4; i++) {
@@ -147,7 +147,7 @@ public:
                     // solo la parte che c'e' davvero (il fotogramma puo' essere piu' piccolo del pool)
                     const LONG r = std::min<LONG>(src.right, std::min<LONG>((LONG)d.Width, dim.Width));
                     const LONG b = std::min<LONG>(src.bottom, std::min<LONG>((LONG)d.Height, dim.Height));
-                    if (r > src.left && b > src.top) {
+                    if (r > src.left && b > src.top && (!intera || (r == src.right && b == src.bottom))) {
                         D3D11_BOX box{(UINT)src.left, (UINT)src.top, 0, (UINT)r, (UINT)b, 1};
                         ctx->CopySubresourceRegion(dst, 0, (UINT)dx, (UINT)dy, 0, t, 0, &box);
                         fatto = true;
