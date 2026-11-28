@@ -527,6 +527,7 @@ private:
                 if (alt.online && alt.connessione == L"USB") haUsbOnline = true;
                 if (!kb.online && alt.online) { skip = true; break; }
                 if (kb.batteria < 0 && alt.online && alt.batteria >= 0) { skip = true; break; }
+                if (kb.batteria < 0 && kb.connessione != L"USB" && alt.online && alt.connessione == L"USB") { skip = true; break; }
             }
             if (!skip) {
                 Dispositivo d = kb;
