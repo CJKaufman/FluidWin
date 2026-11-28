@@ -14,6 +14,14 @@ exactly to how it was.
   <img src="docs/gif/genio.gif" width="560" alt="A window minimizing into the dock and coming back out">
 </p>
 
+## What's next
+
+- **1.5.0 will bring no new features.** It will be entirely about going very deep into FluidWin to fix as many bugs
+  as possible, to make it as light and fast as possible on every kind of PC, including less powerful ones, and to make
+  it rock-solid and efficient.
+- **1.6.0 will bring in the pull requests that @CJKaufman has sent**, such as the games launcher, the widgets tab and
+  the clipboard flyout, once 1.5.0 has made the ground solid.
+
 ## What it does
 
 ### The dock
@@ -122,14 +130,6 @@ language (eight of them), the shape of the corners, how the dock glass looks, an
 </p>
 
 ...and a lot more.
-
-## What's next
-
-- **1.5.0 will bring no new features.** It will be entirely about going very deep into FluidWin to fix as many bugs
-  as possible, to make it as light and fast as possible on every kind of PC, including less powerful ones, and to make
-  it rock-solid and efficient.
-- **1.6.0 will bring in the pull requests that @CJKaufman has sent**, such as the games launcher, the widgets tab and
-  the clipboard flyout, once 1.5.0 has made the ground solid.
 
 ## What's new in 1.4.0
 
