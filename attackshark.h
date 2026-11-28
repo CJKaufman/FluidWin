@@ -448,10 +448,23 @@ inline bool leggiLedRK86(LedStato& out) {
             out.velocita = std::clamp(5 - (int)resp[3], 0, 4);
             out.luminosita = std::clamp((int)resp[4], 0, 4);
             out.optFlags = resp[5];
-            out.arcobaleno = (resp[5] & 0x80) != 0;
-            out.r = resp[6];
-            out.g = resp[7];
-            out.b = resp[8];
+            const BYTE low = resp[5] & 0x0F;
+            out.arcobaleno = (low == 8);  // DAZZLE = 8, NORMAL (custom RGB) = 7
+            static constexpr uint32_t COMMON_COLOR[7] = {
+                0xFF0000, 0xFF8000, 0xFFFF00, 0x00FF00, 0x00FFFF, 0x0000FF, 0xFF00FF
+            };
+            if (low < 7) {
+                out.r = (BYTE)((COMMON_COLOR[low] >> 16) & 0xFF);
+                out.g = (BYTE)((COMMON_COLOR[low] >> 8) & 0xFF);
+                out.b = (BYTE)(COMMON_COLOR[low] & 0xFF);
+            } else {
+                out.r = resp[6];
+                out.g = resp[7];
+                out.b = resp[8];
+            }
+            if (out.r == 250 && out.g == 250 && out.b == 250) {
+                out.r = out.g = out.b = 255;
+            }
             ok = true;
         }
     }
@@ -473,7 +486,7 @@ inline bool impostaLedRK86(const LedStato& s) {
     rep[2] = (BYTE)std::clamp(s.modo, 0, 255);
     rep[3] = (BYTE)std::clamp(5 - s.velocita, 1, 5);
     rep[4] = (BYTE)std::clamp(s.luminosita, 0, 4);
-    rep[5] = s.arcobaleno ? 0x87 : 0x06;
+    rep[5] = s.arcobaleno ? 0x08 : 0x07;  // DAZZLE = 8, NORMAL (custom RGB) = 7
     BYTE rr = s.r, gg = s.g, bb = s.b;
     if (rr == 255 && gg == 255 && bb == 255) {
         rr = 250;
