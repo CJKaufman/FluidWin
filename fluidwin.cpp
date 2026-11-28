@@ -41,6 +41,7 @@
 #include "destro.h"
 #include "aggiorna.h"
 #include "affianca.h"
+#include "attackshark_ui.h"
 
 // ---------------------------------------------------------------------------------------------
 // Parametri
@@ -3944,6 +3945,7 @@ static void altTabVeloce() {
 static ricerca::Ricerca gRicerca;
 static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
+static attackshark_ui::Finestra gASharkUI;
 
 // ---------------------------------------------------------------------------------------------
 // Diagnostica da copiare (Impostazioni > Generale): quello che serve per capire un problema su un altro PC, senza dati
@@ -4066,6 +4068,7 @@ static void applicaImpostazioni() {
     if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime); gDock.impostaAI(v.dockAI); gDock.impostaLogi(v.dockLogi); gDock.impostaLogiAnimCarica(v.logiAnimCarica); gDock.impostaLogiGlowColore(v.logiGlowColore);
                    gDock.impostaAShark(v.dockAShark); gDock.impostaASharkAnimCarica(v.aSharkAnimCarica); gDock.impostaASharkGlowColore(v.aSharkGlowColore);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
+    gASharkUI.aggiornaTema();
     // Arabo acceso o spento: i formati di testo prendono la direzione (da destra a sinistra) quando nascono, e molti
     // vivono quanto FluidWin. Riavviare e' il modo sicuro di rifarli tutti
 
@@ -4843,6 +4846,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     };
     gImpostazioni.apriGHub = [] { logitech::apriGHub(); };
     gImpostazioni.apriAShark = [] { attackshark::apriSoftware(); };
+    gDock.apriControlloRK86 = [](const std::wstring& st) { gASharkUI.apri(st); };
     gImpostazioni.dettagliWPlugin = [](const std::wstring& id, wplugin::Widget& out) {
         return gDockOk && gDock.widgetWPlugin(id, out);
     };
@@ -4940,6 +4944,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     condividi::ferma();   // annulla la preparazione dei file senza aspettare prima di ripristinare Windows
     cursori::togli();   // di nuovo i cursori di Windows
     if (gDockOk) gDock.chiudi();
+    gASharkUI.chiudi();
     gBanner.chiudiLettore();
     togliPrimoPiano();
     appunti::Cronologia::io().ferma();

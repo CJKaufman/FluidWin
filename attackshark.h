@@ -37,6 +37,16 @@ struct Riepilogo {
     std::vector<Dispositivo> dispositivi;
 };
 
+struct LedStato {
+    bool valido = false;
+    int modo = 1;           // 0..8
+    int velocita = 2;       // UI 0..4 (wire 5..1)
+    int luminosita = 4;     // 0..4
+    uint8_t optFlags = 0x06;
+    uint8_t r = 255, g = 0, b = 234;
+    bool arcobaleno = false;
+};
+
 inline void apriSoftware() {
     static constexpr const wchar_t* CANDIDATI[] = {
         L"C:\\Program Files (x86)\\Attack Shark Software\\AttackShark.exe",
@@ -50,6 +60,10 @@ inline void apriSoftware() {
         }
     }
     ShellExecuteW(nullptr, L"open", L"https://attackshark.com", nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+inline void apriGearHub() {
+    ShellExecuteW(nullptr, L"open", L"https://qmk.top/v4/", nullptr, nullptr, SW_SHOWNORMAL);
 }
 
 namespace dettagli {
@@ -238,17 +252,15 @@ struct TrovatiHid {
     std::vector<TastieraCol> tastiere;
 };
 
-inline TrovatiHid enumeraDispositivi(const HidApi& hid) {
-    TrovatiHid res;
+template <typename Fn>
+inline void visitaHid(const HidApi& hid, Fn&& fn) {
     GUID hidGuid{};
     hid.getHidGuid(&hidGuid);
     HDEVINFO devs = SetupDiGetClassDevsW(&hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (devs == INVALID_HANDLE_VALUE) return res;
+    if (devs == INVALID_HANDLE_VALUE) return;
 
     SP_DEVICE_INTERFACE_DATA ifData{};
     ifData.cbSize = sizeof(ifData);
-    std::map<uint16_t, TrovatiHid::TastieraCol> kbPerPid;
-
     for (DWORD i = 0; SetupDiEnumDeviceInterfaces(devs, nullptr, &hidGuid, i, &ifData); i++) {
         DWORD reqSize = 0;
         SetupDiGetDeviceInterfaceDetailW(devs, &ifData, nullptr, 0, &reqSize, nullptr);
@@ -261,13 +273,24 @@ inline TrovatiHid enumeraDispositivi(const HidApi& hid) {
 
         const std::wstring path = detail->DevicePath;
         const std::wstring low = minuscolo(path);
+        if (!fn(path, low)) break;
+    }
+
+    SetupDiDestroyDeviceInfoList(devs);
+}
+
+inline TrovatiHid enumeraDispositivi(const HidApi& hid) {
+    TrovatiHid res;
+    std::map<uint16_t, TrovatiHid::TastieraCol> kbPerPid;
+
+    visitaHid(hid, [&](const std::wstring& path, const std::wstring& low) {
         const bool candMouse = low.find(L"vid_1d57") != std::wstring::npos;
         const bool candKb = low.find(L"vid_3151") != std::wstring::npos;
-        if (!candMouse && !candKb) continue;
+        if (!candMouse && !candKb) return true;
 
         uint16_t vid = 0, pid = 0;
         HidCaps caps{};
-        if (!leggiInfoHid(hid, path, vid, pid, caps)) continue;
+        if (!leggiInfoHid(hid, path, vid, pid, caps)) return true;
 
         if (vid == VID_BEKEN && pid == PID_ASHARK_MOUSE &&
             caps.UsagePage == 0x000A && caps.InputReportByteLength >= 5 && !res.haMouse) {
@@ -287,15 +310,53 @@ inline TrovatiHid enumeraDispositivi(const HidApi& hid) {
                 entry.inLen = caps.InputReportByteLength;
             }
         }
-    }
+        return true;
+    });
 
-    SetupDiDestroyDeviceInfoList(devs);
     for (auto& [pid, entry] : kbPerPid) {
         if (!entry.featPath.empty() && !entry.inPath.empty()) {
             res.tastiere.push_back(std::move(entry));
         }
     }
     return res;
+}
+
+inline HANDLE apriFeatTastiera(const HidApi& hid, USHORT& featLen) {
+    featLen = 0;
+    struct Cand {
+        std::wstring path;
+        USHORT len = 0;
+    };
+    Cand perPid[3]{};  // 0: 0x4015 wired, 1: 0x4011 2.4G A, 2: 0x4010 2.4G B
+
+    visitaHid(hid, [&](const std::wstring& path, const std::wstring& low) {
+        if (low.find(L"vid_3151") == std::wstring::npos) return true;
+        uint16_t vid = 0, pid = 0;
+        HidCaps caps{};
+        if (!leggiInfoHid(hid, path, vid, pid, caps)) return true;
+        if (vid != VID_ROYUAN || caps.UsagePage != 0xFFFF || caps.Usage != 0x0002 ||
+            caps.FeatureReportByteLength < 64) {
+            return true;
+        }
+        int idx = -1;
+        if (pid == PID_RK86_WIRED) idx = 0;
+        else if (pid == PID_RK86_24G_A) idx = 1;
+        else if (pid == PID_RK86_24G_B) idx = 2;
+        if (idx >= 0 && perPid[idx].path.empty()) {
+            perPid[idx] = {path, caps.FeatureReportByteLength};
+        }
+        return true;
+    });
+
+    for (const Cand& c : perPid) {
+        if (c.path.empty()) continue;
+        HANDLE h = apriHidConRipiego(c.path, false, false);
+        if (h != INVALID_HANDLE_VALUE) {
+            featLen = c.len;
+            return h;
+        }
+    }
+    return INVALID_HANDLE_VALUE;
 }
 
 struct StatoTastieraCache {
@@ -361,6 +422,75 @@ inline bool interrogaTastiera(const HidApi& hid, const TrovatiHid::TastieraCol& 
 }
 
 }  // namespace dettagli
+
+inline bool leggiLedRK86(LedStato& out) {
+    out.valido = false;
+    dettagli::HidApi hid;
+    if (!hid.carica()) return false;
+    USHORT featLen = 0;
+    HANDLE h = dettagli::apriFeatTastiera(hid, featLen);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    const ULONG len = std::max<ULONG>(64, featLen);
+    std::vector<BYTE> rep(len, 0);
+    rep[0] = 0x00;
+    rep[1] = 0x87;
+    rep[8] = (BYTE)(0xFF - 0x87);
+
+    bool ok = false;
+    if (hid.setFeature(h, rep.data(), len)) {
+        Sleep(50);
+        std::vector<BYTE> resp(len, 0);
+        resp[0] = 0x00;
+        if (hid.getFeature(h, resp.data(), len) && resp.size() >= 9 && resp[1] == 0x87) {
+            out.valido = true;
+            out.modo = (int)resp[2];
+            out.velocita = std::clamp(5 - (int)resp[3], 0, 4);
+            out.luminosita = std::clamp((int)resp[4], 0, 4);
+            out.optFlags = resp[5];
+            out.arcobaleno = (resp[5] & 0x80) != 0;
+            out.r = resp[6];
+            out.g = resp[7];
+            out.b = resp[8];
+            ok = true;
+        }
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+inline bool impostaLedRK86(const LedStato& s) {
+    dettagli::HidApi hid;
+    if (!hid.carica()) return false;
+    USHORT featLen = 0;
+    HANDLE h = dettagli::apriFeatTastiera(hid, featLen);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    const ULONG len = std::max<ULONG>(64, featLen);
+    std::vector<BYTE> rep(len, 0);
+    rep[0] = 0x00;
+    rep[1] = 0x07;
+    rep[2] = (BYTE)std::clamp(s.modo, 0, 255);
+    rep[3] = (BYTE)std::clamp(5 - s.velocita, 1, 5);
+    rep[4] = (BYTE)std::clamp(s.luminosita, 0, 4);
+    rep[5] = s.arcobaleno ? 0x87 : 0x06;
+    BYTE rr = s.r, gg = s.g, bb = s.b;
+    if (rr == 255 && gg == 255 && bb == 255) {
+        rr = 250;
+        gg = 250;
+        bb = 250;
+    }
+    rep[6] = rr;
+    rep[7] = gg;
+    rep[8] = bb;
+    const unsigned sum = (unsigned)rep[1] + rep[2] + rep[3] + rep[4] +
+                         rep[5] + rep[6] + rep[7] + rep[8];
+    rep[9] = (BYTE)(0xFF - (sum & 0xFF));
+
+    const bool ok = hid.setFeature(h, rep.data(), len) != FALSE;
+    CloseHandle(h);
+    return ok;
+}
 
 class Monitor {
 public:
@@ -527,6 +657,7 @@ private:
                 if (alt.online && alt.connessione == L"USB") haUsbOnline = true;
                 if (!kb.online && alt.online) { skip = true; break; }
                 if (kb.batteria < 0 && alt.online && alt.batteria >= 0) { skip = true; break; }
+                if (kb.batteria < 0 && kb.connessione != L"USB" && alt.online && alt.connessione == L"USB") { skip = true; break; }
             }
             if (!skip) {
                 Dispositivo d = kb;
