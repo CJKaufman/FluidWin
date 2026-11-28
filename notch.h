@@ -374,6 +374,13 @@ private:
         if (!abilitato) {
             if (s == SCAFFALE && scaffale.empty()) { w = 196 * d; h = 32 * d; }
             if (s == VOLUME) { w = 200 * d; h = 28 * d; }   // (prima 216: compatto, vedi volumeScena)
+            // notifica: larga quanto icona e testo, con lo stesso margine ai due lati (issue #40: con un testo corto
+            // restava molto vuoto a destra). Fra 240 e 372
+            if (s == NOTIFICA && fTitolo && fTesto && fPiccolo) {
+                const std::wstring app = nApp.empty() ? std::wstring(testi::t(L"Notifica", L"Notification")) : nApp;
+                const float testo = std::max({larghezza(app, fPiccolo) + 26 * d, larghezza(nTitolo, fTitolo), larghezza(nTesto, fTesto)});
+                w = std::clamp((NOT_MARGINE + NOT_ICONA + NOT_SPAZIO + NOT_DESTRA) * d + testo, 240 * d, 372 * d);
+            }
             if (s == AVVISO && simboloAvviso != sensori::S_PUNTINA) { w = std::min(w, 316 * d); h = 28 * d; }
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
@@ -739,10 +746,12 @@ private:
                 // marea (volume, alimentazione): fondo piatto largo quanto i contenuti e ali corte, come un angolo che
                 // si raccorda al bordo; prima il fondo era il 39% della misura e le ali larghe 43 px (forma a trapezio
                 // con i contenuti sopra le ali)
-                const bool marea = stile == MAREA;
+                // Notifica (1.4.0, issue #40): stessa forma pulita, con l'angolo un po' piu' largo perche' e' piu' alta
+                // (78 px). Prima: fondo al 48% e ali di 70 px, a trapezio, con molto vuoto ai lati del testo
+                const bool marea = stile == MAREA || notificaGrande;
                 // (marea: il fondo piatto comincia 8 px dentro, la curva ne prende 26: angolo tondo, contenuti fuori)
-                const float piano = marea ? w * 0.5f - 8 * dpi : w * (pieno || notificaGrande ? 0.48f : 0.39f);
-                const float riposo = piano + (pieno ? 85.0f : notificaGrande ? 70.0f : marea ? 26.0f : 43.0f) * dpi;
+                const float piano = marea ? w * 0.5f - (notificaGrande ? 14 : 8) * dpi : w * (pieno ? 0.48f : 0.39f);
+                const float riposo = piano + (pieno ? 85.0f : notificaGrande ? 36.0f : marea ? 26.0f : 43.0f) * dpi;
                 const float fine = std::min(centro - dpi, riposo + (centro - dpi - riposo) * stesa);
                 const float ala = std::max(dpi, fine - piano);
                 const float fase = (float)std::clamp((adesso() - tOnda) / DURATA_ECO, 0.0, 1.0);
@@ -1421,11 +1430,34 @@ private:
         scrivi(t, fNumero, {fisso ? L + w - 56 * d : br + 6 * d, 0, destra, h}, a);
     }
 
+    // (vedi misura: larghezza della notifica; a destra 22 come prima, per la x di chiusura)
+    static constexpr float NOT_MARGINE = 20, NOT_ICONA = 40, NOT_SPAZIO = 14, NOT_DESTRA = 22;
     void notificaScena(float L, float w, float h, float a) {
-        const float d = dpi, il = 40 * d, ix = L + 20 * d, iy = (h - il) / 2;
+        const float d = dpi, il = NOT_ICONA * d, ix = L + NOT_MARGINE * d, iy = (h - il) / 2;
         if (bIcona) immagine(bIcona, {ix, iy, ix + il, iy + il}, 9 * d, a);
-        else { colore(1, 1, 1, 0.14f * a); rt->FillRoundedRectangle({{ix, iy, ix + il, iy + il}, 9 * d, 9 * d}, pen); }
-        const float tx = ix + il + 14 * d, tr = L + w - 22 * d;
+        else {
+            // app senza icona leggibile (issue #40: un quadrato grigio vuoto): la sua iniziale nel quadrato
+            colore(1, 1, 1, 0.14f * a); rt->FillRoundedRectangle({{ix, iy, ix + il, iy + il}, 9 * d, 9 * d}, pen);
+            // (il primo carattere visibile, intero: si saltano spazi e segni di direzione invisibili, che le app arabe
+            // mettono in testa al nome, e una coppia surrogata resta intera, R20261128-125521-S2)
+            std::wstring ini;
+            for (size_t k = 0; k < nApp.size(); k++) {
+                const wchar_t c = nApp[k];
+                if (iswspace(c) || c == 0x200E || c == 0x200F || (c >= 0x202A && c <= 0x202E) || (c >= 0x2066 && c <= 0x2069) || c == 0xFEFF || c == 0x200B) continue;
+                if (c >= 0xD800 && c <= 0xDBFF) { if (k + 1 < nApp.size()) ini = nApp.substr(k, 2); }
+                else if (!(c >= 0xDC00 && c <= 0xDFFF)) ini.assign(1, (wchar_t)towupper(c));
+                break;
+            }
+            if (!ini.empty() && fGrande) {
+                const DWRITE_TEXT_ALIGNMENT al = fGrande->GetTextAlignment();
+                fGrande->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                const DWRITE_PARAGRAPH_ALIGNMENT pa = fGrande->GetParagraphAlignment();
+                fGrande->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                scrivi(ini, fGrande, {ix, iy, ix + il, iy + il}, 0.85f * a);
+                fGrande->SetTextAlignment(al); fGrande->SetParagraphAlignment(pa);
+            }
+        }
+        const float tx = ix + il + NOT_SPAZIO * d, tr = L + w - NOT_DESTRA * d;
         scrivi(nApp.empty() ? std::wstring(testi::t(L"Notifica", L"Notification")) : nApp, fPiccolo, {tx, 12 * d, tr - 26 * d, 28 * d}, 0.6f * a);
         scrivi(nTitolo, fTitolo, {tx, 28 * d, tr, 48 * d}, a);
         scrivi(nTesto, fTesto, {tx, 48 * d, tr, 66 * d}, 0.8f * a);

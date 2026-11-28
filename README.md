@@ -123,6 +123,14 @@ language (eight of them), the shape of the corners, how the dock glass looks, an
 
 ...and a lot more.
 
+## What's next
+
+- **1.5.0 will bring no new features.** It will be entirely about going very deep into FluidWin to fix as many bugs
+  as possible, to make it as light and fast as possible on every kind of PC, including less powerful ones, and to make
+  it rock-solid and efficient.
+- **1.6.0 will bring in the pull requests that @CJKaufman has sent**, such as the games launcher, the widgets tab and
+  the clipboard flyout, once 1.5.0 has made the ground solid.
+
 ## What's new in 1.4.0
 
 The dock is now one piece of glass that grows into everything else.
@@ -142,6 +150,11 @@ The dock is now one piece of glass that grows into everything else.
 - **Time and date in the dock** fade in and out smoothly when you turn them on or off.
 - Settings are tidier: nothing is cut off any more (languages, corners, minimize style, long descriptions), and the
   settings icon is easier to read.
+- **Turkish:** FluidWin now speaks eight languages, with a Turkish README too (#30).
+- **Pinned apps:** apps you uninstalled no longer stay in the dock, Store apps pinned in Windows can be hidden, and
+  Windows Settings shows up with its own name and icon and can be added to the dock (#33, PR #37 by @CJKaufman).
+- **Notifications in the hidden notch** are as wide as their text, with a cleaner shape, and apps without an icon show
+  their initial instead of an empty square (#40).
 
 ## What's new in 1.3.1
 

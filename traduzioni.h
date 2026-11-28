@@ -13,6 +13,8 @@ inline constexpr const wchar_t* RIGHE[][7] = {
     {L"Hold Alt and drag the dock to another edge of the screen", L"Mantén Alt y arrastra el dock a otro borde de la pantalla",
      L"Maintenez Alt et faites glisser le dock vers un autre bord de l’écran", L"Alt halten und das Dock an einen anderen Bildschirmrand ziehen",
      L"Segure Alt e arraste o dock para outra borda da tela", L"اضغط Alt مع الاستمرار واسحب الشريط إلى حافة أخرى من الشاشة", L"Alt tuşunu basılı tutup dock'u ekranın başka bir kenarına sürükleyin"},
+    // ---- impostazioni: lingua (PR #30; la riga si era persa unendo la PR alla 1.4.0, R20261128-125521-S3) ----
+    {L"Coming soon", L"Próximamente", L"Bientôt", L"Demnächst", L"Em breve", L"قريبًا", L"Yakında"},
     // ---- aggiornamenti ----
     {L"Open the page", L"Abrir la página", L"Ouvrir la page", L"Seite öffnen", L"Abrir a página", L"فتح الصفحة", L"Sayfayı aç"},
     {L"Close", L"Cerrar", L"Fermer", L"Schließen", L"Fechar", L"إغلاق", L"Kapat"},
